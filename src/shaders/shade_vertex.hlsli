@@ -404,23 +404,7 @@ float ThermalSunVisibilityCorrectionK(uint element, float3 hitPos, inout PathVer
         sunRay.TMin = 0.0;
         sunRay.TMax = 1e10;
 
-        Payload sunPayload=(Payload)0;
-        sunPayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
-        sunPayload.isShadowed = 1;   // cleared by shadow_miss
-        sunPayload.depth = 0;
-        sunPayload.rngState = 0;
-        sunPayload.heroLambda = payload.heroLambda;
-        sunPayload.primaryHitT = -1.0;
-        sunPayload.bsdfPdf = 0.0;
-
-        const FusionMediumContext fusionContext0=SaveFusionMedium();
-    InheritFusionMedium(sunPayload);
-    TraceRay(scene,
-                 RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
-                 0xFF, 0, 0, 1, sunRay, sunPayload);
-    RestoreFusionMedium(fusionContext0);
-
-        const float visible = (sunPayload.isShadowed == 0) ? 1.0 : 0.0;
+        const float visible = QlVisible(sunRay) ? 1.0 : 0.0;
         correction += (visible - response.y) * response.x;
     }
 
@@ -817,7 +801,7 @@ float BsdfMixturePdf(float3 normal, float3 V, float3 wi, float roughness, float 
     return pdf;
 }
 
-// The BRDF that TraceEnvBounceResidual is implicitly sampling, evaluated at an
+// The BRDF that SampleBounce is implicitly sampling, evaluated at an
 // arbitrary direction.
 //
 // Light sampling and BSDF sampling only combine into an unbiased estimator if
@@ -840,7 +824,7 @@ float BsdfMixturePdf(float3 normal, float3 V, float3 wi, float roughness, float 
 //                                        =>  f = F(VdotH) G D / (4 NdotV NdotWi)
 //
 // with F(VdotH) the Schlick lerp from wSpecular0 to wSpecular90, exactly as
-// TraceEnvBounceResidual applies it.
+// SampleBounce applies it.
 //
 // The specular term is gated on qSpec because a surface with qSpec == 0 never
 // samples that lobe, so it is not part of what the bounce estimates and must
@@ -978,22 +962,7 @@ bool LightSampleVisible(float3 hitPos, float3 normal, LightSample s) {
     // Stop short of the emitter, or the emitter itself is the occluder.
     shadowRay.TMax      = s.dist * 0.999;
 
-    Payload shadowPayload=(Payload)0;
-    shadowPayload.radiance    = float4(0.0, 0.0, 0.0, 0.0);
-    shadowPayload.isShadowed  = 1;   // cleared by shadow_miss
-    shadowPayload.depth       = 0;
-    shadowPayload.rngState    = 0;
-    shadowPayload.heroLambda  = 0.0;
-    shadowPayload.primaryHitT = -1.0;
-    shadowPayload.bsdfPdf     = 0.0;
-
-    const FusionMediumContext fusionContext1=SaveFusionMedium();
-    InheritFusionMedium(shadowPayload);
-    TraceRay(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
-             0xFF, 0, 0, 1, shadowRay, shadowPayload);
-    RestoreFusionMedium(fusionContext1);
-
-    return shadowPayload.isShadowed == 0;
+    return QlVisible(shadowRay);
 }
 
 // Excitation is independent of the outgoing wavelength. Draw over the bound
@@ -1183,17 +1152,29 @@ float BeerLambertAt(float4 attenSpectrum, float lambda, float distance, float at
 // splats them, so all four components carry the same arithmetic and `.x` is
 // the answer. A caller with fewer than four leaves the rest zero, and zero
 // times anything is the zero it reads back.
-float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV,
-                              float roughness, float qSpec,
-                              float4 wDiffuse, float4 wSpecular0, float4 wSpecular90,
-                              float rrSurvive,
-                              float4 L_base_b, float lambda_b, AnisoFrame aniso,
-                              inout PathVertex payload)
+//
+// This draws the bounce and builds its ray, and nothing more: the vertex that
+// asked does not trace it. The driver does, and CompleteChild then forms the
+// residual from what came back:
+//
+//   Corr = weightOut * (child.radiance - L_base_b),   payload.rngState = child's
+//
+// Returns false, with nothing to trace, wherever the old body returned zero. The
+// draws made on the way there stay made, in payload.rngState.
+bool SampleBounce(float3 hitPos, float3 normal, float3 V, float NdotV,
+                  float roughness, float qSpec,
+                  float4 wDiffuse, float4 wSpecular0, float4 wSpecular90,
+                  float rrSurvive,
+                  float lambda_b, AnisoFrame aniso,
+                  inout PathVertex payload,
+                  out float4 weightOut, out ChildRequest req)
 {
+    weightOut = float4(0.0, 0.0, 0.0, 0.0);
+    req = (ChildRequest)0;
     if (payload.depth >= MAX_PATH_DEPTH || rrSurvive <= 0.0) {
         if (payload.depth >= MAX_PATH_DEPTH && rrSurvive > 0)
             FusionMarkUnknownTail();
-        return 0.0;
+        return false;
     }
     // The same floor BsdfMixturePdf and EvalBounceBrdf apply; all three must
     // see one lobe.
@@ -1204,7 +1185,7 @@ float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float Ndot
         // Never reached at depth 0, so this draw has no stratified slot: it is
         // a deep-path decision and PCG is the right source for it.
         if (pcg_float(payload.rngState) >= rrSurvive) {
-            return 0.0;
+            return false;
         }
         weight = 1.0 / rrSurvive;
     }
@@ -1220,14 +1201,14 @@ float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float Ndot
         // The Fresnel half of this weight needs the half vector, so it is
         // applied after the draw below; only the selection is divided out here.
         if (all(wSpecular0 == 0.0) && all(wSpecular90 == 0.0)) {
-            return 0.0;
+            return false;
         }
         weight /= max(qSpec, 1e-4);
     } else {
         weight *= wDiffuse / max(1.0 - qSpec, 1e-4);
     }
     if (all(weight == 0.0)) {
-        return 0.0;
+        return false;
     }
 
     // One 2D draw feeds whichever lobe was chosen. The two lobes share the slot
@@ -1251,7 +1232,7 @@ float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float Ndot
     // NaN pdf passes every guard -- every comparison against NaN is false --
     // and rides out as a NaN weight to be zeroed much later, as black speckle.
     if (!(NdotWi > 0.0) || !(pdf_dir > 1e-6)) {
-        return 0.0;
+        return false;
     }
 
     // f * cos / pdf, with the reflectance already folded into weight.
@@ -1300,37 +1281,23 @@ float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float Ndot
     bounceRay.TMin      = 0.0;
     bounceRay.TMax      = 1e9;
 
-    Payload child=(Payload)0;
-    child.radiance    = float4(0.0, 0.0, 0.0, 0.0);
-    child.isShadowed  = 0;
-    child.depth       = payload.depth + 1;
-    child.rngState    = payload.rngState;
+    req.ray        = bounceRay;
+    req.rayFlags   = RAY_FLAG_NONE;
+    req.depth      = payload.depth + 1;
+    req.rng        = payload.rngState;
     // Keep the collapsed-hero sign convention: a ray that arrived carrying
     // one wavelength at heroLambda < 0 must not come back a quartet root.
     // Losing the sign re-quartetized the child, and a second dispersive
     // interface on the path then applied the S/p weighting again (expectation
     // 4 instead of 1).
-    child.heroLambda  = (payload.heroLambda < 0.0) ? -lambda_b : lambda_b;
-    child.primaryHitT = -1.0;
+    req.heroLambda = (payload.heroLambda < 0.0) ? -lambda_b : lambda_b;
     // If this ray lands on an emitter, that surface has to know how likely the
     // BSDF was to have sent a ray its way, so it can weigh its emission against
     // the light sampling the same vertex did. The mixture density, evaluated at
     // the direction actually taken -- see BsdfMixturePdf.
-    child.bsdfPdf     = BsdfMixturePdf(normal, V, wi, roughness, qSpec, aniso);
-    const FusionMediumContext fusionContext2=SaveFusionMedium();
-    InheritFusionMedium(child);
-    TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, bounceRay, child);
-    RestoreFusionMedium(fusionContext2);
-
-    // Carry the child's consumption forward, or the parent's later draws
-    // repeat numbers the child already used. With paths this long that
-    // correlation is visible.
-    payload.rngState = child.rngState;
-
-    // Spectral radiance at the wavelength or wavelengths the child was told to
-    // carry, by the contract on Payload::heroLambda. A scalar child replicates
-    // its one answer across .rgb, so component 0 is right either way.
-    return weight * (child.radiance - L_base_b);
+    req.bsdfPdf    = BsdfMixturePdf(normal, V, wi, roughness, qSpec, aniso);
+    weightOut      = weight;
+    return true;
 }
 
 // ============================================================================
@@ -1339,8 +1306,752 @@ float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float Ndot
 
 #include "fusion_transport.hlsli"
 
+// ============================================================================
+// The vertex, cut at its children
+// ============================================================================
+// A vertex used to be one function that traced its own children and went on
+// with what they returned. A stage that cannot recurse needs the function cut
+// where it waits, so it is cut in four, in the order the recursion ran it:
+//
+//   ShadeVertexA   everything up to the first child: the surface, the lighting,
+//                  the sampling decisions that precede a child, and every term
+//                  that does not read one. It leaves a VertexFrame behind.
+//   Advance        the next child to trace, or none. This is also where the
+//                  draws that used to follow a child are made: the back-lobe
+//                  bounce, the deferred fluorescence excitation, the
+//                  transmission coin and the hero wavelength.
+//   CompleteChild  folds one child's answer into the frame.
+//   FoldVertex     the arithmetic that used to follow the last child, in the
+//                  order it ran, and the vertex's outputs.
+//
+// The random numbers are the point. Every draw lands in the stream exactly
+// where the recursion made it, so each decision sees the number it always saw:
+// a child's consumption is JOINED for the two bounce lobes (f.rng follows the
+// child), FORKED for transmission (the child gets the stream after the draw and
+// the vertex keeps that same state), and CHAINED across the three RGB dispersion
+// rays (each starts where the previous one ended).
+//
+// The frame is wider than it needs to be while ShadeVertex still drives it from
+// the closest-hit shader: it keeps V, the bounce arguments and a few values the
+// fold could re-derive, because here it costs one stack slot per recursion level
+// and not a register budget.
 
-void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
+static const uint QL_CTL_FINISHED        = 1u << 0;   // payload already final; nothing to fold
+static const uint QL_CTL_BOUNCE_TAKEN    = 1u << 1;   // the front-lobe child was requested by phase A
+static const uint QL_CTL_DT_ENABLED      = 1u << 2;   // the back-lobe bounce is attempted
+static const uint QL_CTL_FLUOR_DEFERRED  = 1u << 3;   // f.fluorM is drawn after the bounce children
+static const uint QL_CTL_TRANS           = 1u << 4;   // the transmission block applies
+static const uint QL_CTL_DEBUG           = 1u << 5;   // a debug view answers instead of the radiance
+static const uint QL_CTL_DEBUG_OUT       = 1u << 6;   // ... and that view shows the finished output
+static const uint QL_CTL_HIT_BACK        = 1u << 7;   // the ray arrived on the back face
+static const uint QL_CTL_ATMOS           = 1u << 8;   // NN atmosphere composes this vertex
+static const uint QL_CTL_VOLUME          = 1u << 9;   // participating medium: f.volT, f.volS
+static const uint QL_CTL_THERMAL_TERM    = 1u << 10;  // SINGLE: the Planck term is added
+static const uint QL_CTL_REFLECTED       = 1u << 11;  // the refraction coin chose reflection
+
+static const uint QL_PHASE_BOUNCE = 0u;
+static const uint QL_PHASE_DT     = 1u;
+static const uint QL_PHASE_FLUOR  = 2u;
+static const uint QL_PHASE_TRANS  = 3u;
+static const uint QL_PHASE_DONE   = 4u;
+
+// Which tail the fold evaluates, i.e. which branch of the spectral chain ran.
+static const uint QL_VARIANT_DIRECT = 0u;  // RGB and the fallback: f.outRadiance is final
+static const uint QL_VARIANT_VIS    = 1u;  // VIS_FUSED / VIS_HERO
+static const uint QL_VARIANT_SINGLE = 2u;  // SINGLE and CAMERA_MEASUREMENT, visible
+static const uint QL_VARIANT_IR     = 3u;  // SWIR, NIR, MWIR, LWIR
+
+struct VertexFrame {
+    uint   ctl;
+    uint   phase;
+    uint   variant;
+    uint   rng;            // the stream, threaded as the recursion threaded it
+    uint   rngChain;       // RGB dispersion: where the next sibling starts
+    uint   transStep;      // transmission children issued so far
+    uint   materialId;
+    float  heroIn;         // payload.heroLambda on entry
+    float  heroSigned;     // the wavelength state this vertex answers for
+    float3 hitPos;         // ray.Origin + ray.Direction * t
+    float  t;
+    float3 normal;         // the final shading normal
+    float3 rayDir;
+    float3 V;              // the arguments the back-lobe bounce is called with
+    float  NdotV;
+    float  roughness;
+    float4 wDT;            // back lobe: wDiffuse before sampling
+    float  rrDt;
+    float4 base;           // L_base_b, shared by both lobes
+    float  lambdaB;        // the bounce wavelength
+    float4 wChild;         // weight of the bounce in flight
+    float4 corrB;          // weight * (L_child - base), front lobe
+    float4 corrD;          // the same, back lobe
+    float4 pre;            // child-independent value, per variant (see the folds)
+    float4 pre2;           // terms the original adds after the corrections
+    float4 tau4;           // atmosphere transmittance per carried wavelength
+    float4 lpath4;         // atmosphere path radiance per carried wavelength
+    float3 xyz;            // VIS sweep: XYZ before the bounce
+    float3 xyzF;           // VIS sweep with deferred fluorescence: the unit-fluorM XYZ
+    float  tauB;           // VIS sweep: atmosphere tau at lambda_b
+    float  pdfB;           // VIS sweep: pdf of lambda_b
+    float3 cmfB;           // VIS sweep: colour matching at lambda_b
+    float  fluorM;         // fluorescence excitation
+    float  NdotL;
+    float  shadowFactor;
+    float3 lightEmissive;  // the sampled emitter, for deferred excitation
+    int    lightCurve;
+    float  neeScaleFluor;
+    float  tw;             // transmission weight
+    float  xi;             // the reflect-or-refract coin
+    float  lambdaH;        // hero wavelength drawn at this interface
+    float4 trans;          // the transmitted radiance
+    float3 debugOut;
+    float4 volT;           // output = output * volT + volS
+    float4 volS;
+    float4 outRadiance;    // the output where it is known before any child
+};
+
+// Deferred excitation: the draws that used to follow the bounce children.
+void DeferredFluorescence(inout VertexFrame f, uint depth) {
+    PathVertex v = (PathVertex)0;
+    v.depth = depth;
+    v.rngState = f.rng;
+    v.heroLambda = f.heroIn;
+    const MaterialData material = materials[f.materialId];
+    if (f.variant == QL_VARIANT_VIS) {
+        LightSample light;
+        light.wi = float3(0.0, 1.0, 0.0);
+        light.dist = 0.0;
+        light.emissive = f.lightEmissive;
+        light.pdfSolid = 0.0;
+        light.curveIndex = f.lightCurve;
+        light.valid = false;
+        f.fluorM = FluorescenceExcitationWithLight(material, f.NdotL, f.shadowFactor,
+                                                   light, f.neeScaleFluor, v);
+    } else {
+        f.fluorM = SampleFluorescenceExcitation(material, f.hitPos, f.normal, f.NdotL,
+                                                f.shadowFactor, v);
+    }
+    f.rng = v.rngState;
+}
+
+// The back-hemisphere bounce of a diffuse-transmitting surface: the residual
+// machinery with a flipped normal, so the cosine sample, the origin offset and
+// the child's mixture density all point the right way. qSpec is 0 -- there is no
+// specular transmission lobe -- which makes V, NdotV and roughness inert.
+bool SampleBounceDT(inout VertexFrame f, uint depth, inout ChildRequest req) {
+    PathVertex v = (PathVertex)0;
+    v.depth = depth;
+    v.rngState = f.rng;
+    v.heroLambda = f.heroIn;
+    const float4 zero4 = float4(0.0, 0.0, 0.0, 0.0);
+    ChildRequest r;
+    const bool taken = SampleBounce(f.hitPos, -f.normal, f.V, f.NdotV, f.roughness, 0.0,
+                                    f.wDT, zero4, zero4, f.rrDt, f.lambdaB,
+                                    IsotropicFrame(), v, f.wChild, r);
+    f.rng = v.rngState;
+    if (taken) {
+        req = r;
+        req.kind = QL_CHILD_BOUNCE_DT;
+    }
+    return taken;
+}
+
+// The next transmission child, or none. The first call draws the coin; a
+// dispersive hero split then draws its wavelength; RGB dispersion issues three.
+// Everything here is the transmission block of the old body up to its TraceRay,
+// with the values it read re-derived from the frame.
+bool NextTransmissionChild(inout VertexFrame f, uint depth, inout ChildRequest req) {
+    const MaterialData material = materials[f.materialId];
+    const bool heroMode = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_HERO);
+    const bool carriesQuartet = heroMode && (f.heroSigned > 0.0);
+    const bool entering = (f.ctl & QL_CTL_HIT_BACK) == 0u;
+    const float3 N = f.normal;
+    const float3 rayDir = f.rayDir;
+    const float cosI = abs(dot(N, -rayDir));
+    const float3 reflectDir = reflect(rayDir, N);
+
+    const bool materialDisperses = (material.dispersion > 0.001) ||
+                                   (material.complexRefractiveIndexIndex >= 0);
+    const bool heroSplit = materialDisperses &&
+                           (carriesQuartet ||
+                            (IsVisMode(SPEC_SPECTRAL_MODE) && f.heroIn == 0.0));
+    const bool hasDispersion = materialDisperses &&
+                               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB);
+    const bool dispersed = !heroSplit && hasDispersion;
+
+    if (f.transStep >= (dispersed ? 3u : 1u)) {
+        return false;
+    }
+
+    if (f.transStep == 0u) {
+        // PCG random number for the reflection/refraction decision. This is the
+        // draw that used to come after the bounce subtrees.
+        uint rngState = f.rng;
+        rngState = rngState * 747796405u + 2891336453u;
+        uint word = ((rngState >> ((rngState >> 28u) + 4u)) ^ rngState) * 277803737u;
+        word = (word >> 22u) ^ word;
+        f.xi = float(word) / 4294967296.0;
+        f.rng = rngState;
+        f.rngChain = rngState;
+    }
+
+    req.ray.Origin = f.hitPos;
+    req.ray.TMin = 0.001;
+    req.ray.TMax = 10000.0;
+    req.rayFlags = RAY_FLAG_NONE;
+    req.depth = depth + 1u;
+    // A refracted or specularly reflected ray is not a BSDF *sample* in the
+    // MIS sense -- the direction was determined, not drawn from a density --
+    // so an emitter it lands on contributes its full emission.
+    req.bsdfPdf = 0.0;
+    req.heroLambda = f.heroSigned;
+
+    if (heroSplit) {
+        // Hero wavelength: one wavelength, one path, weighted by 1/pdf. See the
+        // estimator's derivation in CompleteChild.
+        float lambda_h = f.heroSigned;
+        if (!carriesQuartet) {
+            uint heroState = f.rng * 747796405u + 2891336453u;
+            uint heroWord = ((heroState >> ((heroState >> 28u) + 4u)) ^ heroState)
+                            * 277803737u;
+            heroWord = (heroWord >> 22u) ^ heroWord;
+            f.rng = heroState;
+
+            const float u_lambda = float(heroWord) / 4294967296.0;
+            lambda_h = SampleVisibleWavelength(u_lambda);
+        }
+        f.lambdaH = lambda_h;
+
+        const float ior_h = RefractionIOR(material, lambda_h);
+        const float n1 = entering ? 1.0 : ior_h;
+        const float n2 = entering ? ior_h : 1.0;
+
+        float F = FresnelDielectric(cosI, n1, n2);
+        const float3 refractDir = Refract(rayDir, N, n1 / n2);
+        if (length(refractDir) < 0.001) F = 1.0;   // total internal reflection
+
+        // Negative: one wavelength, and no longer a quartet. Positive is what the
+        // deterministic grid means by a hero ray, and it has no third state to
+        // confuse this with.
+        req.heroLambda = carriesQuartet ? -lambda_h : lambda_h;
+        req.rng = f.rng;
+        req.ray.Direction = (f.xi < F) ? reflectDir : refractDir;
+        req.kind = QL_CHILD_HERO;
+    } else if (dispersed) {
+        // RGB dispersion: R=650nm, G=550nm, B=450nm, one ray each.
+        const uint ch = f.transStep;
+        const float lambda = (ch == 0u) ? 650.0 : ((ch == 1u) ? 550.0 : 450.0);
+        const float ior_lambda = RefractionIOR(material, lambda);
+
+        const float n1 = entering ? 1.0 : ior_lambda;
+        const float n2 = entering ? ior_lambda : 1.0;
+        const float eta = n1 / n2;
+
+        float F = FresnelDielectric(cosI, n1, n2);
+        const float3 refractDir = Refract(rayDir, N, eta);
+        const bool hasTIR = (length(refractDir) < 0.001);
+        if (hasTIR) F = 1.0;
+
+        // The same random decision for all channels, for consistency, and a
+        // stream that carries on from the previous sibling.
+        req.rng = f.rngChain;
+        req.ray.Direction = (f.xi < F) ? reflectDir : refractDir;
+        req.kind = QL_CHILD_DISPERSE;
+    } else {
+        // Standard refraction. The wavelength this ray is accountable for, or 0
+        // where the mode has none and n falls back to the material's n_d.
+        //
+        //   any band, ray carrying a hero wavelength -> that wavelength
+        //   VIS_FUSED undivided, or RGB              -> none
+        //   SINGLE and the undivided fused IR bands  -> the render wavelength
+        //
+        // A hero ray reaching here means the material does not disperse, or it
+        // is the second dispersive interface on the same path. Either way it
+        // keeps refracting at its own wavelength.
+        float refractLambda;
+        if (f.heroSigned != 0.0) {
+            refractLambda = abs(f.heroSigned);
+        } else if (IsVisMode(SPEC_SPECTRAL_MODE) ||
+                   SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
+            refractLambda = 0.0;
+        } else {
+            refractLambda = pushConsts.camera.wavelength_nm;
+        }
+
+        const float effectiveIOR = RefractionIOR(material, refractLambda);
+
+        const float n1 = entering ? 1.0 : effectiveIOR;
+        const float n2 = entering ? effectiveIOR : 1.0;
+        const float eta = n1 / n2;
+
+        float F = FresnelDielectric(cosI, n1, n2);
+        const float3 refractDir = Refract(rayDir, N, eta);
+        const bool hasTIR = (length(refractDir) < 0.001);
+        if (hasTIR) F = 1.0;
+
+        const bool reflected = (f.xi < F);
+        if (reflected) f.ctl |= QL_CTL_REFLECTED;
+        req.rng = f.rng;
+        req.ray.Direction = reflected ? reflectDir : refractDir;
+        req.kind = QL_CHILD_REFRACT;
+    }
+    f.transStep += 1u;
+    return true;
+}
+
+// Fold a transmission child's answer in: Beer-Lambert on the way out and the
+// conversion to what the vertex reports.
+void CompleteTransmission(inout VertexFrame f, uint kind, PathVertex child) {
+    const MaterialData material = materials[f.materialId];
+    const LightingParams lut = lightingParams[0];
+    const bool heroMode = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_HERO);
+    const bool carriesQuartet = heroMode && (f.heroSigned > 0.0);
+    const float4 quartet = carriesQuartet ? QuartetLambdas(f.heroSigned)
+                                          : float4(0.0, 0.0, 0.0, 0.0);
+    const float quartetS = carriesQuartet ? QuartetMisDenominator(f.heroSigned) : 1.0;
+    const bool entering = (f.ctl & QL_CTL_HIT_BACK) == 0u;
+    // Beer-Lambert distances are metres -- glTF attenuationDistance and the
+    // medium coefficients are -- while the hit distance is in scene units.
+    const float worldUnitsToMeters = lut.worldUnitsToMeters;
+
+    if (kind == QL_CHILD_HERO) {
+        // Scalar spectral radiance, by the contract on Payload::heroLambda.
+        float L_h = child.radiance.r;
+        const float lambda_h = f.lambdaH;
+
+        if (!entering && material.attenuationDistance > 0.0) {
+            // One wavelength, so one transmittance: the attenuation colour is
+            // read at lambda_h rather than averaged across channels that this
+            // ray is not carrying. Averaging made a red-absorbing glass
+            // attenuate a blue path by a red glass's mean.
+            L_h *= BeerLambertAt(
+                FetchRgbSpectrum(rgbToSpectrumTable, material.attenuationColor),
+                lambda_h, f.t * worldUnitsToMeters, material.attenuationDistance);
+        }
+
+        if (carriesQuartet) {
+            // What the surviving wavelength brings back, scaled so that the
+            // root's division by the shared denominator leaves exactly
+            // L_h/p(lambda_h) -- the single-wavelength estimator, unchanged by
+            // having been reached through a quartet. The first component is the
+            // hero's own, so no matching function is applied here either; the
+            // root applies cmf(lambda_0) = cmf(lambda_h) to it.
+            //
+            // On the MIS side the weight is one: a refracted direction at this
+            // interface can only be generated by the wavelength that was bent to
+            // it, so there is no other technique to share with.
+            f.trans = float4(
+                L_h * quartetS / VisibleWavelengthPDF(lambda_h), 0.0, 0.0, 0.0);
+        } else {
+            const float3 cmf = SampleCIE_XYZ_LUT(cieCMF_LUT, lambda_h);
+            float3 XYZ_h = L_h * cmf / VisibleWavelengthPDF(lambda_h);
+            XYZ_h /= CIE_Y_INTEGRAL;
+
+            float3 heroRgb = ConvertXYZToLinearRGB(XYZ_h);
+            heroRgb.r *= lut.chromaR_correction;
+            heroRgb.b *= lut.chromaB_correction;
+            f.trans = float4(heroRgb, 0.0);
+        }
+    } else if (kind == QL_CHILD_DISPERSE) {
+        const uint ch = f.transStep - 1u;
+
+        // Extract the channel-specific contribution
+        float channelValue = (ch == 0u) ? child.radiance.r :
+                             (ch == 1u) ? child.radiance.g :
+                                          child.radiance.b;
+
+        // Apply Beer-Lambert absorption for this channel
+        if (!entering && material.attenuationDistance > 0.0) {
+            float travelDistance = f.t * worldUnitsToMeters;
+            float3 volumeAtten = BeerLambertAbsorption(
+                material.attenuationColor, travelDistance, material.attenuationDistance);
+            float attenValue = (ch == 0u) ? volumeAtten.r :
+                               (ch == 1u) ? volumeAtten.g : volumeAtten.b;
+            channelValue *= attenValue;
+        }
+
+        if (ch == 0u) f.trans.r = channelValue;
+        else if (ch == 1u) f.trans.g = channelValue;
+        else f.trans.b = channelValue;
+        f.trans.w = 0.0;
+        // The next sibling starts where this one ended.
+        f.rngChain = child.rngState;
+    } else {
+        // Beer-Lambert on whichever way the ray leaves. At an exit hit the
+        // segment just travelled was inside the glass whether the ray now
+        // refracts out or reflects back in (TIR included), so both outcomes are
+        // attenuated -- as the hero and dispersive branches already do.
+        float3 volumeAttenuation = float3(1.0, 1.0, 1.0);
+        if (!entering && material.attenuationDistance > 0.0) {
+            float travelDistance = f.t * worldUnitsToMeters;
+            volumeAttenuation = BeerLambertAbsorption(
+                material.attenuationColor, travelDistance, material.attenuationDistance);
+        }
+        // What survives the glass, per whatever this ray carries.
+        //
+        // The RGB triple is only the right answer for a ray that carries a
+        // colour. A ray carrying one wavelength that reads component 0 of an RGB
+        // attenuation gets the RED channel's absorption at every wavelength --
+        // which is what the visible band's own indirect bounce was doing, so a
+        // red-absorbing glass dimmed the whole spectrum by its red figure
+        // instead of colouring what came through it.
+        float4 attenuation4 = float4(volumeAttenuation, 0.0);
+        if (!entering && material.attenuationDistance > 0.0) {
+            const float travel = f.t * worldUnitsToMeters;
+            if (carriesQuartet) {
+                // Four wavelengths, four transmittances, read off the spectrum
+                // the attenuation colour stands for. This is the difference
+                // between glass that tints what it transmits and glass that
+                // only dims it.
+                const float4 sAtten =
+                    FetchRgbSpectrum(rgbToSpectrumTable, material.attenuationColor);
+                [unroll]
+                for (uint q = 0u; q < VIS_HERO_QUARTET; ++q) {
+                    attenuation4[q] = BeerLambertAt(sAtten, quartet[q], travel,
+                                                    material.attenuationDistance);
+                }
+            } else if ((f.heroSigned != 0.0 && IsVisMode(SPEC_SPECTRAL_MODE)) ||
+                       (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
+                        pushConsts.camera.wavelength_nm <= SPECTRAL_VIS_LAMBDA_MAX) ||
+                       (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT &&
+                        abs(f.heroSigned) <= SPECTRAL_VIS_LAMBDA_MAX)) {
+                // One wavelength, so one transmittance, at that wavelength --
+                // the same reading the dispersive branch makes.
+                const float a = BeerLambertAt(
+                    FetchRgbSpectrum(rgbToSpectrumTable, material.attenuationColor),
+                    f.heroSigned != 0.0 ? abs(f.heroSigned) : pushConsts.camera.wavelength_nm,
+                    travel, material.attenuationDistance);
+                attenuation4 = float4(a, a, a, 0.0);
+            } else if (!IsVisMode(SPEC_SPECTRAL_MODE) &&
+                       SPEC_SPECTRAL_MODE != SPECTRAL_MODE_RGB) {
+                // A band that carries one number per ray gets one transmittance,
+                // not three: outside the visible there is no fit to read the
+                // colour as a spectrum, so the average is the honest reduction
+                // -- the same one the participating medium makes, and for the
+                // same reason.
+                const float a = (volumeAttenuation.r + volumeAttenuation.g +
+                                 volumeAttenuation.b) / 3.0;
+                attenuation4 = float4(a, a, a, 0.0);
+            }
+        }
+        f.trans = child.radiance * attenuation4;
+        // The reflected child's w is passed through as it always was; only the
+        // refracted one historically carried w = 0.
+        if ((f.ctl & QL_CTL_REFLECTED) != 0u) f.trans.w = child.radiance.w;
+    }
+}
+
+// Fold one child's answer into the frame.
+void CompleteChild(inout VertexFrame f, uint kind, PathVertex child) {
+    if (kind == QL_CHILD_BOUNCE) {
+        // Spectral radiance at the wavelength or wavelengths the child was told
+        // to carry, by the contract on Payload::heroLambda. A scalar child
+        // replicates its one answer across .rgb, so component 0 is right either
+        // way.
+        f.corrB = f.wChild * (child.radiance - f.base);
+        // Carry the child's consumption forward, or the parent's later draws
+        // repeat numbers the child already used. With paths this long that
+        // correlation is visible.
+        f.rng = child.rngState;
+    } else if (kind == QL_CHILD_BOUNCE_DT) {
+        f.corrD = f.wChild * (child.radiance - f.base);
+        f.rng = child.rngState;
+    } else {
+        CompleteTransmission(f, kind, child);
+    }
+}
+
+// The next child to trace, or false when the vertex is complete. Phase A issued
+// the front-lobe request itself, because that is where its arguments were live.
+bool Advance(inout VertexFrame f, uint depth, inout ChildRequest req) {
+    [loop] while (f.phase != QL_PHASE_DONE) {
+        if (f.phase == QL_PHASE_BOUNCE) {
+            f.phase = QL_PHASE_DT;
+            if ((f.ctl & QL_CTL_BOUNCE_TAKEN) != 0u) {
+                req.kind = QL_CHILD_BOUNCE;
+                return true;
+            }
+        } else if (f.phase == QL_PHASE_DT) {
+            f.phase = QL_PHASE_FLUOR;
+            if ((f.ctl & QL_CTL_DT_ENABLED) != 0u && SampleBounceDT(f, depth, req)) {
+                return true;
+            }
+        } else if (f.phase == QL_PHASE_FLUOR) {
+            f.phase = QL_PHASE_TRANS;
+            if ((f.ctl & QL_CTL_FLUOR_DEFERRED) != 0u) {
+                DeferredFluorescence(f, depth);
+            }
+        } else {
+            if ((f.ctl & QL_CTL_TRANS) != 0u && NextTransmissionChild(f, depth, req)) {
+                return true;
+            }
+            f.phase = QL_PHASE_DONE;
+        }
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Folds: what each branch of the spectral chain did after its children
+// ---------------------------------------------------------------------------
+
+// VIS_FUSED and VIS_HERO. Three readings of the vertex, by the wavelength state
+// it answers for: the 32-point sweep (f.xyz, then the correction as XYZ), a
+// collapsed hero (one scalar), and a quartet (four).
+float4 FoldVisible(VertexFrame f) {
+    const LightingParams lut = lightingParams[0];
+    const MaterialData material = materials[f.materialId];
+    const bool heroMode = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_HERO);
+    const bool carriesQuartet = heroMode && (f.heroSigned > 0.0);
+    const bool heroRay = heroMode ? (f.heroSigned < 0.0) : (f.heroIn > 0.0);
+    const bool atmosEnabled = (f.ctl & QL_CTL_ATMOS) != 0u;
+
+    float4 output_radiance;
+    if (carriesQuartet || heroRay) {
+        const uint sampleCount = carriesQuartet ? VIS_HERO_QUARTET : 1u;
+        const float4 quartet = carriesQuartet ? QuartetLambdas(f.heroSigned)
+                                              : float4(0.0, 0.0, 0.0, 0.0);
+        // The corrections at the carried wavelengths. A quartet adds them to its
+        // four radiances before the atmosphere composes them; a hero adds its
+        // scalar after, as the surface that sampled lambda_h owns the weighting.
+        const float4 quadBounce = carriesQuartet ? (f.corrB + f.corrD)
+                                                 : float4(0.0, 0.0, 0.0, 0.0);
+        const float heroBounce = heroRay ? (f.corrB.x + f.corrD.x) : 0.0;
+        float heroRadiance = 0.0;
+        float4 quadRadiance = float4(0.0, 0.0, 0.0, 0.0);
+
+        for (uint i = 0; i < sampleCount; ++i) {
+            const uint qi = min(i, VIS_HERO_QUARTET - 1u);
+            const float lambda = heroRay ? abs(f.heroSigned) : quartet[qi];
+
+            // Fluorescent re-emission at this wavelength. Lambertian, so the
+            // 1/pi is the BRDF; the emission curve integrates to 1 over the band,
+            // which is what leaves the yield as the only number saying how much
+            // of what was absorbed comes back.
+            float L_fluor = 0.0;
+            if (f.fluorM > 0.0) {
+                L_fluor = material.fluorescenceYield *
+                          EvaluateEmissionCurve(
+                              spectralCurves, material.fluorescenceEmissionCurveIndex, lambda) *
+                          f.fluorM * (1.0 / PI);
+            }
+
+            // pre carries Ld + La + Le + Li + Ln and pre2 the thermal term, so
+            // this is the original left-to-right sum with the excitation in its
+            // place.
+            float L_lambda = f.pre[qi] + L_fluor + f.pre2[qi];
+
+            // The quartet's indirect correction at this wavelength, added before
+            // the atmosphere composes the surface rather than after: the
+            // correction is part of what the surface sends.
+            if (carriesQuartet) {
+                L_lambda += quadBounce[qi];
+            }
+
+            // NN atmosphere composition: L = tau_view(lambda)*L_surface + L_path
+            if (atmosEnabled) {
+                L_lambda = f.tau4[qi] * L_lambda + f.lpath4[qi];
+            }
+
+            if (heroRay) {
+                heroRadiance = L_lambda + heroBounce;
+            } else {
+                if      (i == 0u) quadRadiance.x = L_lambda;
+                else if (i == 1u) quadRadiance.y = L_lambda;
+                else if (i == 2u) quadRadiance.z = L_lambda;
+                else              quadRadiance.w = L_lambda;
+            }
+        }
+
+        // A hero ray reports its one wavelength's radiance, and a quartet its
+        // four: neither is a colour, and the conversion belongs to the vertex
+        // that drew them.
+        output_radiance = heroRay ? float4(heroRadiance, heroRadiance, heroRadiance, 0.0)
+                                  : quadRadiance;
+    } else {
+        float3 XYZ_accum = f.xyz;
+        if ((f.ctl & QL_CTL_FLUOR_DEFERRED) != 0u) {
+            // The excitation was drawn after the loop ran, so its term is
+            // linear in it: the unit sum accumulated by the loop, scaled once.
+            XYZ_accum += f.xyzF * (f.fluorM * (1.0 / PI));
+        }
+        // The indirect correction, carrying cmf(lambda_b) and the 1/pdf that the
+        // deterministic grid gets from its LAMBDA_STEP.
+        const float3 XYZ_bounce = (f.corrB.x + f.corrD.x) * f.tauB / f.pdfB * f.cmfB;
+        XYZ_accum += XYZ_bounce;
+        XYZ_accum /= CIE_Y_INTEGRAL;
+        output_radiance = float4(ConvertXYZToLinearRGB(XYZ_accum), 0.0);
+        output_radiance.r *= lut.chromaR_correction;
+        output_radiance.b *= lut.chromaB_correction;
+    }
+
+    // Validation: clamp and sanitize to prevent NaN/Inf
+    if (any(!isfinite(output_radiance))) {
+            FusionFlagNonFinite();
+        output_radiance = float4(0.0, 0.0, 0.0, 0.0);  // Fallback to black
+    }
+    // SYMMETRIC: the indirect term is one wavelength and a residual, and both
+    // go negative legitimately; see the note at raygen.rgen's own clamp.
+    if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+        output_radiance = clamp(output_radiance, -1000.0, 1000.0);
+    return output_radiance;
+}
+
+// SINGLE and CAMERA_MEASUREMENT in the visible.
+float4 FoldSingle(VertexFrame f) {
+    const MaterialData material = materials[f.materialId];
+    float radiance_spectral = f.pre.x;
+
+    radiance_spectral += f.corrB.x;
+    if ((f.ctl & QL_CTL_DT_ENABLED) != 0u) {
+        radiance_spectral += f.corrD.x;
+    }
+
+    // What the surface radiates, and the sky it reflects: terms the original
+    // adds after the corrections.
+    if ((f.ctl & QL_CTL_THERMAL_TERM) != 0u) {
+        radiance_spectral += f.pre2.x;
+    }
+    radiance_spectral += f.pre2.y;
+
+    radiance_spectral += material.fluorescenceYield *
+        EvaluateEmissionCurve(spectralCurves,
+                              material.fluorescenceEmissionCurveIndex, f.lambdaB) *
+        f.fluorM * (1.0 / PI);
+
+    // NN atmosphere composition (single wavelength: LUT baked with one sample)
+    if ((f.ctl & QL_CTL_ATMOS) != 0u) {
+        radiance_spectral = f.tau4.x * radiance_spectral + f.lpath4.x;
+    }
+
+    // Validation. Symmetric: the bounce above is a residual and goes negative
+    // under occlusion.
+    if (!isfinite(radiance_spectral)) {
+            FusionFlagNonFinite();
+        radiance_spectral = 0.0;
+    }
+    if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+        radiance_spectral = clamp(radiance_spectral, -1000.0, 1000.0);
+
+    // Output as grayscale (replicate scalar to RGB for display)
+    return float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
+}
+
+// SWIR, NIR, MWIR and LWIR: a band average plus one correction.
+float4 FoldInfrared(VertexFrame f) {
+    float bounceCorr = f.corrB.x;
+    if ((f.ctl & QL_CTL_DT_ENABLED) != 0u) {
+        bounceCorr += f.corrD.x;
+    }
+
+    // Sampling lambda_b uniformly gives pdf = 1/band_width, which cancels the
+    // 1/band_width of the band average, so the correction is added with no
+    // further weight -- and the same expression serves a hero ray, where neither
+    // factor is present. View-path transmittance applies as it does to the
+    // loop's terms; L_path does not, being per pixel rather than per light path.
+    if ((f.ctl & QL_CTL_ATMOS) != 0u) {
+        bounceCorr *= f.tau4.x;
+    }
+    float radiance_avg = f.pre.x;
+    radiance_avg += bounceCorr;
+
+    // Validation. Symmetric: bounceCorr is a residual and goes negative under
+    // occlusion, and wide for the IR's dynamic range.
+    if (!isfinite(radiance_avg)) {
+            FusionFlagNonFinite();
+        radiance_avg = 0.0;
+    }
+    if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+        radiance_avg = clamp(radiance_avg, -1e6, 1e6);
+
+    // Output as grayscale (IR images are single-channel)
+    return float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
+}
+
+// Everything after the last child, in the order it ran, and the vertex's
+// outputs.
+void FoldVertex(VertexFrame f, inout PathVertex payload) {
+    const LightingParams lut = lightingParams[0];
+    const bool heroMode = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_HERO);
+    const bool carriesQuartet = heroMode && (f.heroSigned > 0.0);
+
+    float4 output_radiance = f.outRadiance;
+    if (f.variant == QL_VARIANT_VIS) {
+        output_radiance = FoldVisible(f);
+    } else if (f.variant == QL_VARIANT_SINGLE) {
+        output_radiance = FoldSingle(f);
+    } else if (f.variant == QL_VARIANT_IR) {
+        output_radiance = FoldInfrared(f);
+    }
+
+    // What the old body left in payload.rngState when it returned: the stream
+    // after its last draw.
+    payload.rngState = f.rng;
+
+    // A debug view returns before the medium and the glass. Most ignore the
+    // children; the two that show the finished output (XYZ and before-chroma)
+    // read it here, with the .w = 0 truncation the recursion gave them.
+    if ((f.ctl & QL_CTL_DEBUG) != 0u) {
+        payload.radiance = float4(((f.ctl & QL_CTL_DEBUG_OUT) != 0u) ? output_radiance.rgb
+                                                                      : f.debugOut, 0.0);
+        return;
+    }
+
+    // Final = surface_radiance * transmittance + in_scattered
+    if ((f.ctl & QL_CTL_VOLUME) != 0u) {
+        output_radiance = output_radiance * f.volT + f.volS;
+    }
+
+    // Blend transmission with surface shading
+    if ((f.ctl & QL_CTL_TRANS) != 0u) {
+        output_radiance = lerp(output_radiance, f.trans, f.tw);
+    }
+
+    // ========================================================================
+    // The quartet becomes a colour, once, where it was drawn
+    // ========================================================================
+    //     XYZ = sum_j L(lambda_j) cmf(lambda_j) / S
+    //
+    // with S the denominator every one of the four shares -- see
+    // QuartetMisDenominator. Everything between the draw and this line, the
+    // surface and its correction and whatever medium or glass the path went
+    // through, has been carrying four radiances so that the matching functions
+    // are applied in exactly one place. A ray that is only carrying the four
+    // upward falls through and hands them on.
+    const bool quartetRoot = carriesQuartet && (f.heroIn == 0.0);
+    if (quartetRoot) {
+        const float4 quartet = QuartetLambdas(f.heroSigned);
+        const float quartetS = QuartetMisDenominator(f.heroSigned);
+        float3 XYZ_hero = float3(0.0, 0.0, 0.0);
+        [unroll]
+        for (uint q = 0u; q < VIS_HERO_QUARTET; ++q) {
+            XYZ_hero += output_radiance[q] * SampleCIE_XYZ_LUT(cieCMF_LUT, quartet[q]);
+        }
+        XYZ_hero /= (quartetS * CIE_Y_INTEGRAL);
+
+        float3 heroRgb = ConvertXYZToLinearRGB(XYZ_hero);
+        heroRgb.r *= lut.chromaR_correction;
+        heroRgb.b *= lut.chromaB_correction;
+        output_radiance = float4(heroRgb, 0.0);
+    }
+
+    // Every mode but a quartet carrier writes zero into the fourth component
+    // and reads it nowhere, so this one assignment serves all of them.
+    payload.radiance = output_radiance;
+    payload.fusionTerminalDepth = payload.depth;
+    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE ||
+        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT) {
+        payload.fusionContributions = FusionClassify(output_radiance.x, payload.fusionRoute);
+        FusionRecordRadianceTerm(payload, 0, output_radiance.x);
+        FusionAttenuateSegment(payload, f.t);
+    }
+}
+
+// Phase A: the old closest-hit body up to its first child. It fills the frame
+// and, when the front-lobe bounce is taken, the request for it; ShadeVertex
+// below drives the rest.
+void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
+                  inout VertexFrame f, inout ChildRequest req) {
     fusionActiveMediumCount = payload.fusionMediumCount;
     [unroll]
     for (uint medium = 0; medium < kFusionMaxInitialMedia; ++medium)
@@ -1500,8 +2211,12 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
                                        true);
             if (TraceFusionInterface(payload, material, 1 + rec.instanceIndex, hit,
                                      worldGeometricNormal, hitBackFace, temperature,
-                                     ray, rec.t, rec.instanceIndex))
+                                     ray, rec.t, rec.instanceIndex)) {
+                // The interface vertex traced its own child and left the
+                // payload final: there is nothing to fold.
+                f.ctl |= QL_CTL_FINISHED;
                 return;
+            }
         }
     }
 
@@ -2085,33 +2800,9 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
         shadowRay.TMin = 0.0;
         shadowRay.TMax = 1e10;  // Infinite distance (directional light)
 
-        // Initialize shadow payload - assume shadowed (will be cleared by shadow_miss)
-        Payload shadowPayload=(Payload)0;
-        shadowPayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
-        shadowPayload.isShadowed = 1;  // Assume shadowed, shadow_miss will clear this
-        shadowPayload.heroLambda = payload.heroLambda;
-        shadowPayload.bsdfPdf = 0.0;   // not a BSDF sample; carries no emission
-
-        // Trace shadow ray with optimized flags:
-        // - RAY_FLAG_SKIP_CLOSEST_HIT_SHADER: Don't run closest hit, just check occlusion
-        // - RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH: Accept first hit and terminate (fast shadow test)
-        const FusionMediumContext fusionContext3=SaveFusionMedium();
-    InheritFusionMedium(shadowPayload);
-    TraceRay(
-            scene,                                              // Acceleration structure
-            RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |                  // Skip closest hit shader
-            RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,           // Accept first hit, terminate search
-            0xFF,                                               // Instance mask (all instances)
-            0,                                                  // SBT hit group offset
-            0,                                                  // SBT multiplier
-            1,                                                  // Miss index = 1 (shadow_miss)
-            shadowRay,
-            shadowPayload
-        );
-    RestoreFusionMedium(fusionContext3);
-
-        // shadowPayload.isShadowed: 1 = hit occluder (shadowed), 0 = miss (lit)
-        shadowFactor = (shadowPayload.isShadowed == 0) ? 1.0 : 0.0;
+        // A visibility ray (QlVisible): skips the closest-hit shader and
+        // accepts the first hit, so it only asks whether anything is in the way.
+        shadowFactor = QlVisible(shadowRay) ? 1.0 : 0.0;
     }
 
     // Whether the sun is behind this surface, and whether anything stands
@@ -2137,20 +2828,7 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
                 dtRay.TMin = 0.0;
                 dtRay.TMax = 1e10;
 
-                Payload dtPayload=(Payload)0;
-                dtPayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
-                dtPayload.isShadowed = 1;
-                dtPayload.heroLambda = payload.heroLambda;
-                dtPayload.bsdfPdf = 0.0;
-
-                const FusionMediumContext fusionContext4=SaveFusionMedium();
-    InheritFusionMedium(dtPayload);
-    TraceRay(scene,
-                         RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
-                         RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
-                         0xFF, 0, 0, 1, dtRay, dtPayload);
-    RestoreFusionMedium(fusionContext4);
-                dtShadow = (dtPayload.isShadowed == 0) ? 1.0 : 0.0;
+                dtShadow = QlVisible(dtRay) ? 1.0 : 0.0;
             }
         }
     }
@@ -2322,7 +3000,7 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
     // spawn no bounce ray there, and only shadow rays and transmission recurse.
     // Every spectral band instead treats these terms as the analytic base of a
     // residual and traces one ray per hit for the difference; see
-    // TraceEnvBounceResidual. They still read envBRDF and prefilteredColor from
+    // SampleBounce. They still read envBRDF and prefilteredColor from
     // here, which is why the block runs for them too.
     const bool hasEnvMap = (lut.enableEnvironmentMap != 0) &&
                            SPEC_SPECTRAL_MODE != SPECTRAL_MODE_CAMERA_MEASUREMENT;
@@ -2393,8 +3071,9 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
     // ========================================================================
 
     // Four components because a hero quartet needs four; every other mode
-    // writes .w zero and never reads it.
-    float4 output_radiance;
+    // writes .w zero and never reads it. The branches that have children leave
+    // it to FoldVertex, which forms it from the frame.
+    float4 output_radiance = float4(0.0, 0.0, 0.0, 0.0);
 
     if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
         // ====================================================================
@@ -2484,12 +3163,6 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
         const uint  sampleCount = heroRay ? 1u
                                 : (carriesQuartet ? VIS_HERO_QUARTET
                                                   : NUM_WAVELENGTH_SAMPLES);
-        float heroRadiance = 0.0;
-
-        // The quartet's four radiances, and the four corrections that go with
-        // them. Untouched by every other reading, which leaves them zero.
-        float4 quadRadiance = float4(0.0, 0.0, 0.0, 0.0);
-        float4 quadBounce   = float4(0.0, 0.0, 0.0, 0.0);
 
         // ====================================================================
         // Indirect light: the traced correction
@@ -2522,8 +3195,6 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
         // and specular terms are physically distinct -- kD*rho against F -- so
         // the choice is Fresnel-weighted and both must stay reachable, or a
         // metal (kD = 0) would lose all of its indirect light.
-        float3 XYZ_bounce = float3(0.0, 0.0, 0.0);
-        float  heroBounce = 0.0;
 
         // Light sampling. The direction and its two densities do not depend on
         // wavelength, so they are settled once here; only the BRDF and the
@@ -2675,10 +3346,21 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
                 }
             }
 
-            const float4 corr_b = TraceEnvBounceResidual(
-                visHitPos, normal, V, NdotV_b, roughness, qSpec_b,
-                wDiffuse4, wSpecular0_4, wSpecular90_4, rrSurvive_b,
-                sky4, lambda_b, aniso, payload);
+            // The front lobe is drawn here, and traced by the driver once this
+            // phase is over: its correction, weight * (L_child - sky4), is formed
+            // by CompleteChild and folded into the result by FoldVisible.
+            f.V = V;
+            f.NdotV = NdotV_b;
+            f.roughness = roughness;
+            f.base = sky4;
+            f.lambdaB = lambda_b;
+            f.wDT = wDt4;
+            if (SampleBounce(
+                    visHitPos, normal, V, NdotV_b, roughness, qSpec_b,
+                    wDiffuse4, wSpecular0_4, wSpecular90_4, rrSurvive_b,
+                    lambda_b, aniso, payload, f.wChild, req)) {
+                f.ctl |= QL_CTL_BOUNCE_TAKEN;
+            }
 
             // The transmitted half, traced into the BACK hemisphere. Reusing
             // the residual machinery with a flipped normal gets the cosine
@@ -2694,34 +3376,29 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
             // qSpec = 0 because there is no specular transmission lobe here --
             // this is Lambertian by definition -- which also makes V, NdotV and
             // roughness inert in the call.
-            float4 corr_dt = float4(0.0, 0.0, 0.0, 0.0);
+            // The back lobe is attempted by the driver after the front lobe's
+            // child has returned, from this state.
             // The roulette is one decision for the whole ray, so it survives on
             // the brightest wavelength it carries; a single-wavelength caller
             // leaves the other three at zero and this is that one's weight.
             const float rrDt = max(max(wDt4.x, wDt4.y), max(wDt4.z, wDt4.w));
             if (hasDT && rrDt > 0.0) {
-                corr_dt = TraceEnvBounceResidual(
-                    visHitPos, -normal, V, NdotV_b, roughness, 0.0,
-                    wDt4, float4(0.0, 0.0, 0.0, 0.0), float4(0.0, 0.0, 0.0, 0.0), rrDt,
-                    sky4, lambda_b, IsotropicFrame(), payload);
+                f.ctl |= QL_CTL_DT_ENABLED;
+                f.rrDt = rrDt;
             }
 
-            if (carriesQuartet) {
-                // Four corrections at the four wavelengths the surface is being
-                // evaluated at, so they are neither weighed by a matching
-                // function nor divided by a density: they are added to the four
-                // radiances in the loop, before the atmosphere composes them,
-                // and the vertex that drew the quartet weighs the sum once.
-                quadBounce = corr_b + corr_dt;
-            } else if (heroRay) {
-                // Scalar: the surface that sampled lambda_h owns the weighting.
-                heroBounce = corr_b.x + corr_dt.x;
-            } else {
-                // XYZ = L(lambda_b) * cmf(lambda_b) / pdf. Same estimator and
-                // same normalisation as the deterministic grid below, which
-                // divides by CIE_Y_INTEGRAL once for both. The pdf is no longer
-                // the constant 1/bandwidth, so it is evaluated rather than
-                // folded in as a literal.
+            // A quartet's corrections are added to its four radiances before the
+            // atmosphere composes them, and a hero's scalar after: both are
+            // FoldVisible's. The deterministic sweep turns its correction into
+            // XYZ there too:
+            //
+            //   XYZ = L(lambda_b) * cmf(lambda_b) / pdf
+            //
+            // Same estimator and same normalisation as the deterministic grid
+            // below, which divides by CIE_Y_INTEGRAL once for both. The pdf is no
+            // longer the constant 1/bandwidth, so it is evaluated rather than
+            // folded in as a literal. Its three factors do not read the child.
+            if (!carriesQuartet && !heroRay) {
                 float tau_b = 1.0;
                 if (atmosEnabled) {
                     const uint atmosIdx_b = (uint)clamp(
@@ -2729,8 +3406,9 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
                         0.0, float(NUM_WAVELENGTH_SAMPLES - 1));
                     tau_b = SampleAtmosTau(atmos, atmosNNData, atmosIdx_b, atmosA);
                 }
-                XYZ_bounce = (corr_b.x + corr_dt.x) * tau_b / VisibleWavelengthPDF(lambda_b) *
-                             SampleCIE_XYZ_LUT(cieCMF_LUT, lambda_b);
+                f.tauB = tau_b;
+                f.pdfB = VisibleWavelengthPDF(lambda_b);
+                f.cmfB = SampleCIE_XYZ_LUT(cieCMF_LUT, lambda_b);
             }
         }
 
@@ -2812,8 +3490,28 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
         // density at each outgoing wavelength. Being inside the shared loop is
         // what makes the deterministic sweep, the quartet and a collapsed hero
         // ray agree without three implementations.
-        const float fluorM = FluorescenceExcitationWithLight(
-            material, NdotL, shadowFactor, visLight, visNeeScaleFluor, payload);
+        //
+        // At depth 0 the draw is a stratified, order-free function of the pixel
+        // and the sample, so it is made here. Deeper it is a PCG draw that used to
+        // follow the bounce children, so a fluorescent material defers it to the
+        // driver (a material that does not fluoresce returns zero without
+        // drawing, and is evaluated in place either way). The loop then leaves the
+        // excitation out and the fold adds it.
+        const bool fluorConfigured = material.fluorescenceExcitationCurveIndex >= 0 &&
+                                     material.fluorescenceEmissionCurveIndex >= 0 &&
+                                     material.fluorescenceYield > 0.0;
+        const bool fluorDeferred = fluorConfigured && payload.depth > 0u;
+        float fluorM = 0.0;
+        if (fluorDeferred) {
+            f.ctl |= QL_CTL_FLUOR_DEFERRED;
+            f.lightEmissive = visLight.emissive;
+            f.lightCurve = visLight.curveIndex;
+            f.neeScaleFluor = visNeeScaleFluor;
+        } else {
+            fluorM = FluorescenceExcitationWithLight(
+                material, NdotL, shadowFactor, visLight, visNeeScaleFluor, payload);
+        }
+        f.fluorM = fluorM;
         // Read the temperature without the sun-correction shadow rays and
         // ask whether this band can see thermal emission at all; only a hit
         // that can does the second, corrected read. In the visible the answer
@@ -3085,44 +3783,43 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
             // reflected light.
             const float L_thermal = thermalNegligible
                 ? 0.0 : epsilon_vis * IRPlanckRadiance(T_surface_vis, lambda) * ccBase;
+            if (heroRay || carriesQuartet) {
+                // Held, not summed: the indirect correction at this wavelength
+                // has not been traced yet and the excitation may not have been
+                // drawn. FoldVisible finishes (S5 + L_fluor) + L_thermal, adds
+                // the correction and composes the atmosphere, in the order this
+                // loop used to.
+                float tau_l = 1.0;
+                float lpath_l = 0.0;
+                if (atmosEnabled) {
+                    tau_l = SampleAtmosTau(atmos, atmosNNData, atmosIdx, atmosA);
+                    lpath_l = SampleAtmosLpath(atmos, atmosNNData, atmosIdx, atmosA, atmosAz);
+                }
+                f.pre[qi] = (((L_direct + L_ambient) + L_emissive) + L_ibl) + L_nee;
+                f.pre2[qi] = L_thermal;
+                f.tau4[qi] = tau_l;
+                f.lpath4[qi] = lpath_l;
+                continue;
+            }
+
+            if (fluorDeferred) {
+                // The sweep cannot sum an excitation that has not been drawn.
+                // Its term is linear in it, so the loop accumulates the unit sum
+                // and the fold scales it once.
+                const float Yf = material.fluorescenceYield *
+                    EvaluateEmissionCurve(
+                        spectralCurves, material.fluorescenceEmissionCurveIndex, lambda);
+                f.xyzF += Yf * cieSample.xyz * LAMBDA_STEP;
+            }
+
             float L_lambda = L_direct + L_ambient + L_emissive + L_ibl +
                              L_nee + L_fluor + L_thermal;
-
-            // The quartet's indirect correction at this wavelength, added
-            // before the atmosphere composes the surface rather than after:
-            // the correction is part of what the surface sends, and the
-            // deterministic path weighs its own correction by tau for the same
-            // reason.
-            if (carriesQuartet) {
-                L_lambda += quadBounce[qi];
-            }
 
             // NN atmosphere composition: L = tau_view(λ)·L_surface(λ) + L_path(λ)
             if (atmosEnabled) {
                 float tau_l = SampleAtmosTau(atmos, atmosNNData, atmosIdx, atmosA);
                 float lpath_l = SampleAtmosLpath(atmos, atmosNNData, atmosIdx, atmosA, atmosAz);
                 L_lambda = tau_l * L_lambda + lpath_l;
-            }
-
-            if (heroRay) {
-                // Scalar spectral radiance: no CIE weighting and no dλ here.
-                // The surface that sampled λ_h applies both, with 1/pdf. The
-                // indirect correction is at this same wavelength, so it adds
-                // straight in.
-                heroRadiance = L_lambda + heroBounce;
-                continue;
-            }
-
-            if (carriesQuartet) {
-                // Held, not weighed. This vertex may not be the one that drew
-                // these four wavelengths, and only that one knows the density
-                // they were drawn against; it applies the matching functions
-                // and the shared denominator once, at the end of the path.
-                if      (i == 0u) quadRadiance.x = L_lambda;
-                else if (i == 1u) quadRadiance.y = L_lambda;
-                else if (i == 2u) quadRadiance.z = L_lambda;
-                else              quadRadiance.w = L_lambda;
-                continue;
             }
 
             // 6. Weight by CIE XYZ color matching functions (High-precision LUT version)
@@ -3138,97 +3835,10 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
             XYZ_accum.z += L_lambda * z_bar * LAMBDA_STEP;
         }
 
-        // The indirect correction, already carrying cmf(lambda_b) and the 1/pdf
-        // that the deterministic grid gets from its LAMBDA_STEP. Zero for a hero
-        // ray, which took it above instead.
-        XYZ_accum += XYZ_bounce;
-
-        // ====================================================================
-        // XYZ Normalization for RGB Input Compatibility
-        // ====================================================================
-        // The Riemann sum XYZ = Σ[L(λ) × CMF(λ) × Δλ] produces values proportional
-        // to CIE integrals (∫ȳdλ ≈ 106.9 for Y channel).
-        //
-        // For NORMALIZED RGB input (0-1 range from config), we must divide by
-        // CIE_Y_INTEGRAL to get normalized output:
-        //   - Input white (1,1,1) → XYZ_y ≈ 106.9 → after normalization → 1.0 ✓
-        //   - Input gray (0.7,0.7,0.7) → XYZ_y ≈ 74.8 → after normalization → 0.7 ✓
-        //
-        // NOTE: If using physical radiance units (W/sr/m²/nm), comment out this
-        // normalization to preserve absolute values.
-        // ====================================================================
-        XYZ_accum /= CIE_Y_INTEGRAL;
-
-        // XYZ → Linear RGB (sRGB D65)
-        output_radiance = float4(ConvertXYZToLinearRGB(XYZ_accum), 0.0);
-
-        // ====================================================================
-        // CHROMATICITY CORRECTION for Equal-Integral CIE CMF Data
-        // ====================================================================
-        // Our CIE CMF LUT uses EQUAL-INTEGRAL normalization:
-        //   ∫x̄(λ)dλ ≈ ∫ȳ(λ)dλ ≈ ∫z̄(λ)dλ ≈ 106.85
-        //
-        // For FLAT spectrum material (gray colors), XYZ ratio is (1.0 : 1.0 : 1.0)
-        // After sRGB matrix, this produces RED-BIASED output:
-        //   RGB ∝ (1.27, 1.00, 0.96) due to XYZ→RGB matrix properties
-        //
-        // This correction neutralizes the chromaticity shift by scaling
-        // R and B channels to match G, ensuring flat spectrum → neutral gray.
-        //
-        // Correction factors (default 0.7872, 1.0437) derived from G/R and G/B ratios
-        // ====================================================================
-        output_radiance.r *= lut.chromaR_correction;
-        output_radiance.b *= lut.chromaB_correction;
-
-        // A hero ray reports its one wavelength's radiance, replacing all of
-        // the above. Placed AFTER the chromaticity correction on purpose: that
-        // correction scales R and B against G to neutralise a full-band flat
-        // spectrum, and applying it to a scalar would split one number into
-        // three different ones. This is not a colour and nothing downstream may
-        // treat it as one -- only the refracting surface reads it, and it
-        // multiplies by cmf(λ_h)/pdf to make a colour.
-        if (heroRay) {
-            output_radiance = float4(heroRadiance, heroRadiance, heroRadiance, 0.0);
-        }
-
-        // A quartet is four radiances and not a colour either, for the same
-        // reason and one more: the conversion below belongs to the vertex that
-        // drew the four, which is not necessarily this one. It is applied once,
-        // at the end of main(), after the medium and the transmission have had
-        // their say -- so what leaves here is the four numbers.
-        if (carriesQuartet) {
-            output_radiance = quadRadiance;
-        }
-
-        // NOTE: IBL is now integrated in the spectral loop above (L_ibl term)
-        // No need to add iblSpecular separately
-
-        // Validation: clamp and sanitize to prevent NaN/Inf
-        if (any(!isfinite(output_radiance))) {
-                FusionFlagNonFinite();
-            output_radiance = float4(0.0, 0.0, 0.0, 0.0);  // Fallback to black
-        }
-        // SYMMETRIC, for the reason raygen.rgen gives at its own clamp, plus a
-        // second one that applies to every band.
-        //
-        // A single sample here is out of gamut twice over. The indirect term is
-        // one wavelength, and a monochromatic radiance converted to linear sRGB
-        // lands outside the triangle with a genuinely negative channel; those
-        // excursions are what cancel against other wavelengths' when the
-        // samples are averaged. And the correction itself is a residual,
-        // L_in - L_base, which is negative wherever the hemisphere is darker
-        // than the uniform sky the analytic term assumed -- that is what
-        // occlusion IS in this estimator.
-        //
-        // Rectifying either at zero turns a mean of zero into a mean of
-        // (1 - rrSurvive) * rho * sky: the samples that kill the path keep the
-        // full analytic term while the ones that would have cancelled it are
-        // clipped away. Enclosed and shadowed surfaces read too bright, by more
-        // the darker they are. Neither the furnace suite nor check_sky_equiv
-        // can see it -- both are built on scenes where the correction is
-        // identically zero.
-        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
-            output_radiance = clamp(output_radiance, -1000.0, 1000.0);
+        // The sweep's sum so far. The correction, the normalisation and the
+        // conversion to a colour follow the children: FoldVisible.
+        f.xyz = XYZ_accum;
+        f.variant = QL_VARIANT_VIS;
 
     } else if (IsSingleWavelengthMode() &&
                RoutesToVisibleSingle(SingleModeWavelength(payload.heroLambda))) {
@@ -3477,20 +4087,28 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
                 }
             }
 
-            radiance_spectral += TraceEnvBounceResidual(
-                singleHitPos, normal, V, NdotV_s, roughness, qSpec_s,
-                (kD_scalar * spectralAlbedo * dtBase * sheenScale_s + wSheen_s) * ccBase +
-                    ccWeight * ccE,
-                F0_scalar * sheenScale_s * ccBase,
-                specularF90 * sheenScale_s * ccBase, rrSurvive_s,
-                skyRadiance_lambda, lambda, aniso, payload).x;
+            // Drawn here, traced by the driver, and added to the radiance by
+            // FoldSingle once the children have returned.
+            f.V = V;
+            f.NdotV = NdotV_s;
+            f.roughness = roughness;
+            f.base = skyRadiance_lambda;
+            f.lambdaB = lambda;
+            if (SampleBounce(
+                    singleHitPos, normal, V, NdotV_s, roughness, qSpec_s,
+                    (kD_scalar * spectralAlbedo * dtBase * sheenScale_s + wSheen_s) * ccBase +
+                        ccWeight * ccE,
+                    F0_scalar * sheenScale_s * ccBase,
+                    specularF90 * sheenScale_s * ccBase, rrSurvive_s,
+                    lambda, aniso, payload, f.wChild, req)) {
+                f.ctl |= QL_CTL_BOUNCE_TAKEN;
+            }
 
             // The transmitted half against the back hemisphere, as VIS_FUSED.
             if (wDt_s > 0.0) {
-                radiance_spectral += TraceEnvBounceResidual(
-                    singleHitPos, -normal, V, NdotV_s, roughness, 0.0,
-                    wDt_s * ccBase, 0.0, 0.0, wDt_s * ccBase,
-                    skyRadiance_lambda, lambda, IsotropicFrame(), payload).x;
+                f.ctl |= QL_CTL_DT_ENABLED;
+                f.wDT = wDt_s * ccBase;
+                f.rrDt = wDt_s * ccBase;
             }
         }
 
@@ -3534,44 +4152,32 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
             const float reflectance_s =
                 saturate(1.0 - emissivity_s - material.transmission);
 
+            // Both are added after the corrections, so they wait in the frame.
             if (T_single > 0.0) {
                 // ccBase: the coat dims the Planck term as it dims the bound
                 // emission and every other base term.
-                radiance_spectral += emissivity_s * IRPlanckRadiance(T_single, lambda) * ccBase;
+                f.ctl |= QL_CTL_THERMAL_TERM;
+                f.pre2.x = emissivity_s * IRPlanckRadiance(T_single, lambda) * ccBase;
             }
-            radiance_spectral += reflectance_s *
+            f.pre2.y = reflectance_s *
                 IRDownwellingRadiance(atmos, 0, lambda, lut.atmosphereTemperature_K,
                                       lut.skyEmissivityClear);
         }
 
-        const float fluorM = SampleFluorescenceExcitation(
-            material, ray.Origin + ray.Direction * rec.t,
-            normal, NdotL, shadowFactor, payload);
-        radiance_spectral += material.fluorescenceYield *
-            EvaluateEmissionCurve(spectralCurves,
-                                  material.fluorescenceEmissionCurveIndex, lambda) *
-            fluorM * (1.0 / PI);
-
-        // NN atmosphere composition (single wavelength: LUT baked with one sample)
+        // The excitation integral used to be drawn here, after both bounce
+        // children. It is the driver's now (a SINGLE vertex always defers it: it
+        // is a stratified draw at depth 0 and a PCG draw deeper, and the order is
+        // what matters), and FoldSingle adds it with the corrections, the NN
+        // atmosphere composition, the validation and the clamp.
+        f.ctl |= QL_CTL_FLUOR_DEFERRED;
+        f.pre.x = radiance_spectral;
         if (atmosEnabled) {
             const uint atmosIdx = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT
                 ? CameraAtmosLambdaIndex(cameraResponseTable, lambda, atmos.numLambda) : 0u;
-            float tau_l = SampleAtmosTau(atmos, atmosNNData, atmosIdx, atmosA);
-            float lpath_l = SampleAtmosLpath(atmos, atmosNNData, atmosIdx, atmosA, atmosAz);
-            radiance_spectral = tau_l * radiance_spectral + lpath_l;
+            f.tau4.x = SampleAtmosTau(atmos, atmosNNData, atmosIdx, atmosA);
+            f.lpath4.x = SampleAtmosLpath(atmos, atmosNNData, atmosIdx, atmosA, atmosAz);
         }
-
-        // Validation. Symmetric: the bounce above is a residual and goes
-        // negative under occlusion; see the note at the VIS_FUSED clamp.
-        if (!isfinite(radiance_spectral)) {
-                FusionFlagNonFinite();
-            radiance_spectral = 0.0;
-        }
-        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
-            radiance_spectral = clamp(radiance_spectral, -1000.0, 1000.0);
-
-        // Output as grayscale (replicate scalar to RGB for display)
-        output_radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
+        f.variant = QL_VARIANT_SINGLE;
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED ||
                (IsSingleWavelengthMode() &&
@@ -3707,14 +4313,22 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
         const float wDt_b = dt * rhoDt_b * ccBase;
         const float wTotal_b =
             (rho_b * dtBase * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE;
-        float bounceCorr = TraceEnvBounceResidual(
-            swirHitPos, normal, V, NdotV_swir, roughness,
-            0.0, wTotal_b, wTotal_b, wTotal_b, wTotal_b,
-            L_base_b, lambda_b, aniso, payload).x;
+        // Drawn here and traced by the driver; FoldInfrared adds the corrections.
+        f.V = V;
+        f.NdotV = NdotV_swir;
+        f.roughness = roughness;
+        f.base = L_base_b;
+        f.lambdaB = lambda_b;
+        if (SampleBounce(
+                swirHitPos, normal, V, NdotV_swir, roughness,
+                0.0, wTotal_b, wTotal_b, wTotal_b, wTotal_b,
+                lambda_b, aniso, payload, f.wChild, req)) {
+            f.ctl |= QL_CTL_BOUNCE_TAKEN;
+        }
         if (wDt_b > 0.0) {
-            bounceCorr += TraceEnvBounceResidual(
-                swirHitPos, -normal, V, NdotV_swir, roughness, 0.0,
-                wDt_b, 0.0, 0.0, wDt_b, L_base_b, lambda_b, IsotropicFrame(), payload).x;
+            f.ctl |= QL_CTL_DT_ENABLED;
+            f.wDT = wDt_b;
+            f.rrDt = wDt_b;
         }
 
         // NOTE: Removed [unroll] to reduce shader compilation time
@@ -3883,21 +4497,14 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
         // neither factor is present. View-path transmittance applies as it does
         // to the loop's terms; L_path does not, being per pixel rather than per
         // light path.
+        // The correction itself is FoldInfrared's, added once the children have
+        // returned; this vertex hands over the band average and, when the NN
+        // atmosphere composes it, the transmittance the correction is weighted by.
+        f.pre.x = radiance_avg;
         if (atmosEnabled) {
-            bounceCorr *= SampleAtmosTau(atmos, atmosNNData, atmosIdx_b, atmosA);
+            f.tau4.x = SampleAtmosTau(atmos, atmosNNData, atmosIdx_b, atmosA);
         }
-        radiance_avg += bounceCorr;
-
-        // Validation. Symmetric: bounceCorr is a residual and goes negative
-        // under occlusion; see the note at the VIS_FUSED clamp.
-        if (!isfinite(radiance_avg)) {
-                FusionFlagNonFinite();
-            radiance_avg = 0.0;
-        }
-        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
-            radiance_avg = clamp(radiance_avg, -1e6, 1e6);
-
-        output_radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
+        f.variant = QL_VARIANT_IR;
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_NIR_FUSED) {
         // ====================================================================
@@ -4006,14 +4613,21 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
         // qSpec 0, as in the SWIR branch: the bounce estimates the same
         // Lambertian f the loop's direct term uses, not a GGX lobe carrying the
         // reflectance as a Schlick weight.
-        float bounceCorr = TraceEnvBounceResidual(
-            nirHitPos, normal, V, NdotV_nir, roughness,
-            0.0, wTotal_b, wTotal_b, wTotal_b, wTotal_b,
-            L_base_b, lambda_b, aniso, payload).x;
+        f.V = V;
+        f.NdotV = NdotV_nir;
+        f.roughness = roughness;
+        f.base = L_base_b;
+        f.lambdaB = lambda_b;
+        if (SampleBounce(
+                nirHitPos, normal, V, NdotV_nir, roughness,
+                0.0, wTotal_b, wTotal_b, wTotal_b, wTotal_b,
+                lambda_b, aniso, payload, f.wChild, req)) {
+            f.ctl |= QL_CTL_BOUNCE_TAKEN;
+        }
         if (wDt_b > 0.0) {
-            bounceCorr += TraceEnvBounceResidual(
-                nirHitPos, -normal, V, NdotV_nir, roughness, 0.0,
-                wDt_b, 0.0, 0.0, wDt_b, L_base_b, lambda_b, IsotropicFrame(), payload).x;
+            f.ctl |= QL_CTL_DT_ENABLED;
+            f.wDT = wDt_b;
+            f.rrDt = wDt_b;
         }
 
         // NOTE: Removed [unroll] to reduce shader compilation time
@@ -4147,22 +4761,14 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
 
         // pdf = 1/band_width cancels the band average's own factor, so the
         // correction needs no further weight; see the SWIR branch.
+        // The correction itself is FoldInfrared's, added once the children have
+        // returned; this vertex hands over the band average and, when the NN
+        // atmosphere composes it, the transmittance the correction is weighted by.
+        f.pre.x = radiance_avg;
         if (atmosEnabled) {
-            bounceCorr *= SampleAtmosTau(atmos, atmosNNData, atmosIdx_b, atmosA);
+            f.tau4.x = SampleAtmosTau(atmos, atmosNNData, atmosIdx_b, atmosA);
         }
-        radiance_avg += bounceCorr;
-
-        // Validation
-        if (!isfinite(radiance_avg)) {
-                FusionFlagNonFinite();
-            radiance_avg = 0.0;
-        }
-        // Symmetric: bounceCorr is a residual and goes negative under
-        // occlusion; see the note at the VIS_FUSED clamp.
-        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
-            radiance_avg = clamp(radiance_avg, -1e6, 1e6);
-
-        output_radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
+        f.variant = QL_VARIANT_IR;
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED ||
                SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED ||
@@ -4261,7 +4867,7 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
         // The wavelength loop below reflects the analytic downwelling spectrum
         // from the whole hemisphere at once. That is the base; this is what it
         // gets wrong when the surface can see something other than sky. See
-        // TraceEnvBounceResidual.
+        // SampleBounce.
         //
         // The wavelength is hoisted above the call because the loop needs its
         // LUT index too: a ray that already carries a hero wavelength answers
@@ -4289,10 +4895,17 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
         // Lambertian rho(λ) × L_down, and the bounce must estimate that same f
         // or the correction converges to a different integral than the base it
         // corrects.
-        float bounceCorr = TraceEnvBounceResidual(
-            irHitPos, normal, V, NdotV, roughness,
-            0.0, rho_b, rho_b, rho_b, rho_b,
-            L_base_b, lambda_b, aniso, payload).x;
+        f.V = V;
+        f.NdotV = NdotV;
+        f.roughness = roughness;
+        f.base = L_base_b;
+        f.lambdaB = lambda_b;
+        if (SampleBounce(
+                irHitPos, normal, V, NdotV, roughness,
+                0.0, rho_b, rho_b, rho_b, rho_b,
+                lambda_b, aniso, payload, f.wChild, req)) {
+            f.ctl |= QL_CTL_BOUNCE_TAKEN;
+        }
 
         // Loop over wavelengths in IR band ([loop]: keep code size bounded).
         // A hero ray runs one iteration at its own wavelength and reports a
@@ -4530,24 +5143,14 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
         // The view-path transmittance still applies: the loop's terms each got
         // tau(lambda_i), so this one gets tau(lambda_b). L_path does not -- it is
         // added once per pixel by the loop, not once per light path.
+        // The correction itself is FoldInfrared's, added once the children have
+        // returned; this vertex hands over the band average and, when the NN
+        // atmosphere composes it, the transmittance the correction is weighted by.
+        f.pre.x = radiance_avg;
         if (atmosEnabled) {
-            bounceCorr *= SampleAtmosTau(atmos, atmosNNData, atmosIdx_b, atmosA);
+            f.tau4.x = SampleAtmosTau(atmos, atmosNNData, atmosIdx_b, atmosA);
         }
-        radiance_avg += bounceCorr;
-
-        // Validation
-        if (!isfinite(radiance_avg)) {
-                FusionFlagNonFinite();
-            radiance_avg = 0.0;
-        }
-        // Symmetric, and wide for IR's dynamic range: bounceCorr is a residual
-        // and goes negative under occlusion; see the note at the VIS_FUSED
-        // clamp.
-        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
-            radiance_avg = clamp(radiance_avg, -1e6, 1e6);
-
-        // Output as grayscale (IR images are single-channel)
-        output_radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
+        f.variant = QL_VARIANT_IR;
 
     } else {
         // ====================================================================
@@ -4565,6 +5168,21 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
 
         output_radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
     }
+
+    // The chain is over: what the driver and the folds need from here on.
+    f.outRadiance = output_radiance;
+    f.rng = payload.rngState;
+    f.materialId = materialID;
+    f.heroIn = payload.heroLambda;
+    f.heroSigned = heroSigned;
+    f.hitPos = ray.Origin + ray.Direction * rec.t;
+    f.t = rec.t;
+    f.normal = normal;
+    f.rayDir = rayDir;
+    f.NdotL = NdotL;
+    f.shadowFactor = shadowFactor;
+    if (hitBackFace) f.ctl |= QL_CTL_HIT_BACK;
+    if (atmosEnabled) f.ctl |= QL_CTL_ATMOS;
 
     // ========================================================================
     // Debug Visualization Output
@@ -4752,12 +5370,12 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
             case DEBUG_MODE_XYZ:
                 // For spectral modes, this would show XYZ values
                 // For RGB mode, show a placeholder
-                debug_output = output_radiance.rgb;  // Current output as fallback
+                f.ctl |= QL_CTL_DEBUG_OUT;  // the finished output, known after the children
                 break;
 
             case DEBUG_MODE_BEFORE_CHROMA:
                 // RGB before chromaticity correction (same as XYZ for now)
-                debug_output = output_radiance.rgb;
+                f.ctl |= QL_CTL_DEBUG_OUT;
                 break;
 
             case DEBUG_MODE_SPECTRAL_REFL: {
@@ -5103,8 +5721,11 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
                 break;
         }
 
-        // Apply debug output and return early
-        payload.radiance = float4(debug_output, 0.0);
+        // The view answers instead of the radiance, once the children have
+        // returned: FoldVertex writes it. Nothing below it is evaluated, as
+        // before.
+        f.ctl |= QL_CTL_DEBUG;
+        f.debugOut = debug_output;
         return;
     }
 
@@ -5271,22 +5892,7 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
         shadowRay.TMin = 0.001;
         shadowRay.TMax = 10000.0;
 
-        Payload shadowPayload=(Payload)0;
-        shadowPayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
-        shadowPayload.isShadowed = 1;  // Assume shadowed until miss shader says otherwise
-        shadowPayload.heroLambda = payload.heroLambda;
-        shadowPayload.depth = payload.depth + 1;
-        shadowPayload.rngState = payload.rngState;
-        shadowPayload.bsdfPdf = 0.0;   // not a BSDF sample
-
-        // Trace shadow ray (uses miss shader index 1 for shadows)
-        const FusionMediumContext fusionContext5=SaveFusionMedium();
-    InheritFusionMedium(shadowPayload);
-    TraceRay(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
-                 0xFF, 0, 0, 1, shadowRay, shadowPayload);
-    RestoreFusionMedium(fusionContext5);
-
-        float sunVisibility = (shadowPayload.isShadowed == 0) ? 1.0 : 0.0;
+        float sunVisibility = QlVisible(shadowRay) ? 1.0 : 0.0;
 
         // In-scattering: σ_s × phase × L_sun × visibility × (1 - T) / σ_t
         // The (1 - T) / σ_t term integrates scattering over the path
@@ -5336,7 +5942,9 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
                 }
             }
         }
-        output_radiance = output_radiance * transmittance4 + inScattered4;
+        f.ctl |= QL_CTL_VOLUME;
+        f.volT = transmittance4;
+        f.volS = inScattered4;
     }
 
     // ========================================================================
@@ -5377,28 +5985,6 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
         (IsSingleWavelengthMode() &&
          RoutesToThermalBranch(SingleModeWavelength(payload.heroLambda)));
     if (material.transmission > 0.0 && !thermalBranch && payload.depth < MAX_PATH_DEPTH) {
-        // Get hit point and ray direction
-        float3 hitPoint = ray.Origin + ray.Direction * rec.t;
-        float3 rayDir = ray.Direction;
-
-        // Entering or exiting the medium. Read off which face was hit rather
-        // than off the normal: the normal was face-forwarded hundreds of lines
-        // above and answers "entering" either way, which left every
-        // Beer-Lambert guard below unreachable and volume absorption silently
-        // doing nothing in every mode.
-        bool entering = !hitBackFace;
-
-        // The shading normal is already turned to face the ray, and that is
-        // the side Refract wants it on whichever way the ray is travelling;
-        // only the pair of indices changes with the direction. Flipping it
-        // here as well was harmless while `entering` was stuck true, and would
-        // have sent an exiting ray somewhere else once it was not -- reflect()
-        // is even in N and does not care, refract() is not and does.
-        float3 N = normal;
-
-        // Compute Fresnel reflectance (exact dielectric formula)
-        float cosI = abs(dot(N, -rayDir));
-
         // Scale transmission contribution by material.transmission factor.
         // KHR_materials_transmission puts the factor in the R channel of its
         // texture, multiplied with the scalar -- a textured pane can be clear
@@ -5417,398 +6003,34 @@ void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
         }
         transmissionWeight = saturate(transmissionWeight);
 
-        // Compute reflection direction (same for all wavelengths)
-        float3 reflectDir = reflect(rayDir, N);
-
-        // ====================================================================
-        // Dispersion Handling: Wavelength-Dependent IOR
-        // ====================================================================
-        // When material.dispersion > 0, different wavelengths refract at
-        // different angles (chromatic dispersion / rainbow effect).
-        //
-        // For RGB mode: Approximate by tracing 3 rays at R/G/B wavelengths
-        // For VIS_FUSED: Use central wavelength (550nm) for single ray
-        // For SINGLE: Use pushConsts.camera.wavelength_nm
-        //
-        // Dispersion: n(lambda) follows KHR_materials_dispersion's Cauchy
-        // form with lambda in NANOMETRES --
-        //   n(λ) = max(n_d + (n_d − 1)·dispersion·(523655/λ² − 1.5168), 1)
-        // see CauchyIOR in common.hlsli. The same formula prefers a measured
-        // n(λ) table when one is bound (RefractionIOR in pbr.hlsli).
-        // ====================================================================
-
-        float4 transmissionRadiance = float4(0.0, 0.0, 0.0, 0.0);
-
-        // PCG random number for reflection/refraction decision
-        uint rngState = payload.rngState;
-        rngState = rngState * 747796405u + 2891336453u;
-        uint word = ((rngState >> ((rngState >> 28u) + 4u)) ^ rngState) * 277803737u;
-        word = (word >> 22u) ^ word;
-        float xi = float(word) / 4294967296.0;
-        payload.rngState = rngState;
-
-        // Prepare recursive ray template
-        RayDesc recursiveRay;
-        recursiveRay.Origin = hitPoint;
-        recursiveRay.TMin = 0.001;
-        recursiveRay.TMax = 10000.0;
-
-        // Prepare recursive payload template
-        Payload recursivePayload=(Payload)0;
-        recursivePayload.isShadowed = 0;
-        // A refracted or specularly reflected ray is not a BSDF *sample* in the
-        // MIS sense -- the direction was determined, not drawn from a density --
-        // so an emitter it lands on contributes its full emission.
-        recursivePayload.bsdfPdf = 0.0;
-        recursivePayload.depth = payload.depth + 1;
-        recursivePayload.rngState = rngState;
-
-        recursivePayload.heroLambda = heroSigned;
-
-        // A material disperses if it carries an Abbe number or a measured
-        // n(lambda) table. Nothing here is specific to glass: any medium with n
-        // meaningfully above 1 disperses, and water (1.333, Abbe ~56), ice,
-        // acrylic and quartz all reach this path the same way a prism does.
-        bool materialDisperses = (material.dispersion > 0.001) ||
-                                 (material.complexRefractiveIndexIndex >= 0);
-
-        // VIS_FUSED disperses by hero wavelength sampling; only an undivided
-        // ray samples one. A ray that already carries a hero wavelength
-        // refracts at that wavelength and stays single -- resampling would
-        // branch the path count multiplicatively and bias nothing usefully.
-        //
-        // A quartet reaches here too, and for it this is where the four become
-        // one: n(λ) sends them four ways and a path can follow one. It does not
-        // draw, having a hero already; a ray that was collapsed by an earlier
-        // interface does not split again.
-        bool heroSplit = materialDisperses &&
-                         (carriesQuartet ||
-                          (IsVisMode(SPEC_SPECTRAL_MODE) && payload.heroLambda == 0.0));
-
-        bool hasDispersion = materialDisperses &&
-                             (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB);
-
-        if (heroSplit) {
-            // ================================================================
-            // Hero wavelength: one wavelength, one path, weighted by 1/pdf
-            // ================================================================
-            // The band cannot follow one path through a dispersive interface,
-            // so pick a wavelength and follow that. The estimator is
-            //
-            //   XYZ = L(λ_h) · cmf(λ_h) / pdf(λ_h)
-            //
-            // whose expectation is ∫L(λ)cmf(λ)dλ -- the same integral the
-            // deterministic 32-point grid approximates. That equivalence is the
-            // test: with a CONSTANT n(λ) this must converge to the
-            // non-dispersing render, and it does, to 0.29% at 512 spp.
-            //
-            // λ_h is drawn against the CMF-shaped density rather than flat, for
-            // the reason given at SampleVisibleWavelength: uniform draws make
-            // the weight cmf/pdf swing with nothing but the draw, and a prism
-            // pixel already carries the reflect/refract coin on top of it.
-            //
-            // Wavelength is where the noise goes. Nothing outside a dispersive
-            // refraction samples it, so an ordinary scene is unaffected.
-            // ================================================================
-            float lambda_h = heroSigned;
-            if (!carriesQuartet) {
-                uint heroState = payload.rngState * 747796405u + 2891336453u;
-                uint heroWord = ((heroState >> ((heroState >> 28u) + 4u)) ^ heroState)
-                                * 277803737u;
-                heroWord = (heroWord >> 22u) ^ heroWord;
-                payload.rngState = heroState;
-
-                const float u_lambda = float(heroWord) / 4294967296.0;
-                lambda_h = SampleVisibleWavelength(u_lambda);
-            }
-
-            const float ior_h = RefractionIOR(material, lambda_h);
-            const float n1 = entering ? 1.0 : ior_h;
-            const float n2 = entering ? ior_h : 1.0;
-
-            float F = FresnelDielectric(cosI, n1, n2);
-            const float3 refractDir = Refract(rayDir, N, n1 / n2);
-            if (length(refractDir) < 0.001) F = 1.0;   // total internal reflection
-
-            recursivePayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
-            // Negative: one wavelength, and no longer a quartet. Positive is
-            // what the deterministic grid means by a hero ray, and it has no
-            // third state to confuse this with.
-            recursivePayload.heroLambda = carriesQuartet ? -lambda_h : lambda_h;
-            recursivePayload.rngState = payload.rngState;
-            recursiveRay.Direction = (xi < F) ? reflectDir : refractDir;
-
-            const FusionMediumContext fusionContext6=SaveFusionMedium();
-    InheritFusionMedium(recursivePayload);
-    TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
-    RestoreFusionMedium(fusionContext6);
-
-            // Scalar spectral radiance, by the contract on Payload::heroLambda.
-            float L_h = recursivePayload.radiance.r;
-
-            if (!entering && material.attenuationDistance > 0.0) {
-                // One wavelength, so one transmittance: the attenuation colour
-                // is read at lambda_h rather than averaged across channels that
-                // this ray is not carrying. Averaging made a red-absorbing
-                // glass attenuate a blue path by a red glass's mean.
-                L_h *= BeerLambertAt(
-                    FetchRgbSpectrum(rgbToSpectrumTable, material.attenuationColor),
-                    lambda_h, rec.t * worldUnitsToMeters, material.attenuationDistance);
-            }
-
-            if (carriesQuartet) {
-                // What the surviving wavelength brings back, scaled so that the
-                // root's division by the shared denominator leaves exactly
-                // L_h/p(λ_h) -- the single-wavelength estimator, unchanged by
-                // having been reached through a quartet. The first component is
-                // the hero's own, so no matching function is applied here
-                // either; the root applies cmf(λ_0) = cmf(λ_h) to it.
-                //
-                // On the MIS side the weight is one: a refracted direction at
-                // this interface can only be generated by the wavelength that
-                // was bent to it, so there is no other technique to share with.
-                transmissionRadiance = float4(
-                    L_h * quartetS / VisibleWavelengthPDF(lambda_h), 0.0, 0.0, 0.0);
-            } else {
-                const float3 cmf = SampleCIE_XYZ_LUT(cieCMF_LUT, lambda_h);
-                float3 XYZ_h = L_h * cmf / VisibleWavelengthPDF(lambda_h);
-                XYZ_h /= CIE_Y_INTEGRAL;
-
-                float3 heroRgb = ConvertXYZToLinearRGB(XYZ_h);
-                heroRgb.r *= lut.chromaR_correction;
-                heroRgb.b *= lut.chromaB_correction;
-                transmissionRadiance = float4(heroRgb, 0.0);
-            }
-
-        } else if (hasDispersion && SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
-            // ================================================================
-            // RGB Dispersion: Trace 3 separate rays for R, G, B wavelengths
-            // ================================================================
-            // This produces chromatic aberration / rainbow effects at edges
-            // Wavelengths: R=650nm, G=550nm, B=450nm (approximate primaries)
-            // ================================================================
-
-            float wavelengths[3] = { 650.0, 550.0, 450.0 };  // nm
-            float3 channelRadiance = float3(0.0, 0.0, 0.0);
-
-            // [loop] is REQUIRED: this loop contains a recursive TraceRay.
-            // Unrolling it creates multiple static recursive trace call sites,
-            // which crashes the device on nested closest-hit invocations
-            // (same failure mode as the thermal-IR wavelength loop).
-            [loop]
-            for (int ch = 0; ch < 3; ch++) {
-                float lambda = wavelengths[ch];
-                float ior_lambda = RefractionIOR(material, lambda);
-
-                float n1 = entering ? 1.0 : ior_lambda;
-                float n2 = entering ? ior_lambda : 1.0;
-                float eta = n1 / n2;
-
-                float F = FresnelDielectric(cosI, n1, n2);
-                float3 refractDir = Refract(rayDir, N, eta);
-                bool hasTIR = (length(refractDir) < 0.001);
-
-                if (hasTIR) F = 1.0;
-
-                recursivePayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
-
-                // Use same random decision for all channels for consistency
-                if (xi < F) {
-                    // Reflection
-                    recursiveRay.Direction = reflectDir;
-                } else {
-                    // Refraction with wavelength-specific direction
-                    recursiveRay.Direction = refractDir;
-                }
-
-                const FusionMediumContext fusionContext7=SaveFusionMedium();
-    InheritFusionMedium(recursivePayload);
-    TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
-    RestoreFusionMedium(fusionContext7);
-
-                // Extract the channel-specific contribution
-                float channelValue = (ch == 0) ? recursivePayload.radiance.r :
-                                     (ch == 1) ? recursivePayload.radiance.g :
-                                                 recursivePayload.radiance.b;
-
-                // Apply Beer-Lambert absorption for this channel
-                if (!entering && material.attenuationDistance > 0.0) {
-                    float travelDistance = rec.t * worldUnitsToMeters;
-                    float3 volumeAtten = BeerLambertAbsorption(
-                        material.attenuationColor, travelDistance, material.attenuationDistance);
-                    float attenValue = (ch == 0) ? volumeAtten.r :
-                                       (ch == 1) ? volumeAtten.g : volumeAtten.b;
-                    channelValue *= attenValue;
-                }
-
-                if (ch == 0) channelRadiance.r = channelValue;
-                else if (ch == 1) channelRadiance.g = channelValue;
-                else channelRadiance.b = channelValue;
-            }
-
-            transmissionRadiance = float4(channelRadiance, 0.0);
-
-        } else {
-            // ================================================================
-            // Standard Refraction (no dispersion or single wavelength mode)
-            // ================================================================
-
-            // The wavelength this ray is accountable for, or 0 where the mode
-            // has none and n falls back to the material's n_d.
-            //
-            //   any band, ray carrying a hero wavelength -> that wavelength
-            //   VIS_FUSED undivided, or RGB              -> none
-            //   SINGLE and the undivided fused IR bands  -> the render wavelength
-            //
-            // A hero ray reaching here means the material does not disperse, or
-            // it is the second dispersive interface on the same path. Either
-            // way it keeps refracting at its own wavelength -- and since the IR
-            // bands now spawn hero rays of their own for the environment
-            // bounce, a bounce that then passes through a window has to refract
-            // at the wavelength it was sampled for, not at pushConsts.camera.wavelength_nm.
-            float refractLambda;
-            if (heroSigned != 0.0) {
-                refractLambda = abs(heroSigned);
-            } else if (IsVisMode(SPEC_SPECTRAL_MODE) ||
-                       SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
-                refractLambda = 0.0;
-            } else {
-                refractLambda = pushConsts.camera.wavelength_nm;
-            }
-
-            float effectiveIOR = RefractionIOR(material, refractLambda);
-
-            float n1 = entering ? 1.0 : effectiveIOR;
-            float n2 = entering ? effectiveIOR : 1.0;
-            float eta = n1 / n2;
-
-            float F = FresnelDielectric(cosI, n1, n2);
-            float3 refractDir = Refract(rayDir, N, eta);
-            bool hasTIR = (length(refractDir) < 0.001);
-
-            if (hasTIR) F = 1.0;
-
-            recursivePayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
-
-            // Single trace call site: pick the direction first, then trace.
-            // Duplicating TraceRay per branch multiplies the static recursive
-            // call sites for no benefit.
-            bool reflected = (xi < F);
-            recursiveRay.Direction = reflected ? reflectDir : refractDir;
-            const FusionMediumContext fusionContext8=SaveFusionMedium();
-    InheritFusionMedium(recursivePayload);
-    TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
-    RestoreFusionMedium(fusionContext8);
-
-            {
-                // Beer-Lambert on whichever way the ray leaves. At an exit hit
-                // the segment just travelled was inside the glass whether the
-                // ray now refracts out or reflects back in (TIR included), so
-                // both outcomes are attenuated -- as the hero and dispersive
-                // branches above already do. Attenuating only the refraction
-                // left internally reflected paths in thick coloured glass at
-                // full brightness.
-                float3 volumeAttenuation = float3(1.0, 1.0, 1.0);
-                if (!entering && material.attenuationDistance > 0.0) {
-                    float travelDistance = rec.t * worldUnitsToMeters;
-                    volumeAttenuation = BeerLambertAbsorption(
-                        material.attenuationColor, travelDistance, material.attenuationDistance);
-                }
-                // What survives the glass, per whatever this ray carries.
-                //
-                // The RGB triple is only the right answer for a ray that
-                // carries a colour. A ray carrying one wavelength that reads
-                // component 0 of an RGB attenuation gets the RED channel's
-                // absorption at every wavelength -- which is what the visible
-                // band's own indirect bounce was doing, so a red-absorbing
-                // glass dimmed the whole spectrum by its red figure instead of
-                // colouring what came through it.
-                float4 attenuation4 = float4(volumeAttenuation, 0.0);
-                if (!entering && material.attenuationDistance > 0.0) {
-                    const float travel = rec.t * worldUnitsToMeters;
-                    if (carriesQuartet) {
-                        // Four wavelengths, four transmittances, read off the
-                        // spectrum the attenuation colour stands for. This is
-                        // the difference between glass that tints what it
-                        // transmits and glass that only dims it.
-                        const float4 sAtten =
-                            FetchRgbSpectrum(rgbToSpectrumTable, material.attenuationColor);
-                        [unroll]
-                        for (uint q = 0u; q < VIS_HERO_QUARTET; ++q) {
-                            attenuation4[q] = BeerLambertAt(sAtten, quartet[q], travel,
-                                                            material.attenuationDistance);
-                        }
-                    } else if ((heroSigned != 0.0 && IsVisMode(SPEC_SPECTRAL_MODE)) ||
-                               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
-                                pushConsts.camera.wavelength_nm <= SPECTRAL_VIS_LAMBDA_MAX) ||
-                               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT &&
-                                abs(heroSigned) <= SPECTRAL_VIS_LAMBDA_MAX)) {
-                        // One wavelength, so one transmittance, at that
-                        // wavelength -- the same reading the dispersive branch
-                        // above makes.
-                        const float a = BeerLambertAt(
-                            FetchRgbSpectrum(rgbToSpectrumTable, material.attenuationColor),
-                            heroSigned != 0.0 ? abs(heroSigned) : pushConsts.camera.wavelength_nm,
-                            travel, material.attenuationDistance);
-                        attenuation4 = float4(a, a, a, 0.0);
-                    } else if (!IsVisMode(SPEC_SPECTRAL_MODE) &&
-                               SPEC_SPECTRAL_MODE != SPECTRAL_MODE_RGB) {
-                        // A band that carries one number per ray gets one
-                        // transmittance, not three: outside the visible there
-                        // is no fit to read the colour as a spectrum, so the
-                        // average is the honest reduction -- the same one the
-                        // participating medium makes, and for the same reason.
-                        const float a = (volumeAttenuation.r + volumeAttenuation.g +
-                                         volumeAttenuation.b) / 3.0;
-                        attenuation4 = float4(a, a, a, 0.0);
-                    }
-                }
-                transmissionRadiance = recursivePayload.radiance * attenuation4;
-                // The reflected child's w is passed through as it always was;
-                // only the refracted one historically carried w = 0.
-                if (reflected) transmissionRadiance.w = recursivePayload.radiance.w;
-            }
-        }
-
-        // Blend transmission with surface shading
-        output_radiance = lerp(output_radiance, transmissionRadiance, transmissionWeight);
+        // Everything else the glass does follows the bounce children and so
+        // belongs to the driver: the reflect-or-refract coin and the hero
+        // wavelength are drawn from the stream the bounces left
+        // (NextTransmissionChild), each child's answer is attenuated on the way
+        // out (CompleteTransmission), and the blend with the surface shading is
+        // FoldVertex's. Its geometry -- Fresnel, the refracted direction -- is
+        // re-derived there from the frame, where the old body had it in locals.
+        f.tw = transmissionWeight;
+        f.ctl |= QL_CTL_TRANS;
     }
+}
 
-    // ========================================================================
-    // The quartet becomes a colour, once, where it was drawn
-    // ========================================================================
-    //     XYZ = sum_j L(lambda_j) cmf(lambda_j) / S
-    //
-    // with S the denominator every one of the four shares -- see
-    // QuartetMisDenominator. Everything between the draw and this line, the
-    // surface and its correction and whatever medium or glass the path went
-    // through, has been carrying four radiances so that the matching functions
-    // are applied in exactly one place. A ray that is only carrying the four
-    // upward falls through and hands them on.
-    if (quartetRoot) {
-        float3 XYZ_hero = float3(0.0, 0.0, 0.0);
-        [unroll]
-        for (uint q = 0u; q < VIS_HERO_QUARTET; ++q) {
-            XYZ_hero += output_radiance[q] * SampleCIE_XYZ_LUT(cieCMF_LUT, quartet[q]);
-        }
-        XYZ_hero /= (quartetS * CIE_Y_INTEGRAL);
-
-        float3 heroRgb = ConvertXYZToLinearRGB(XYZ_hero);
-        heroRgb.r *= lut.chromaR_correction;
-        heroRgb.b *= lut.chromaB_correction;
-        output_radiance = float4(heroRgb, 0.0);
+// The closest-hit entry's body. It drives a vertex through its children: phase A,
+// then each child the frame asks for -- traced from the single radiance
+// TraceRay site, QlTraceRadiance -- and the fold. Called as the closest-hit
+// shader still, so the recursion is the old one; what has changed is that it is
+// now this loop that recurses and the vertex is no longer one function.
+void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
+    VertexFrame f = (VertexFrame)0;
+    ChildRequest req = (ChildRequest)0;
+    ShadeVertexA(rec, ray, payload, f, req);
+    if ((f.ctl & QL_CTL_FINISHED) != 0u) {
+        return;
     }
-
-    // Every mode but a quartet carrier writes zero into the fourth component
-    // and reads it nowhere, so this one assignment serves all of them.
-    payload.radiance = output_radiance;
-    payload.fusionTerminalDepth = payload.depth;
-    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE ||
-        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT) {
-        payload.fusionContributions = FusionClassify(output_radiance.x, payload.fusionRoute);
-        FusionRecordRadianceTerm(payload, 0, output_radiance.x);
-        FusionAttenuateSegment(payload, rec.t);
+    [loop] while (Advance(f, payload.depth, req)) {
+        CompleteChild(f, req.kind, QlTraceRadiance(req));
     }
+    FoldVertex(f, payload);
 }
 
 #endif // QUANTILOOM_SHADE_VERTEX_HLSLI

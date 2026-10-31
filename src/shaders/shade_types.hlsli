@@ -26,6 +26,25 @@ float3x3 QlWorldToObject(HitRecord hit) {
     return m;
 }
 
+// What a vertex asks the driver to trace next. The fields are exactly what the
+// old child Payload was filled with before InheritFusionMedium ran over it, so a
+// request carries no fusion state: the driver supplies the medium.
+static const uint QL_CHILD_BOUNCE   = 0u;  // environment bounce, front lobe
+static const uint QL_CHILD_BOUNCE_DT = 1u; // environment bounce, back lobe
+static const uint QL_CHILD_HERO     = 2u;  // hero-split refraction or reflection
+static const uint QL_CHILD_DISPERSE = 3u;  // one of the three RGB dispersion rays
+static const uint QL_CHILD_REFRACT  = 4u;  // standard refraction or reflection
+
+struct ChildRequest {
+    RayDesc ray;
+    uint    rayFlags;
+    uint    kind;
+    uint    depth;
+    uint    rng;
+    float   heroLambda;
+    float   bsdfPdf;
+};
+
 // Per-vertex state <-> ray payload. The two carry the same fields while a
 // subtree can still be traced recursively; only their owners differ.
 PathVertex QlFromRay(Payload p) {
