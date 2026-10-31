@@ -103,15 +103,15 @@ void FusionMarkUnknownTail() {
     fusionRecords.InterlockedOr(kFusionDiagnosticFlagsWord * 4, kFusionFlagUnknownTail, unused);
 }
 
-uint FusionVertexAddress(Payload p) {
+uint FusionVertexAddress(PathVertex p) {
     const uint rays = fusionRecords.Load(kFusionStoredRaysWord * 4),
                slots = fusionRecords.Load(kFusionSlotsPerRayWord * 4);
     return kFusionHeaderBytes + rays * kFusionRayRecordBytes +
            (p.fusionPathId * slots + p.depth) * kFusionVertexRecordBytes;
 }
 
-void FusionRecordVertex(Payload p, float3 hit, float3 normal, uint nodeId,
-                        uint primitiveId, uint kind) {
+void FusionRecordVertex(PathVertex p, float3 hit, float3 normal, uint nodeId,
+                        uint primitiveId, uint kind, float hitT) {
     if (p.fusionPathId == kFusionNoPath ||
         p.depth >= fusionRecords.Load(kFusionSlotsPerRayWord * 4))
         return;
@@ -119,13 +119,13 @@ void FusionRecordVertex(Payload p, float3 hit, float3 normal, uint nodeId,
     fusionRecords.Store4(address, asuint(float4(hit, p.heroLambda != 0 ? abs(p.heroLambda)
                                                                      : pushConsts.camera.wavelength_nm)));
     fusionRecords.Store4(address + kFusionVertexNormalOffset,
-                         asuint(float4(normal, RayTCurrent() + p.fusionSegmentOffset)));
+                         asuint(float4(normal, hitT + p.fusionSegmentOffset)));
     fusionRecords.Store4(address + kFusionVertexIdentityOffset,
                        uint4(kind, nodeId, primitiveId, p.fusionRoute));
     fusionRecords.Store4(address + kFusionVertexInterfaceOffset, asuint(float4(1, 1, 0, 1)));
 }
 
-void FusionRecordInterface(Payload p, float3 outgoing, float weight, float n1, float n2) {
+void FusionRecordInterface(PathVertex p, float3 outgoing, float weight, float n1, float n2) {
     if (p.fusionPathId == kFusionNoPath ||
         p.depth >= fusionRecords.Load(kFusionSlotsPerRayWord * 4))
         return;
@@ -135,7 +135,7 @@ void FusionRecordInterface(Payload p, float3 outgoing, float weight, float n1, f
     fusionRecords.Store2(address + kFusionVertexInterfaceOffset, asuint(float2(n1, n2)));
 }
 
-void FusionRecordSegment(Payload p, float sigma, float transmittance) {
+void FusionRecordSegment(PathVertex p, float sigma, float transmittance) {
     if (p.fusionPathId == kFusionNoPath ||
         p.depth >= fusionRecords.Load(kFusionSlotsPerRayWord * 4))
         return;
@@ -143,7 +143,7 @@ void FusionRecordSegment(Payload p, float sigma, float transmittance) {
                          asuint(float2(sigma, transmittance)));
 }
 
-void FusionRecordRadianceTerm(Payload p, uint term, float value) {
+void FusionRecordRadianceTerm(PathVertex p, uint term, float value) {
     const uint base = fusionRecords.Load(kFusionTermsSectionWord * 4);
     if (base == 0 || p.fusionPathId == kFusionNoPath ||
         p.depth >= fusionRecords.Load(kFusionSlotsPerRayWord * 4))
@@ -166,7 +166,7 @@ void FusionFlagNonFinite() {
     fusionRecords.InterlockedOr(kFusionDiagnosticFlagsWord * 4, kFusionFlagNonFinite, unused);
 }
 
-void FusionRecordSky(Payload p) {
+void FusionRecordSky(PathVertex p) {
     if (p.fusionPathId == kFusionNoPath ||
         p.depth >= fusionRecords.Load(kFusionSlotsPerRayWord * 4))
         return;

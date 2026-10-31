@@ -360,6 +360,150 @@ struct Payload {
     // "uninitialised reads as the safest class" property: 0 is diffuse.
 };
 
+// Per-vertex path state: what the old child Payload carried in each direction,
+// as a type of its own so that the ray payload can later shrink to a hit
+// record. Field-identical to Payload while a subtree can still be traced
+// recursively; QlFromRay/QlToRay (shade_types.hlsli) convert at the stage
+// boundary, and the fusion record helpers take this type.
+struct PathVertex {
+    // Accumulated radiance (W·sr⁻¹·m⁻²), read two ways today:
+    //
+    //   heroLambda == 0   RGB in .rgb.
+    //   heroLambda != 0   scalar spectral radiance at that wavelength,
+    //                     replicated across .rgb by whichever branch answered.
+    //
+    // A VIS_HERO ray carrying a quartet is the third reading: L(λ_j) per
+    // component, four wavelengths of one path, converted to a colour only by
+    // the vertex that drew them. Every other mode writes .w zero and never
+    // reads it, so a component-wise clamp or finite guard over the whole
+    // float4 is the same arithmetic there as one over .rgb.
+    float4 radiance;                                                     // 16 bytes
+
+    // Shadow ray result (set by shadow miss shader)
+    // 0 = not shadowed (ray reached light), 1 = shadowed (ray hit occluder)
+    uint isShadowed;  // Shadow occlusion flag                          // 4 bytes
+
+    // Recursion depth for transmission/reflection rays
+    // 0 = primary ray, incremented for each bounce
+    // Used to limit recursion and for Russian roulette termination
+    uint depth;       // Current recursion depth                         // 4 bytes
+
+    // Random number generator state for stochastic decisions
+    // Used for Russian roulette termination and importance sampling
+    uint rngState;    // PCG hash state                                  // 4 bytes
+
+    // Hero wavelength, in nm, or 0 for "this ray carries the whole band".
+    //
+    // VIS_HERO reads the sign as well, because it has a third state to say:
+    //
+    //   0    undivided. Only a primary ray, which is where the quartet is
+    //        drawn.
+    //   > 0  a quartet whose hero this is. The other three are derived by
+    //        QuartetLambda and not stored; `radiance` carries L(λ_j) per
+    //        component and no CIE weighting -- the vertex that drew the
+    //        quartet applies that, once, at the end.
+    //   < 0  one wavelength, |heroLambda|, because a dispersive interface
+    //        collapsed the quartet onto it. Scalar out, like every other mode
+    //        that carries a wavelength.
+    //
+    // Every other mode uses only the first two states and never sets a
+    // negative, so a test on the sign distinguishes the readings without
+    // asking which mode is running. What follows describes those two.
+    //
+    // A ray with heroLambda != 0 reports SCALAR spectral radiance in
+    // `radiance`, not RGB, and every band's closest-hit and miss branch honours
+    // that: it runs one loop iteration at λ_h, skips its trapezoid weight and
+    // its band normalisation, and leaves both to whichever surface sampled the
+    // wavelength. RGB mode is the exception and never sees one.
+    //
+    // Two things set it, for the same underlying reason -- a path that can only
+    // answer for one wavelength must say so.
+    //
+    // DISPERSIVE REFRACTION. n(λ) sends each wavelength somewhere different, so
+    // a bent ray is accountable for the one wavelength it was bent for; there
+    // is no single path the band shares any more. "Dispersive" is about the
+    // medium, not about glass: anything with n meaningfully above 1 disperses,
+    // and the Abbe numbers are comparable -- water 1.333/55.7, ice, acrylic,
+    // quartz, gemstones. The gate keys on whether a material carries an Abbe
+    // number or an n(λ) table, not on what it is called, so a water surface
+    // reaches this path the same way a prism does. That is also why this is the
+    // mechanism participating media will need when they arrive.
+    //
+    // ENVIRONMENT BOUNCE. TraceEnvBounceResidual samples one wavelength per hit
+    // and weighs what comes back by the surface's reflectance AT THAT
+    // wavelength. Sending the band instead would return an average, and the
+    // product of two averages is not the average of the product -- which is
+    // exactly how much a quartz cavity was wrong by before the thermal bands
+    // carried a wavelength here. One ray either way; the wavelength is what
+    // makes it worth tracing.
+    //
+    // SINGLE mode leaves this at 0 and is not an exception to any of the above:
+    // the whole render is at camera.wavelength_nm, so a child ray arrives at
+    // the right wavelength by construction rather than by being told.
+    float heroLambda;  // nm, 0 = whole band                             // 4 bytes
+
+    // Hit distance of THIS ray, in world units (RayTCurrent()), or -1 on
+    // miss. Ray directions are normalized in raygen, so for the primary ray
+    // this is the Euclidean camera-to-surface distance. Raygen snapshots it
+    // into the depth AOV (binding 22) right after the primary trace returns;
+    // recursive payloads carry their own value, which nothing reads.
+    float primaryHitT;                                                   // 4 bytes
+
+    // Solid-angle density with which the BSDF chose this ray's direction, or 0
+    // for "this ray is not a BSDF sample" -- primary rays, shadow rays and
+    // refracted rays all pass 0.
+    //
+    // It exists so that a surface which turns out to be an emitter can tell how
+    // else the path reaching it might have been found. Emissive geometry is
+    // reachable two ways: by a BSDF-sampled bounce that happens to land on it,
+    // and by the light sampling the parent vertex did explicitly. Counting both
+    // at full strength would double the light, so each is weighted by the power
+    // heuristic over the two densities, which needs the other strategy's density
+    // at the same direction. The light side can compute the BSDF density itself;
+    // the BSDF side cannot know the light's, so it carries its own here and the
+    // emitter finishes the comparison.
+    //
+    // The density is the MIXTURE over both lobes -- qSpec * pdf_ggx +
+    // (1 - qSpec) * pdf_cos -- not the pdf of whichever lobe was chosen. Both
+    // sides must use the same function of direction for the weights to sum to
+    // one; which function it is only affects how good the split is.
+    float bsdfPdf;    // sr^-1, 0 = not a BSDF sample                     // 4 bytes
+
+    // Class of the surface the PRIMARY ray hit, written by the closest-hit
+    // shader on depth 0 and read by raygen once the primary trace returns.
+    // Bit 0: specular-weighted (metallic or near-mirror roughness). Bit 1:
+    // transparent (alpha-blended or transmissive). A reprojection between
+    // time strata cannot be trusted on either class -- specular energy moves
+    // with the viewpoint and transmission has no single surface depth -- so
+    // raygen folds these into the dynamic-exposure counters (binding 30).
+    // Misses and recursive payloads leave it 0, which counts as diffuse.
+    uint primaryMaterialFlags;                                           // 4 bytes
+    uint fusionMediumCount;
+    uint fusionMedia[kFusionMaxInitialMedia];
+    uint fusionFlags;
+    uint fusionRoute;
+    float3 fusionContributions;
+    uint fusionPathId;
+    float fusionResidual;
+    float fusionSegmentOffset;
+    float3 fusionPreviousPosition;
+    float3 fusionPreviousNormal;
+    uint fusionPreviousInstance;
+    uint fusionTerminalDepth;
+    uint fusionForced,fusionBranchMask;
+
+    // The opt-in fusion medium stack and contribution decomposition travel
+    // with a scalar wavelength. Every constructor must initialize them.
+    //
+    // Every site that constructs a Payload must set heroLambda. Left
+    // uninitialised it is not a crash -- it silently turns an ordinary ray into
+    // a single-wavelength one and the frame loses most of its light. bsdfPdf has
+    // the same property in the other direction: left uninitialised it can make
+    // an ordinary ray claim to be a light-sampling candidate and lose the
+    // emission it should have carried. primaryMaterialFlags has the same
+    // "uninitialised reads as the safest class" property: 0 is diffuse.
+};
+
 static uint fusionActiveMediumCount = 0;
 static uint fusionActiveMedia[kFusionMaxInitialMedia];
 struct FusionMediumContext {

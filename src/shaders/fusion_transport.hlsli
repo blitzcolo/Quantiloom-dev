@@ -13,10 +13,10 @@ bool FusionScalarTransport() {
            (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE ||
             SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT);
 }
-float FusionLambda(Payload p) {
+float FusionLambda(PathVertex p) {
     return p.heroLambda != 0 ? abs(p.heroLambda) : pushConsts.camera.wavelength_nm;
 }
-void FusionAttenuateSegment(inout Payload p, float distance) {
+void FusionAttenuateSegment(inout PathVertex p, float distance) {
     if (p.fusionMediumCount == 0 || !FusionScalarTransport())
         return;
     const FusionTransportData medium = fusionTransport[p.fusionMedia[p.fusionMediumCount - 1]];
@@ -39,8 +39,9 @@ void FusionAttenuateSegment(inout Payload p, float distance) {
     p.fusionContributions = p.fusionContributions * transmittance + FusionClassify(emission, p.fusionRoute);
     p.fusionResidual *= transmittance;
 }
-bool TraceFusionInterface(inout Payload p, MaterialData material, uint recordIndex,
-                          float3 hit, float3 faceNormal, bool backFace, float temperature) {
+bool TraceFusionInterface(inout PathVertex p, MaterialData material, uint recordIndex,
+                          float3 hit, float3 faceNormal, bool backFace, float temperature,
+                          RayDesc rayIn, float hitT, uint instanceIndex) {
     if (!FusionScalarTransport())
         return false;
     const FusionTransportData interfaceData = fusionTransport[recordIndex];
@@ -54,14 +55,14 @@ bool TraceFusionInterface(inout Payload p, MaterialData material, uint recordInd
     if (p.fusionMediumCount > 0)
         n1 = RefractionIOR(
             materials[fusionTransport[p.fusionMedia[p.fusionMediumCount - 1]].materialId], lambda);
-    Payload child = p;
+    Payload child = QlToRay(p);
     child.radiance = 0;
     child.fusionContributions = 0;
     child.fusionResidual = 0;
     child.primaryMaterialFlags = 0;
     child.depth = p.depth + 1;
     child.bsdfPdf = 0;
-    float3 transmitted = WorldRayDirection();
+    float3 transmitted = rayIn.Direction;
     const bool entering = interfaceData.orientation > 0 ? !backFace : backFace;
     if (interfaceData.mode == 2) {
         if (entering) {
@@ -87,8 +88,8 @@ bool TraceFusionInterface(inout Payload p, MaterialData material, uint recordInd
                 n2 = RefractionIOR(materials[fusionTransport[topMedium].materialId], lambda);
             }
         }
-        transmitted = Refract(WorldRayDirection(), faceNormal, n1 / n2);
-        rho = FresnelDielectric(abs(dot(faceNormal, -WorldRayDirection())), n1, n2);
+        transmitted = Refract(rayIn.Direction, faceNormal, n1 / n2);
+        rho = FresnelDielectric(abs(dot(faceNormal, -rayIn.Direction)), n1, n2);
         if (dot(transmitted, transmitted) < 1e-8)
             rho = 1;
         tau = 1 - rho;
@@ -129,7 +130,7 @@ bool TraceFusionInterface(inout Payload p, MaterialData material, uint recordInd
             child.fusionRoute = reflected ? 1 : 2;
         child.rngState = p.rngState;
         RayDesc ray;
-        ray.Direction = reflected ? reflect(WorldRayDirection(), faceNormal) : transmitted;
+        ray.Direction = reflected ? reflect(rayIn.Direction, faceNormal) : transmitted;
         // Keep the actual interface origin and travel length. Any-hit rejects
         // only numerical re-hits on this same oriented boundary, so grazing
         // rays cannot jump across another nearby interface.
@@ -139,7 +140,7 @@ bool TraceFusionInterface(inout Payload p, MaterialData material, uint recordInd
         child.fusionSegmentOffset = 0;
         child.fusionPreviousPosition = hit;
         child.fusionPreviousNormal = backFace ? -faceNormal : faceNormal;
-        child.fusionPreviousInstance = InstanceIndex();
+        child.fusionPreviousInstance = instanceIndex;
         const FusionMediumContext context = SaveFusionMedium();
         TraceRay(scene, RAY_FLAG_FORCE_NON_OPAQUE, 0xFF, 0, 0, 0, ray, child);
         RestoreFusionMedium(context);
@@ -163,7 +164,7 @@ bool TraceFusionInterface(inout Payload p, MaterialData material, uint recordInd
         if (total > 0)
             p.fusionFlags |= kFusionFlagUnknownTail;
     }
-    FusionAttenuateSegment(p, RayTCurrent());
+    FusionAttenuateSegment(p, hitT);
     return true;
 }
 #endif
