@@ -36,9 +36,9 @@
 
 #include "camera_common.hlsli"
 
-[[vk::binding(3, 0)]] RWTexture2D<float4> displayImage;
-[[vk::binding(4, 0)]] RWTexture2D<float4> hsvImage;
-[[vk::binding(12, 0)]] StructuredBuffer<float4> ispConfig;
+RWTexture2D<float4> displayImage : register(u3, space0);
+RWTexture2D<float4> hsvImage : register(u4, space0);
+StructuredBuffer<float4> ispConfig : register(t12, space0);
 
 static const uint ISP_FLAG_EMPIRICAL_NOISE = 32u;  // 1 << 5
 static const uint ISP_FLAG_TEMPORAL_DRIFT = 64u;   // 1 << 6

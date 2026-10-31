@@ -19,7 +19,7 @@
 // Bindings
 // ============================================================================
 
-[[vk::binding(2, 0)]] StructuredBuffer<LightingParams> lightingParams;
+StructuredBuffer<LightingParams> lightingParams : register(t2, space0);
 
 // ============================================================================
 // Solar Spectral LUT Buffer (Binding 15)
@@ -29,8 +29,8 @@
 // Otherwise, fall back to LightingParams scalar/RGB values
 // ============================================================================
 
-[[vk::binding(15, 0)]] StructuredBuffer<SolarSpectralLUT> solarSpectralLUT;
-[[vk::binding(29, 0)]] ByteAddressBuffer cameraResponseTable;
+StructuredBuffer<SolarSpectralLUT> solarSpectralLUT : register(t15, space0);
+ByteAddressBuffer cameraResponseTable : register(t29, space0);
 
 // ============================================================================
 // NN Atmosphere LUT (Bindings 17 + 20)
@@ -40,8 +40,8 @@
 // a sky-dome network is trained (hasSky), it will switch to SampleAtmosSky.
 // ============================================================================
 
-[[vk::binding(17, 0)]] StructuredBuffer<AtmosNNHeader> atmosNNHeader;
-[[vk::binding(20, 0)]] StructuredBuffer<float> atmosNNData;
+StructuredBuffer<AtmosNNHeader> atmosNNHeader : register(t17, space0);
+StructuredBuffer<float> atmosNNData : register(t20, space0);
 
 // ============================================================================
 // CIE 1931 Color Matching Functions LUT (Binding 19)
@@ -51,7 +51,7 @@
 // Provides <0.1% error vs analytical approximation's 10-20% at edges
 // ============================================================================
 
-[[vk::binding(19, 0)]] StructuredBuffer<float4> cieCMF_LUT;
+StructuredBuffer<float4> cieCMF_LUT : register(t19, space0);
 
 // ============================================================================
 // RGB -> Spectrum Coefficients (Binding 25)
@@ -62,7 +62,7 @@
 // the reason the z axis is warped.
 // ============================================================================
 
-[[vk::binding(25, 0)]] StructuredBuffer<float4> rgbToSpectrumTable;
+StructuredBuffer<float4> rgbToSpectrumTable : register(t25, space0);
 
 // The push-constant block lives in common.hlsli, shared with raygen and the
 // closest-hit shader. This one reads the camera wavelength out of it.

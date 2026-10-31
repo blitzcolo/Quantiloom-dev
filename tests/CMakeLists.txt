@@ -446,7 +446,6 @@ if(NOT QUANTILOOM_STANDALONE_TESTS)
             "${CMAKE_SOURCE_DIR}/src/shaders/anyhit.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/miss.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/shadow_miss.spv"
-            "${CMAKE_SOURCE_DIR}/src/shaders/ibl_brdf_lut.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/fusion_geometry.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/spectral_reconstruct.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/clahe_histogram.spv"

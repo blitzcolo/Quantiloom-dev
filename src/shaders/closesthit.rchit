@@ -34,16 +34,16 @@
 // ============================================================================
 
 // Acceleration structure for shadow rays (binding 1, shared with raygen)
-[[vk::binding(1, 0)]] RaytracingAccelerationStructure scene;
+RaytracingAccelerationStructure scene : register(t1, space0);
 
-[[vk::binding(2, 0)]] StructuredBuffer<LightingParams> lightingParams;
+StructuredBuffer<LightingParams> lightingParams : register(t2, space0);
 // Use ByteAddressBuffer for vertex/normal to avoid float3 stride alignment issues
 // StructuredBuffer<float3> may use 16-byte stride on some drivers, causing out-of-bounds reads
-[[vk::binding(3, 0)]] ByteAddressBuffer vertexBuffer;    // Vertex positions (12 bytes each)
+ByteAddressBuffer vertexBuffer : register(t3, space0);    // Vertex positions (12 bytes each)
 // Bindings 4/5/6/7/8 (indices, materials, textures, samplers, UVs) live in
 // hit_common.hlsli, shared with the any-hit stage.
-[[vk::binding(9, 0)]] StructuredBuffer<float4> tangentBuffer;   // Tangent vectors (optional)
-[[vk::binding(16, 0)]] ByteAddressBuffer normalBuffer;   // Normal vectors (12 bytes each)
+StructuredBuffer<float4> tangentBuffer : register(t9, space0);   // Tangent vectors (optional)
+ByteAddressBuffer normalBuffer : register(t16, space0);   // Normal vectors (12 bytes each)
 
 // ============================================================================
 // NEW (M2+): Spectral Curve Buffer
@@ -53,8 +53,8 @@
 // Binding 13 chosen to avoid conflict with IBL resources (10-12)
 // ============================================================================
 
-[[vk::binding(13, 0)]] StructuredBuffer<SpectralCurveGPU> spectralCurves;
-[[vk::binding(29, 0)]] ByteAddressBuffer cameraResponseTable;
+StructuredBuffer<SpectralCurveGPU> spectralCurves : register(t13, space0);
+ByteAddressBuffer cameraResponseTable : register(t29, space0);
 
 // NOTE: Complex refractive index buffer (binding 14) is declared in pbr.hlsli
 // because the BRDF functions there read it directly.
@@ -77,7 +77,7 @@
 // When solarSpectralLUT[0].sunIrradiance.numSamples == 0, fall back to LightingParams RGB values
 // ============================================================================
 
-[[vk::binding(15, 0)]] StructuredBuffer<SolarSpectralLUT> solarSpectralLUT;
+StructuredBuffer<SolarSpectralLUT> solarSpectralLUT : register(t15, space0);
 
 // ============================================================================
 // NN Atmosphere LUT (Bindings 17 + 20)
@@ -88,8 +88,8 @@
 // counter. When header.enabled == 0 the atmosphere contributes nothing.
 // ============================================================================
 
-[[vk::binding(17, 0)]] StructuredBuffer<AtmosNNHeader> atmosNNHeader;
-[[vk::binding(20, 0)]] StructuredBuffer<float> atmosNNData;
+StructuredBuffer<AtmosNNHeader> atmosNNHeader : register(t17, space0);
+StructuredBuffer<float> atmosNNData : register(t20, space0);
 
 // ============================================================================
 // Emissive geometry (next-event estimation)
@@ -99,13 +99,13 @@
 // lightingParams[0].emissiveTriangleCount before touching it.
 // ============================================================================
 
-[[vk::binding(23, 0)]] StructuredBuffer<EmissiveTriangleGPU> emissiveTriangles;
+StructuredBuffer<EmissiveTriangleGPU> emissiveTriangles : register(t23, space0);
 
 // Per-element surface temperatures from the thermal solver (binding 24). One
 // float per triangle, indexed by the instance's thermalElementBase plus
 // PrimitiveIndex(). A scene with no solve binds a single zero and every
 // instance carries the sentinel, so nothing reads it.
-[[vk::binding(24, 0)]] StructuredBuffer<float> thermalTemperatures;
+StructuredBuffer<float> thermalTemperatures : register(t24, space0);
 
 // How those temperatures respond to the sun (binding 26). Record 0 is a
 // header -- xyz the sun direction the solve used, w = 1 when the rest is real
@@ -113,7 +113,7 @@
 // (dT/dv, v_element) for that triangle. See renderer/ThermalSunResponse.hpp
 // for why the header is at index 0 and why the direction is carried here
 // rather than read from lightingParams.
-[[vk::binding(26, 0)]] StructuredBuffer<float4> thermalSunResponse;
+StructuredBuffer<float4> thermalSunResponse : register(t26, space0);
 
 // How those temperatures respond to one material parameter (binding 27), and
 // by how much to move it. Element 0 is the step dp -- zero when nothing is
@@ -124,7 +124,7 @@
 //
 // The step rides in the buffer rather than in LightingParams because that
 // struct has no room left. See RayTracingPipeline's binding table.
-[[vk::binding(27, 0)]] StructuredBuffer<float> thermalParameterTangent;
+StructuredBuffer<float> thermalParameterTangent : register(t27, space0);
 
 // ============================================================================
 // Path Depth
@@ -180,7 +180,7 @@ static const float WAVELENGTH_B_NM = 450.0;  // Blue channel representative wave
 // - Used in VIS_FUSED spectral integration for accurate XYZ conversion
 // ============================================================================
 
-[[vk::binding(19, 0)]] StructuredBuffer<float4> cieCMF_LUT;
+StructuredBuffer<float4> cieCMF_LUT : register(t19, space0);
 
 // ============================================================================
 // RGB -> Spectrum Coefficients (Binding 25)
@@ -191,7 +191,7 @@ static const float WAVELENGTH_B_NM = 450.0;  // Blue channel representative wave
 // the reason the z axis is warped.
 // ============================================================================
 
-[[vk::binding(25, 0)]] StructuredBuffer<float4> rgbToSpectrumTable;
+StructuredBuffer<float4> rgbToSpectrumTable : register(t25, space0);
 
 // ============================================================================
 // IBL (Image-Based Lighting) Resources
@@ -199,14 +199,14 @@ static const float WAVELENGTH_B_NM = 450.0;  // Blue channel representative wave
 // Added for physically-based specular reflections on metallic surfaces
 // ============================================================================
 
-[[vk::binding(10, 0)]] TextureCube<float4> prefilteredEnvMap;  // Prefiltered environment cubemap (with mipmaps)
-[[vk::binding(11, 0)]] Texture2D<float2> brdfLUT;              // BRDF integration lookup table
-[[vk::binding(12, 0)]] SamplerState iblSampler;                // Linear sampler for the BRDF LUT (single level)
+TextureCube<float4> prefilteredEnvMap : register(t10, space0);  // Prefiltered environment cubemap (with mipmaps)
+Texture2D<float2> brdfLUT : register(t11, space0);              // BRDF integration lookup table
+SamplerState iblSampler : register(s12, space0);                // Linear sampler for the BRDF LUT (single level)
 // Separate from iblSampler because that one clamps maxLod to 0 -- correct for the
 // single-level BRDF LUT, but it silently pinned every environment lookup to mip 0,
 // so the prefiltered chain below was never reached and rough metals reflected
 // mirror-sharp. This one is unclamped and filters between levels.
-[[vk::binding(21, 0)]] SamplerState envSampler;                // Trilinear sampler for the prefiltered environment
+SamplerState envSampler : register(s21, space0);                // Trilinear sampler for the prefiltered environment
 
 // ============================================================================
 // Sample sources

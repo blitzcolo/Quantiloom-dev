@@ -26,7 +26,9 @@
 // bind.
 // ============================================================================
 
-[[vk::binding(0, 0)]] RaytracingAccelerationStructure sceneTlas;
+#include "ql_bind.hlsli"
+
+RaytracingAccelerationStructure sceneTlas : register(t0, space0);
 
 // One per element, in the order BuildThermalMesh produced them.
 struct ThermalElementGpu {
@@ -37,22 +39,22 @@ struct ThermalElementGpu {
     float3 normal;
     uint   materialId;
 };
-[[vk::binding(1, 0)]] StructuredBuffer<ThermalElementGpu> elements;
+StructuredBuffer<ThermalElementGpu> elements : register(t1, space0);
 
 // instanceElementBase[instanceIndex] + primitiveIndex is the element a hit
 // landed on. The same mapping the closest-hit shader uses to find a
 // temperature, so a hit here and a shade there agree about which triangle
 // they are talking about.
-[[vk::binding(2, 0)]] StructuredBuffer<uint> instanceElementBase;
+StructuredBuffer<uint> instanceElementBase : register(t2, space0);
 
 // Hit records: rayCount entries per element, 0xFFFFFFFF where the ray escaped.
 // A histogram rather than a matrix, because the host knows how to make one
 // sparse and a shader writing scattered increments would need atomics into
 // something n^2.
-[[vk::binding(3, 0)]] RWStructuredBuffer<uint> hitRecords;
+RWStructuredBuffer<uint> hitRecords : register(u3, space0);
 
 // One per element: the fraction of the sun disc samples that reached it.
-[[vk::binding(4, 0)]] RWStructuredBuffer<float> sunVisibility;
+RWStructuredBuffer<float> sunVisibility : register(u4, space0);
 
 // Per material, the fraction of its area that is actually there: 1 for an
 // opaque surface, and for alphaMode MASK or BLEND the mean of its base colour
@@ -67,7 +69,7 @@ struct ThermalElementGpu {
 // many rays the hit points are spread across the occluder, so their expectation
 // is exactly this mean. What it cannot represent is a leaf whose holes are all
 // on one side, which no view factor at this resolution distinguishes anyway.
-[[vk::binding(5, 0)]] StructuredBuffer<float> materialCoverage;
+StructuredBuffer<float> materialCoverage : register(t5, space0);
 
 struct ExchangePushConstants {
     float3 sunDirection;   // from surface toward the sun, normalised
@@ -78,7 +80,7 @@ struct ExchangePushConstants {
     float  rayOffset;      // floor of how far off the surface a ray starts
     uint   sunOutputOffset;   // element offset into sunVisibility for this direction
 };
-[[vk::push_constant]] ExchangePushConstants pc;
+QL_PUSH_CONSTANTS(ExchangePushConstants, pc);
 
 // ----------------------------------------------------------------------------
 // Sampling

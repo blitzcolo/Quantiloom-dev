@@ -1,8 +1,9 @@
 # ============================================================================
 # Quantiloom Shader Compilation
 # ============================================================================
-# Automatically compiles HLSL shaders to SPIR-V using DXC
-# and GLSL compute shaders using glslc
+# Compiles every shader -- all HLSL -- to SPIR-V with DXC, and, as a compile
+# check for the Metal backend, to DXIL and (when Apple's Metal Shader Converter
+# is installed) on to a metallib.
 # ============================================================================
 
 # Find DXC compiler (for HLSL ray tracing shaders)
@@ -19,16 +20,6 @@ find_program(DXC_EXECUTABLE
     DOC "DirectX Shader Compiler (DXC)"
 )
 
-# Find glslc compiler (for GLSL compute shaders)
-find_program(GLSLC_EXECUTABLE
-    NAMES glslc glslc.exe
-    PATHS
-        "$ENV{VULKAN_SDK}/Bin"
-        "$ENV{VULKAN_SDK}/bin"
-        "/usr/bin"
-    DOC "GLSL Compiler (glslc)"
-)
-
 if(NOT DXC_EXECUTABLE)
     message(WARNING
         "DXC not found! HLSL shaders will NOT be compiled automatically.\n"
@@ -42,13 +33,51 @@ else()
     message(STATUS "Found DXC: ${DXC_EXECUTABLE}")
 endif()
 
-if(NOT GLSLC_EXECUTABLE)
-    message(WARNING
-        "glslc not found! GLSL compute shaders will NOT be compiled automatically.\n"
-        "Please install Vulkan SDK which includes glslc."
-    )
-else()
-    message(STATUS "Found glslc: ${GLSLC_EXECUTABLE}")
+# ----------------------------------------------------------------------------
+# Portability check. Every shader is also compiled to DXIL, and from there
+# through Apple's Metal Shader Converter (MSC) to a metallib when MSC is
+# installed -- MSC has a Windows build, and DXIL is the only input it takes.
+# Nothing installs these outputs. They exist so that a construct the Metal
+# backend cannot take fails a Windows build today rather than a Mac build later.
+#
+# MSC 4.0 turns a NaN/Inf optimisation on by default. The shaders guard
+# radiance with isnan/isinf/isfinite in some fifty places, and an optimiser
+# allowed to assume no NaN may fold those guards away, so every conversion
+# passes --disableNanInfOptimization. Ray generation is compiled as a compute
+# kernel, the mode Apple recommends since MSC 3.0. Bindings come from the root
+# signature in ql_bind.hlsli (see there for which stages carry one).
+#
+# MSC 4.0.3 for Windows exits 5 with no message when handed any
+# --root-signature JSON, including the example in its own manual; a root
+# signature embedded in the DXIL is read correctly, which is why it lives in
+# the shader source rather than in a JSON file here.
+# ----------------------------------------------------------------------------
+option(QUANTILOOM_SHADER_PORTABILITY_CHECK
+       "Also compile every shader to DXIL, and to a metallib when Metal Shader Converter is found" ON)
+
+find_program(QUANTILOOM_MSC_EXECUTABLE
+    NAMES metal-shaderconverter metal-shaderconverter.exe
+    PATHS
+        "$ENV{METAL_SHADER_CONVERTER_DIR}"
+        "$ENV{METAL_SHADER_CONVERTER_DIR}/bin"
+        "C:/Program Files/Metal Shader Converter/bin"
+        "/usr/local/bin"
+    DOC "Apple Metal Shader Converter (DXIL -> metallib)"
+)
+set(QUANTILOOM_MSC_FLAGS "" CACHE STRING "Extra metal-shaderconverter flags")
+separate_arguments(QUANTILOOM_MSC_FLAG_LIST NATIVE_COMMAND "${QUANTILOOM_MSC_FLAGS}")
+
+set(PORTABILITY_DIR "${CMAKE_CURRENT_BINARY_DIR}/portability")
+set(PORTABILITY_OUTPUTS)
+set(PORTABILITY_NAMES)
+if(QUANTILOOM_SHADER_PORTABILITY_CHECK)
+    file(MAKE_DIRECTORY "${PORTABILITY_DIR}")
+    if(QUANTILOOM_MSC_EXECUTABLE)
+        message(STATUS "Found Metal Shader Converter: ${QUANTILOOM_MSC_EXECUTABLE}")
+    else()
+        message(STATUS "Metal Shader Converter not found: the shader portability "
+                       "check stops at DXIL (set METAL_SHADER_CONVERTER_DIR)")
+    endif()
 endif()
 
 # Compiled shader output directory. The .spv sit next to their sources and are
@@ -95,7 +124,7 @@ set(DXC_RQ_FLAGS   -spirv -T cs_6_5  -fspv-target-env=vulkan1.2 -E main)
 # an unchanged configure still costs nothing.
 set(SHADER_FLAGS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/shader_flags.stamp")
 file(CONFIGURE OUTPUT "${SHADER_FLAGS_STAMP}"
-     CONTENT "RT=${DXC_RT_FLAGS}\nCOMP=${DXC_COMP_FLAGS}\nRQ=${DXC_RQ_FLAGS}\n")
+     CONTENT "RT=${DXC_RT_FLAGS}\nCOMP=${DXC_COMP_FLAGS}\nRQ=${DXC_RQ_FLAGS}\nMSC=${QUANTILOOM_MSC_FLAGS}\n")
 
 set(COMPILED_SHADERS)
 
@@ -121,6 +150,44 @@ function(quantiloom_compile_hlsl OUT_NAME SRC_NAME)
         VERBATIM
     )
     set(COMPILED_SHADERS ${COMPILED_SHADERS} ${SHADER_OUTPUT} PARENT_SCOPE)
+
+    if(QUANTILOOM_SHADER_PORTABILITY_CHECK)
+        # Same source, same target profile and defines, minus the SPIR-V switches.
+        set(DXIL_FLAGS ${FLAGS})
+        list(REMOVE_ITEM DXIL_FLAGS -spirv -fspv-target-env=vulkan1.2)
+        if(${SRC_NAME} MATCHES "\\.rayq\\.hlsl$")
+            list(APPEND DXIL_FLAGS -rootsig-define QL_ROOT_SIGNATURE)
+        endif()
+        set(DXIL_OUTPUT "${PORTABILITY_DIR}/${OUT_NAME}.dxil")
+        add_custom_command(
+            OUTPUT ${DXIL_OUTPUT}
+            COMMAND ${DXC_EXECUTABLE} ${DXIL_FLAGS} ${ARGN} -Fo ${DXIL_OUTPUT} ${SHADER_SOURCE}
+            DEPENDS ${SHADER_SOURCE} ${SHADER_HEADERS} ${SHADER_FLAGS_STAMP}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            COMMENT "Shader portability (DXIL): ${OUT_NAME}"
+            VERBATIM
+        )
+        set(OUTPUTS ${PORTABILITY_OUTPUTS} ${DXIL_OUTPUT})
+        if(QUANTILOOM_MSC_EXECUTABLE)
+            set(METALLIB_OUTPUT "${PORTABILITY_DIR}/${OUT_NAME}.metallib")
+            set(MSC_STAGE_FLAGS)
+            if(${SRC_NAME} MATCHES "\\.rgen$")
+                set(MSC_STAGE_FLAGS --rt-ray-generation-compilation=kernel)
+            endif()
+            add_custom_command(
+                OUTPUT ${METALLIB_OUTPUT}
+                COMMAND ${QUANTILOOM_MSC_EXECUTABLE} --disableNanInfOptimization
+                        ${MSC_STAGE_FLAGS} ${QUANTILOOM_MSC_FLAG_LIST}
+                        ${DXIL_OUTPUT} -o=${METALLIB_OUTPUT}
+                DEPENDS ${DXIL_OUTPUT} ${SHADER_FLAGS_STAMP}
+                COMMENT "Shader portability (metallib): ${OUT_NAME}"
+                VERBATIM
+            )
+            list(APPEND OUTPUTS ${METALLIB_OUTPUT})
+        endif()
+        set(PORTABILITY_OUTPUTS ${OUTPUTS} PARENT_SCOPE)
+        set(PORTABILITY_NAMES ${PORTABILITY_NAMES} ${OUT_NAME} PARENT_SCOPE)
+    endif()
 endfunction()
 
 if(DXC_EXECUTABLE)
@@ -156,6 +223,9 @@ if(DXC_EXECUTABLE)
     quantiloom_compile_hlsl(pick pick.rayq.hlsl)
     quantiloom_compile_hlsl(thermal_exchange thermal_exchange.rayq.hlsl)
     quantiloom_compile_hlsl(thermal_step    thermal_step.comp.hlsl)
+
+    # Hyperspectral cube reconstruction (hs_core/GpuSpectralReconstructor)
+    quantiloom_compile_hlsl(spectral_reconstruct spectral_reconstruct.comp.hlsl)
 endif()
 
 # Create custom target that depends on all compiled shaders
@@ -164,47 +234,24 @@ add_custom_target(CompileShaders ALL
     COMMENT "Compiling all shaders"
 )
 
-# ============================================================================
-# GLSL Compute Shaders (using glslc)
-# ============================================================================
-
-set(COMPUTE_SHADER_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/ibl_brdf_lut.comp
-    ${CMAKE_CURRENT_SOURCE_DIR}/spectral_reconstruct.comp
-)
-
-set(COMPILED_COMPUTE_SHADERS)
-
-if(GLSLC_EXECUTABLE)
-    foreach(COMP_SHADER ${COMPUTE_SHADER_SOURCES})
-        get_filename_component(SHADER_NAME ${COMP_SHADER} NAME_WE)
-        set(SHADER_OUTPUT "${SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv")
-
-        add_custom_command(
-            OUTPUT ${SHADER_OUTPUT}
-            COMMAND ${GLSLC_EXECUTABLE}
-                -fshader-stage=compute
-                -o ${SHADER_OUTPUT}
-                ${COMP_SHADER}
-            DEPENDS ${COMP_SHADER}
-            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-            COMMENT "Compiling compute shader: ${SHADER_NAME}"
-            VERBATIM
-        )
-
-        list(APPEND COMPILED_COMPUTE_SHADERS ${SHADER_OUTPUT})
-    endforeach()
-
-    add_custom_target(CompileComputeShaders ALL
-        DEPENDS ${COMPILED_COMPUTE_SHADERS}
-        COMMENT "Compiling all compute shaders"
+# Portability check target, plus a manifest the build scripts read to report
+# it: which shaders were checked, and whether the metallib half ran. A failed
+# DXC or MSC step already fails the build; the manifest exists so that a
+# machine without MSC says so in the gate output instead of passing quietly.
+if(QUANTILOOM_SHADER_PORTABILITY_CHECK AND PORTABILITY_OUTPUTS)
+    add_custom_target(ShaderPortabilityCheck ALL
+        DEPENDS ${PORTABILITY_OUTPUTS}
+        COMMENT "Shader portability check (DXIL / metallib)"
     )
-
-    message(STATUS "  Compute shaders to compile:")
-    foreach(COMP_SHADER ${COMPUTE_SHADER_SOURCES})
-        get_filename_component(SHADER_FILE ${COMP_SHADER} NAME)
-        message(STATUS "    - ${SHADER_FILE}")
-    endforeach()
+    if(QUANTILOOM_MSC_EXECUTABLE)
+        set(PORTABILITY_MSC "1")
+    else()
+        set(PORTABILITY_MSC "0")
+    endif()
+    list(JOIN PORTABILITY_NAMES "\n" PORTABILITY_NAME_LINES)
+    file(CONFIGURE OUTPUT "${PORTABILITY_DIR}/manifest.txt"
+         CONTENT "msc=${PORTABILITY_MSC}\n${PORTABILITY_NAME_LINES}\n"
+         NEWLINE_STYLE UNIX)
 endif()
 
 # Print summary

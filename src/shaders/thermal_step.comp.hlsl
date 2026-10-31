@@ -25,6 +25,8 @@
 // into the radiosity buffer, so the next step's radiative read is correct.
 // ============================================================================
 
+#include "ql_bind.hlsli"
+
 #define QL_THERMAL_MAX_NODES 32
 
 struct ThermalElementGpu {
@@ -47,26 +49,26 @@ struct ThermalMaterialGpu {
     float wetnessFactor;     // 0 = dry, 1 = open water
 };
 
-[[vk::binding(0, 0)]] StructuredBuffer<ThermalElementGpu>   elements;
-[[vk::binding(1, 0)]] StructuredBuffer<ThermalMaterialGpu>  materials;
-[[vk::binding(2, 0)]] StructuredBuffer<uint>                csrRowStart;
-[[vk::binding(3, 0)]] StructuredBuffer<uint>                csrColumn;
-[[vk::binding(4, 0)]] StructuredBuffer<float>               csrValue;
-[[vk::binding(5, 0)]] StructuredBuffer<float>               skyFraction;
-[[vk::binding(6, 0)]] StructuredBuffer<float>               sunVisTable;
-[[vk::binding(7, 0)]] RWStructuredBuffer<float>             state;
-[[vk::binding(8, 0)]] RWStructuredBuffer<float>             surface;
+StructuredBuffer<ThermalElementGpu>   elements : register(t0, space0);
+StructuredBuffer<ThermalMaterialGpu>  materials : register(t1, space0);
+StructuredBuffer<uint>                csrRowStart : register(t2, space0);
+StructuredBuffer<uint>                csrColumn : register(t3, space0);
+StructuredBuffer<float>               csrValue : register(t4, space0);
+StructuredBuffer<float>               skyFraction : register(t5, space0);
+StructuredBuffer<float>               sunVisTable : register(t6, space0);
+RWStructuredBuffer<float>             state : register(u7, space0);
+RWStructuredBuffer<float>             surface : register(u8, space0);
 // Baked short wave: what reached the element off something else. The reflected
 // table has the same K-column layout as sunVisTable and is read on the same
 // indices; the diffuse gain does not depend on the sun, so it is one column.
-[[vk::binding(9, 0)]] StructuredBuffer<float>               reflectedGainTable;
-[[vk::binding(10, 0)]] StructuredBuffer<float>              diffuseGain;
+StructuredBuffer<float>               reflectedGainTable : register(t9, space0);
+StructuredBuffer<float>              diffuseGain : register(t10, space0);
 // dT/dv per node: the tangent of the trajectory with respect to this element's
 // own sun visibility, advanced by the same operator as the temperature. Same
 // element-major layout as `state`. A one-float placeholder is bound when the
 // host is not carrying it, and pc.carryTangent is what stops this shader
 // touching it -- see ThermalState::sunSensitivity_K for what it is for.
-[[vk::binding(11, 0)]] RWStructuredBuffer<float>            sensitivity;
+RWStructuredBuffer<float>            sensitivity : register(u11, space0);
 // Diffuse-grey long wave, as in CpuCrankNicolsonStepper. Binding 12 is the
 // radiosity J = eps sigma T^4 + (1 - eps) H, ping-ponged on pc.parity like the
 // surface buffer: each thread gathers its neighbours' J from the read half and
@@ -74,8 +76,8 @@ struct ThermalMaterialGpu {
 // irradiance each element gathered on the latest step -- written by its own
 // thread only, and read back by the host as ThermalState::
 // longwaveIrradiance_W_m2 so the next batch seeds the radiosity from it.
-[[vk::binding(12, 0)]] RWStructuredBuffer<float>            radiosity;
-[[vk::binding(13, 0)]] RWStructuredBuffer<float>            irradiance;
+RWStructuredBuffer<float>            radiosity : register(u12, space0);
+RWStructuredBuffer<float>            irradiance : register(u13, space0);
 
 struct StepPushConstants {
     float3 sunDirection;
@@ -95,7 +97,7 @@ struct StepPushConstants {
     uint   hasReflectedGain;   // 0 when the table is a placeholder
     uint   carryTangent;       // 0 when binding 11 is a placeholder
 };
-[[vk::push_constant]] StepPushConstants pc;
+QL_PUSH_CONSTANTS(StepPushConstants, pc);
 
 static const float kStefanBoltzmann = 5.670374419e-8;
 

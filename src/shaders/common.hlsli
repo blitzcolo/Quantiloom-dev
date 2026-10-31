@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // Quantiloom - Common Shader Definitions
 // ============================================================================
 // Shared types and structures for ray tracing shaders
@@ -13,6 +13,7 @@
 #define QUANTILOOM_COMMON_HLSLI
 
 #include "sampling.hlsli"
+#include "ql_bind.hlsli"
 
 // ============================================================================
 // Spectral Rendering Modes
@@ -166,10 +167,19 @@ bool IsVisMode(uint mode) {
 // ============================================================================
 // Baked at pipeline creation time to eliminate dead spectral/debug branches.
 // Defaults match SPECTRAL_MODE_RGB / debug off for safe fallback.
+//
+// Only SPIR-V can specialise. A target without it (DXIL, and Metal after it)
+// fixes the value per compiled variant: -DQL_SPEC_SPECTRAL_MODE=<mode>.
 // ============================================================================
 
-[[vk::constant_id(0)]] const uint SPEC_SPECTRAL_MODE = 7;   // SPECTRAL_MODE_RGB
-[[vk::constant_id(1)]] const uint SPEC_DEBUG_ENABLED = 0;   // 0 = off
+#ifndef QL_SPEC_SPECTRAL_MODE
+#define QL_SPEC_SPECTRAL_MODE 7   // SPECTRAL_MODE_RGB
+#endif
+#ifndef QL_SPEC_DEBUG_ENABLED
+#define QL_SPEC_DEBUG_ENABLED 0   // 0 = off
+#endif
+QL_SPEC_CONSTANT(0, uint, SPEC_SPECTRAL_MODE, QL_SPEC_SPECTRAL_MODE);
+QL_SPEC_CONSTANT(1, uint, SPEC_DEBUG_ENABLED, QL_SPEC_DEBUG_ENABLED);
 
 // ============================================================================
 // Ray Payload - OPTIMIZED FOR RT CORE PERFORMANCE
@@ -1214,7 +1224,7 @@ struct PushConstantsRayGen {
     uint textureCount;       // actual bound descriptors, including the dummy texture
 };
 
-[[vk::push_constant]] PushConstantsRayGen pushConsts;
+QL_PUSH_CONSTANTS(PushConstantsRayGen, pushConsts);
 
 // ============================================================================
 // Material Data Structure (PBR)

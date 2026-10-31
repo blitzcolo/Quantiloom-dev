@@ -21,18 +21,18 @@
 
 #include "camera_common.hlsli"
 
-[[vk::binding(0, 0)]] RWTexture2DArray<float4> strataRate;
-[[vk::binding(1, 0)]] RWTexture2DArray<float> strataDepth;
-[[vk::binding(2, 0)]] RWTexture2D<float4> compositedRate;
+RWTexture2DArray<float4> strataRate : register(u0, space0);
+RWTexture2DArray<float> strataDepth : register(u1, space0);
+RWTexture2D<float4> compositedRate : register(u2, space0);
 // 4 x u32 atomics: slot 0 pixels where every reprojection candidate failed
 // (disocclusion). Zeroed by the host before each measurement.
-[[vk::binding(11, 0)]] RWByteAddressBuffer dynamicCounters;
+RWByteAddressBuffer dynamicCounters : register(u11, space0);
 
 // Per-stratum camera frames, uploaded by the host each measurement. Five
 // float4 rows per stratum: origin.xyz, forward.xyz, right.xyz, up.xyz, then
 // (fovScale, aspect, timeSeconds, unused). The frame reproduces raygen.rgen's
 // ray construction exactly, so reprojection inverts tracing to the bit.
-[[vk::binding(10, 0)]] StructuredBuffer<float4> layerCameras;
+StructuredBuffer<float4> layerCameras : register(t10, space0);
 
 static const uint kLayerCameraStride = 5u;
 

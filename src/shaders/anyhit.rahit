@@ -28,7 +28,7 @@
 
 #include "common.hlsli"
 #include "hit_common.hlsli"
-[[vk::binding(3,0)]] ByteAddressBuffer fusionVertices;
+ByteAddressBuffer fusionVertices : register(t3, space0);
 
 [shader("anyhit")]
 void main(inout Payload payload, in HitAttributes attribs) {

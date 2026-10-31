@@ -4,8 +4,8 @@
 #define QL_FUSION_DATA_ONLY
 #include "fusion_transport.hlsli"
 
-[[vk::binding(1, 0)]] RaytracingAccelerationStructure geometryScene;
-[[vk::binding(3, 0)]] ByteAddressBuffer geometryVertices;
+RaytracingAccelerationStructure geometryScene : register(t1, space0);
+ByteAddressBuffer geometryVertices : register(t3, space0);
 struct GeometryHit {
     uint hit;
     uint instanceIndex;
@@ -18,8 +18,8 @@ struct GeometryHit {
     float2 bary;
     float2 padding;
 };
-[[vk::binding(33, 0)]] RWStructuredBuffer<GeometryHit> geometryHits;
-[[vk::binding(34, 0)]] StructuredBuffer<float2> geometryQueryPixels;
+RWStructuredBuffer<GeometryHit> geometryHits : register(u33, space0);
+StructuredBuffer<float2> geometryQueryPixels : register(t34, space0);
 
 [numthreads(8, 8, 1)]
 void main(uint3 dispatch : SV_DispatchThreadID) {

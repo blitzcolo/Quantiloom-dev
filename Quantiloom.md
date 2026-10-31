@@ -81,7 +81,7 @@ a way in.
 | `clahe.comp.hlsl` | 533 |
 | `miss.rmiss` | 469 |
 | `volumetric.hlsli` | 403 |
-| `spectral_reconstruct.comp` | 365 |
+| `spectral_reconstruct.comp.hlsl` | 283 |
 | `thermal_step.comp.hlsl` | 339 |
 | `sampling.hlsli` | 329 |
 | `blackbody.hlsli` | 270 |

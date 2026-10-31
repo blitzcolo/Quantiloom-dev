@@ -1,5 +1,7 @@
 // Shared GPU camera readout constants and counter stream. Keep Mix32 and the
 // five folds identical to postprocess/CameraPhysics.cpp::CounterRandomU32.
+#include "ql_bind.hlsli"
+
 struct CameraPush {
     uint width;
     uint height;
@@ -36,7 +38,7 @@ struct CameraPush {
     // every other pass. Must match CameraPush in GpuCameraPipeline.cpp.
     uint ispPhase;
 };
-[[vk::push_constant]] CameraPush cameraPush;
+QL_PUSH_CONSTANTS(CameraPush, cameraPush);
 
 // bit 0 noiseFree, 1 shot, 2 dark current, 3 dark shot, 4 read,
 // 5 fixed pattern, 6 NUC, 7 NUC gain map, 8 NUC offset map.

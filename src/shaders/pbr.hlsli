@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // Quantiloom - PBR Utilities
 // ============================================================================
 // Cook-Torrance microfacet BRDF implementation
@@ -34,7 +34,7 @@
 //   F = F0 + (1-F0) * (1-cosθ)^5
 // ============================================================================
 
-[[vk::binding(14, 0)]] StructuredBuffer<ComplexRefractiveIndexGPU> complexRefractiveIndices;
+StructuredBuffer<ComplexRefractiveIndexGPU> complexRefractiveIndices : register(t14, space0);
 
 static const float PI = 3.14159265358979323846;
 static const float EPSILON = 1e-6;

@@ -26,11 +26,11 @@
 // Bindings
 // ============================================================================
 
-[[vk::binding(4, 0)]] StructuredBuffer<uint> indexBuffer;       // Triangle indices
-[[vk::binding(5, 0)]] StructuredBuffer<MaterialData> materials; // Material properties
-[[vk::binding(6, 0)]] Texture2D textures[];                     // Bindless texture array
-[[vk::binding(7, 0)]] SamplerState samplers[];                  // Bindless sampler array
-[[vk::binding(8, 0)]] StructuredBuffer<float2> uvBuffer;        // UV coordinates (optional)
+StructuredBuffer<uint> indexBuffer : register(t4, space0);       // Triangle indices
+StructuredBuffer<MaterialData> materials : register(t5, space0); // Material properties
+QL_VK_BINDING(6, 0) Texture2D textures[] : register(t0, space1);                     // Bindless texture array
+QL_VK_BINDING(7, 0) SamplerState samplers[] : register(s0, space1);                  // Bindless sampler array
+StructuredBuffer<float2> uvBuffer : register(t8, space0);        // UV coordinates (optional)
 
 // ============================================================================
 // Instance Geometry Info Buffer (Binding 18)
@@ -47,7 +47,7 @@
 //   float3 nrm = normalBuffer[geo.normalOffset + idx];
 // ============================================================================
 
-[[vk::binding(18, 0)]] StructuredBuffer<InstanceGeometryInfo> instanceGeometryInfo;
+StructuredBuffer<InstanceGeometryInfo> instanceGeometryInfo : register(t18, space0);
 
 // ============================================================================
 // Hit Attributes
@@ -59,7 +59,7 @@
 // ============================================================================
 
 struct HitAttributes {
-    [[vk::location(0)]] float2 bary : SV_Barycentrics;  // Barycentric coordinates (b1, b2), where b0 = 1 - b1 - b2
+    float2 bary : SV_Barycentrics;  // Barycentric coordinates (b1, b2), where b0 = 1 - b1 - b2
 };
 
 // ============================================================================

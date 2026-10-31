@@ -1,8 +1,8 @@
 #include "camera_common.hlsli"
 
-[[vk::binding(0, 0)]] RWTexture2D<float4> linearRgbImage;
-[[vk::binding(1, 0)]] RWTexture2D<float4> measuredRate;
-[[vk::binding(9, 0)]] StructuredBuffer<float4> cameraConfig;
+RWTexture2D<float4> linearRgbImage : register(u0, space0);
+RWTexture2D<float4> measuredRate : register(u1, space0);
+StructuredBuffer<float4> cameraConfig : register(t9, space0);
 
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {

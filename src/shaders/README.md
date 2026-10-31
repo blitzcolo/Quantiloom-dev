@@ -21,13 +21,6 @@ This directory contains HLSL ray tracing shaders for Quantiloom.
 | `SpectralConversion.hlsli` | CIE XYZ color matching, spectral upsampling |
 | `spectral_query.hlsli` | Spectral curve sampling utilities |
 
-### IBL Compute Shaders
-| File | Description |
-|------|-------------|
-| `ibl_brdf_lut.comp` | BRDF integration LUT generation |
-| `ibl_equirect_to_cube.comp` | Equirectangular to cubemap conversion |
-| `ibl_prefilter_env.comp` | Environment map prefiltering |
-
 ## Compilation
 
 Shaders must be compiled to SPIR-V using **DXC** (DirectX Shader Compiler).

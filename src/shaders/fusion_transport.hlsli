@@ -4,7 +4,7 @@ struct FusionTransportData {
     uint mode, nodeId, materialId, flags;
     float absorptionPerMeter, sheetReflectance, sheetTransmittance, orientation;
 };
-[[vk::binding(35, 0)]] StructuredBuffer<FusionTransportData> fusionTransport;
+StructuredBuffer<FusionTransportData> fusionTransport : register(t35, space0);
 
 #ifndef QL_FUSION_DATA_ONLY
 #include "fusion_records.hlsli"

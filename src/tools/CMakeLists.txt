@@ -76,7 +76,6 @@ add_custom_command(
         "${CMAKE_SOURCE_DIR}/src/shaders/anyhit.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/miss.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/shadow_miss.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/ibl_brdf_lut.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/clahe_histogram.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/clahe_cdf.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/clahe_apply.spv"

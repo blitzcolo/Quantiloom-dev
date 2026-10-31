@@ -1,7 +1,7 @@
 #include "camera_common.hlsli"
 
-[[vk::binding(0, 0)]] RWTexture2D<float4> inputRate;
-[[vk::binding(1, 0)]] RWTexture2D<float4> outputRate;
+RWTexture2D<float4> inputRate : register(u0, space0);
+RWTexture2D<float4> outputRate : register(u1, space0);
 
 float CameraSigma(uint channel) {
     if (cameraPush.direction == 0u)

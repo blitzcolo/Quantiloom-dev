@@ -41,15 +41,15 @@
 #include "camera_isp.hlsli"
 #include "display_palettes.hlsli"
 
-[[vk::binding(0, 0)]] RWTexture2D<float4> correctedImage;
-[[vk::binding(1, 0)]] RWTexture2D<float4> linearRgbImage;
-[[vk::binding(2, 0)]] RWTexture2D<float4> colorRgbImage;
-[[vk::binding(3, 0)]] RWTexture2D<float4> displayImage;
-[[vk::binding(4, 0)]] RWTexture2D<float4> agcSourceImage;
-[[vk::binding(12, 0)]] StructuredBuffer<float4> ispConfig;
-[[vk::binding(13, 0)]] StructuredBuffer<uint2> defectPixels;
-[[vk::binding(14, 0)]] RWStructuredBuffer<uint> ispStats;
-[[vk::binding(15, 0)]] RWStructuredBuffer<float> cdfBuffer;
+RWTexture2D<float4> correctedImage : register(u0, space0);
+RWTexture2D<float4> linearRgbImage : register(u1, space0);
+RWTexture2D<float4> colorRgbImage : register(u2, space0);
+RWTexture2D<float4> displayImage : register(u3, space0);
+RWTexture2D<float4> agcSourceImage : register(u4, space0);
+StructuredBuffer<float4> ispConfig : register(t12, space0);
+StructuredBuffer<uint2> defectPixels : register(t13, space0);
+RWStructuredBuffer<uint> ispStats : register(u14, space0);
+RWStructuredBuffer<float> cdfBuffer : register(u15, space0);
 
 static const uint ISP_FLAG_DENOISE = 1u;
 static const uint ISP_FLAG_SHARPEN = 2u;

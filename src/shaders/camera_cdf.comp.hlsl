@@ -19,9 +19,9 @@
 
 #include "camera_common.hlsli"
 
-[[vk::binding(14, 0)]] RWStructuredBuffer<uint> ispStats;
-[[vk::binding(15, 0)]] RWStructuredBuffer<float> cdfBuffer; // 256 entries
-[[vk::binding(16, 0)]] RWStructuredBuffer<uint> tileStats;  // stats rows + per-tile histograms
+RWStructuredBuffer<uint> ispStats : register(u14, space0);
+RWStructuredBuffer<float> cdfBuffer : register(u15, space0); // 256 entries
+RWStructuredBuffer<uint> tileStats : register(u16, space0);  // stats rows + per-tile histograms
 
 #define ISP_HISTOGRAM_BINS 256
 #define ISP_STAT_UNSAT 260

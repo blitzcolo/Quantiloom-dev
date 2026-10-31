@@ -1,6 +1,6 @@
 #include "camera_common.hlsli"
 
-[[vk::binding(2, 0)]] RWTexture2D<uint4> randomVectors;
+RWTexture2D<uint4> randomVectors : register(u2, space0);
 
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {

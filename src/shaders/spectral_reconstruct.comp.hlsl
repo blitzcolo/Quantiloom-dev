@@ -15,27 +15,25 @@
 // Memory layout:
 // - Input: SparseCube stored BSQ (band-sequential) in storage buffer
 // - Output: FullCube stored BSQ in storage buffer
-// - Wavelengths: Uniform buffers for source and target grids
+// - Wavelengths: storage buffers for source and target grids
+//
+// This was GLSL (spectral_reconstruct.comp, compiled by glslc) until it was
+// the last shader outside HLSL; it is a line-for-line translation, so the
+// arithmetic and its order are unchanged. Host side:
+// hs_core/GpuSpectralReconstructor.cpp, which binds five storage buffers at
+// bindings 0-4 and a 32-byte push constant block.
 //
 // Reference: "Catmull-Rom Splines" (Catmull & Rom, 1974)
 // ============================================================================
 
-#version 460
-
-// ============================================================================
-// Workgroup Configuration
-// ============================================================================
-// Each thread processes one pixel's entire spectrum reconstruction
-// Using 16x16 tiles for good occupancy on most GPUs
-
-layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+#include "ql_bind.hlsli"
 
 // ============================================================================
 // Bindings
 // ============================================================================
 
 // Push constants for reconstruction parameters
-layout(push_constant) uniform PushConstants {
+struct ReconstructPush {
     uint width;             // Image width
     uint height;            // Image height
     uint srcBands;          // Number of source (sparse) bands
@@ -44,27 +42,21 @@ layout(push_constant) uniform PushConstants {
     uint _pad0;
     uint _pad1;
     uint _pad2;
-} params;
+};
+QL_PUSH_CONSTANTS(ReconstructPush, params);
 
 // Source sparse cube data (BSQ layout: band0_all_pixels, band1_all_pixels, ...)
-layout(std430, binding = 0) readonly buffer SparseCubeBuffer {
-    float sparseCube[];
-};
+StructuredBuffer<float>   sparseCube     : register(t0, space0);
 
 // Destination full cube data (BSQ layout)
-layout(std430, binding = 1) writeonly buffer FullCubeBuffer {
-    float fullCube[];
-};
+RWStructuredBuffer<float> fullCube       : register(u1, space0);
 
 // Source wavelengths (sparse grid)
-layout(std430, binding = 2) readonly buffer SrcWavelengthsBuffer {
-    float srcWavelengths[];
-};
+StructuredBuffer<float>   srcWavelengths : register(t2, space0);
 
-// Target wavelengths (full grid)
-layout(std430, binding = 3) readonly buffer DstWavelengthsBuffer {
-    float dstWavelengths[];
-};
+// Target wavelengths (full grid). Bound by the host; the mapping table below
+// already carries each target wavelength, so the shader does not read it.
+StructuredBuffer<float>   dstWavelengths : register(t3, space0);
 
 // Reconstruction mapping (pre-computed on CPU)
 // One entry per target band, packed as uint4 + float2 (6 x u32):
@@ -77,9 +69,7 @@ layout(std430, binding = 3) readonly buffer DstWavelengthsBuffer {
 // The search depends only on the two wavelength grids, so the host builds
 // the table once and the shader reads it instead of scanning the source
 // grid for every pixel and band.
-layout(std430, binding = 4) readonly buffer MappingBuffer {
-    uint mappingData[];  // Access via helper functions
-};
+StructuredBuffer<uint>    mappingData    : register(t4, space0);
 
 // ============================================================================
 // Constants
@@ -113,16 +103,16 @@ void WriteFull(uint x, uint y, uint band, float value) {
 // Reconstruction Mapping Readers
 // ============================================================================
 
-uvec4 ReadMappingIndices(uint dstBand) {
+uint4 ReadMappingIndices(uint dstBand) {
     const uint base = dstBand * 6u;
-    return uvec4(mappingData[base], mappingData[base + 1u],
+    return uint4(mappingData[base], mappingData[base + 1u],
                  mappingData[base + 2u], mappingData[base + 3u]);
 }
 
-vec2 ReadMappingWavelengthWeight(uint dstBand) {
+float2 ReadMappingWavelengthWeight(uint dstBand) {
     const uint base = dstBand * 6u;
-    return vec2(uintBitsToFloat(mappingData[base + 4u]),
-                uintBitsToFloat(mappingData[base + 5u]));
+    return float2(asfloat(mappingData[base + 4u]),
+                  asfloat(mappingData[base + 5u]));
 }
 
 // ============================================================================
@@ -218,8 +208,8 @@ float AkimaInterp(uint x, uint y, uint idx, float targetWl) {
 void ReconstructPixel(uint x, uint y) {
     // Process each target band
     for (uint dstBand = 0; dstBand < params.dstBands; ++dstBand) {
-        const uvec4 mapIdx = ReadMappingIndices(dstBand);
-        const vec2 wlWeight = ReadMappingWavelengthWeight(dstBand);
+        const uint4 mapIdx = ReadMappingIndices(dstBand);
+        const float2 wlWeight = ReadMappingWavelengthWeight(dstBand);
         const uint sourceBand = mapIdx.y;
         const uint sourceNextBand = mapIdx.z;
         const float interpWeight = wlWeight.y;
@@ -277,9 +267,12 @@ void ReconstructPixel(uint x, uint y) {
 // ============================================================================
 // Main Compute Shader
 // ============================================================================
+// Each thread processes one pixel's entire spectrum reconstruction
+// Using 16x16 tiles for good occupancy on most GPUs
 
-void main() {
-    uvec2 coord = gl_GlobalInvocationID.xy;
+[numthreads(16, 16, 1)]
+void main(uint3 dispatchId : SV_DispatchThreadID) {
+    uint2 coord = dispatchId.xy;
 
     // Bounds check
     if (coord.x >= params.width || coord.y >= params.height) {

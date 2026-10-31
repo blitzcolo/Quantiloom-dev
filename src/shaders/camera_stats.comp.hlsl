@@ -57,10 +57,10 @@
 
 #include "camera_common.hlsli"
 
-[[vk::binding(0, 0)]] RWTexture2D<float4> correctedImage;
-[[vk::binding(9, 0)]] StructuredBuffer<float4> cameraConfig;
-[[vk::binding(12, 0)]] StructuredBuffer<float4> ispConfig;
-[[vk::binding(14, 0)]] RWStructuredBuffer<uint> ispStats;    // 272 entries
+RWTexture2D<float4> correctedImage : register(u0, space0);
+StructuredBuffer<float4> cameraConfig : register(t9, space0);
+StructuredBuffer<float4> ispConfig : register(t12, space0);
+RWStructuredBuffer<uint> ispStats : register(u14, space0);    // 272 entries
 
 #define ISP_HISTOGRAM_BINS 256
 #define ISP_STAT_MIN    256
@@ -155,7 +155,7 @@ uint TileHistBase() { return TileCount() * 16u; }
 // ---------------------------------------------------------------------------
 #ifdef CAMERA_STATS_PHASE_TILES
 
-[[vk::binding(16, 0)]] RWStructuredBuffer<float4> tileStats;
+RWStructuredBuffer<float4> tileStats : register(u16, space0);
 
 // Four rows per tile: all-element min/max/sum/sat (the acquisition-stats
 // population, exactly CameraIsp::ComputeAcquisitionStats on the CPU),
@@ -273,7 +273,7 @@ void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID,
 // ---------------------------------------------------------------------------
 #ifdef CAMERA_STATS_PHASE_REDUCE
 
-[[vk::binding(16, 0)]] RWStructuredBuffer<float4> tileStats;
+RWStructuredBuffer<float4> tileStats : register(u16, space0);
 
 groupshared float4 sTiles[256];
 groupshared float4 sChSum[256];
@@ -412,7 +412,7 @@ void main(uint localIndex : SV_GroupIndex) {
 // ---------------------------------------------------------------------------
 #ifdef CAMERA_STATS_PHASE_HISTOGRAM
 
-[[vk::binding(16, 0)]] RWStructuredBuffer<uint> tileStats;
+RWStructuredBuffer<uint> tileStats : register(u16, space0);
 
 groupshared uint sHist[ISP_HISTOGRAM_BINS];
 

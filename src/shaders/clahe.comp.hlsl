@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file clahe.comp.hlsl
  * @brief The display path: a tone operator, then a palette
  *
@@ -47,6 +47,8 @@
 // Common Definitions
 // ============================================================================
 
+#include "ql_bind.hlsli"
+
 #define HISTOGRAM_BINS 256
 #define MAX_TILES_X 64
 #define MAX_TILES_Y 64
@@ -76,23 +78,23 @@ struct CLAHEPushConstants {
     uint padding;
 };
 
-[[vk::push_constant]] CLAHEPushConstants params;
+QL_PUSH_CONSTANTS(CLAHEPushConstants, params);
 
 // Input image (R32G32B32A32_SFLOAT) - raw HDR output from ray tracer
-[[vk::binding(0, 0)]] RWTexture2D<float4> inputImage;
+RWTexture2D<float4> inputImage : register(u0, space0);
 
 // Output image (R32G32B32A32_SFLOAT) - CLAHE processed display image
-[[vk::binding(1, 0)]] RWTexture2D<float4> outputImage;
+RWTexture2D<float4> outputImage : register(u1, space0);
 
 // Histogram buffer: tileCountX * tileCountY * HISTOGRAM_BINS * uint
 // Layout: histogram[tileY][tileX][bin]
-[[vk::binding(2, 0)]] RWStructuredBuffer<uint> histogramBuffer;
+RWStructuredBuffer<uint> histogramBuffer : register(u2, space0);
 
 // CDF buffer: same layout as histogram, stores cumulative distribution
-[[vk::binding(3, 0)]] RWStructuredBuffer<float> cdfBuffer;
+RWStructuredBuffer<float> cdfBuffer : register(u3, space0);
 
 // Tile min/max buffer for HDR normalization: tileCountX * tileCountY * 2
-[[vk::binding(4, 0)]] RWStructuredBuffer<float> tileMinMaxBuffer;
+RWStructuredBuffer<float> tileMinMaxBuffer : register(u4, space0);
 
 // ============================================================================
 // Helper Functions

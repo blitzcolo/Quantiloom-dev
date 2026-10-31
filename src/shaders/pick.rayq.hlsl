@@ -16,7 +16,9 @@
 // bind.
 // ============================================================================
 
-[[vk::binding(0, 0)]] RaytracingAccelerationStructure sceneTlas;
+#include "ql_bind.hlsli"
+
+RaytracingAccelerationStructure sceneTlas : register(t0, space0);
 
 struct PickResultGpu {
     uint  hit;             // 1 = committed triangle hit
@@ -27,7 +29,7 @@ struct PickResultGpu {
     uint  _pad;
 };
 
-[[vk::binding(1, 0)]] RWStructuredBuffer<PickResultGpu> result;
+RWStructuredBuffer<PickResultGpu> result : register(u1, space0);
 
 struct PickPushConstants {
     float3 origin;   float fovScale;     // tan(fovY / 2), same as CameraData
@@ -40,7 +42,7 @@ struct PickPushConstants {
     float  orthoHeight;
 };
 
-[[vk::push_constant]] PickPushConstants pc;
+QL_PUSH_CONSTANTS(PickPushConstants, pc);
 
 [numthreads(1, 1, 1)]
 void main() {

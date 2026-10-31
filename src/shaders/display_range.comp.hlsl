@@ -24,12 +24,14 @@
  * finite pixel and the true absolute range.
  */
 
-[[vk::binding(0, 0)]] RWTexture2D<float4> inputImage;
+#include "ql_bind.hlsli"
+
+RWTexture2D<float4> inputImage : register(u0, space0);
 // globallycoherent: the last workgroup of the histogram pass reads bins and
 // scratch words other workgroups wrote, which must not come from its own
 // non-coherent cache.
-[[vk::binding(1, 0)]] globallycoherent RWStructuredBuffer<uint> rangeScratch;
-[[vk::binding(2, 0)]] globallycoherent RWStructuredBuffer<uint> histogram;
+globallycoherent RWStructuredBuffer<uint> rangeScratch : register(u1, space0);
+globallycoherent RWStructuredBuffer<uint> histogram : register(u2, space0);
 
 struct RangePush {
     uint width;
@@ -39,7 +41,7 @@ struct RangePush {
     uint targetLow;
     uint targetHigh;
 };
-[[vk::push_constant]] RangePush params;
+QL_PUSH_CONSTANTS(RangePush, params);
 
 static const uint HISTOGRAM_BINS = 65536u;
 

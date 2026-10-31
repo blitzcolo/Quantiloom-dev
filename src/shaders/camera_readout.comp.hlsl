@@ -1,15 +1,15 @@
 #include "camera_common.hlsli"
 
-[[vk::binding(0, 0)]] RWTexture2D<float4> measuredRate;
-[[vk::binding(1, 0)]] RWTexture2D<float4> thermalBefore;
-[[vk::binding(2, 0)]] RWTexture2D<float4> rawDnImage;
-[[vk::binding(3, 0)]] RWTexture2D<float4> correctedImage;
-[[vk::binding(4, 0)]] RWTexture2D<float4> expectedImage;
-[[vk::binding(5, 0)]] RWTexture2D<float4> preAdcImage;
-[[vk::binding(6, 0)]] RWTexture2D<float4> thermalAfter;
-[[vk::binding(7, 0)]] StructuredBuffer<float> nucGain;
-[[vk::binding(8, 0)]] StructuredBuffer<float> nucOffset;
-[[vk::binding(9, 0)]] StructuredBuffer<float4> cameraConfig;
+RWTexture2D<float4> measuredRate : register(u0, space0);
+RWTexture2D<float4> thermalBefore : register(u1, space0);
+RWTexture2D<float4> rawDnImage : register(u2, space0);
+RWTexture2D<float4> correctedImage : register(u3, space0);
+RWTexture2D<float4> expectedImage : register(u4, space0);
+RWTexture2D<float4> preAdcImage : register(u5, space0);
+RWTexture2D<float4> thermalAfter : register(u6, space0);
+StructuredBuffer<float> nucGain : register(t7, space0);
+StructuredBuffer<float> nucOffset : register(t8, space0);
+StructuredBuffer<float4> cameraConfig : register(t9, space0);
 
 // row0: exposure_s, fullWell_e, darkCurrent_e_s, readNoise_e_rms
 // row1: prnuSigma, dsnu_e_rms, dsnuReferenceExposure_s, biasDnRms

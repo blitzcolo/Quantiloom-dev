@@ -15,12 +15,31 @@ run there.
 
 ## Adding a shader
 
-`src/shaders/CMakeLists.txt` is the authoritative list: 27 invocations (25
-HLSL via `quantiloom_compile_hlsl`, 2 GLSL in `COMPUTE_SHADER_SOURCES`).
-`compile_shaders.bat` and `compile_shaders.sh` mirror it with literal
-`[n/27]` labels — not a glob. A new shader must be added to all three (and
-the counts renumbered) or it is silently never compiled by the ones that
-miss it.
+`src/shaders/CMakeLists.txt` is the authoritative list: 26 invocations, all
+HLSL via `quantiloom_compile_hlsl`. `compile_shaders.bat` and
+`compile_shaders.sh` mirror it with literal `[n/26]` labels — not a glob. A
+new shader must be added to all three (and the counts renumbered) or it is
+silently never compiled by the ones that miss it. There is no GLSL left, and
+none should come back: the Metal path starts from DXIL, which only HLSL makes.
+
+## Declaring a resource
+
+Plain HLSL, `register(<class><binding>, space<set>)` — never
+`[[vk::binding]]`. DXC's SPIR-V backend turns the register number into the
+Vulkan binding and the space into the set, and the `.spv` come out the same as
+before; DXIL and Metal Shader Converter read the register as written.
+`ql_bind.hlsli` has the three cases that need a macro (push constants,
+specialisation constants, unbounded arrays) and the root signature MSC lays
+its argument buffer out from. A binding number past that root signature's
+ranges fails the build until the range grows with it.
+
+Every build also compiles each shader to DXIL and, where Metal Shader
+Converter is installed (`METAL_SHADER_CONVERTER_DIR`, or its default
+`C:\Program Files\Metal Shader Converter\bin`), on to a metallib — a compile
+check, nothing ships. Constructs the Metal backend cannot take therefore fail
+here, on Windows. MSC runs with `--disableNanInfOptimization`: 4.0 assumes
+no NaN by default, and the `isnan`/`isfinite` guards in this directory are
+there precisely because NaN happens.
 
 ## Stage extensions
 

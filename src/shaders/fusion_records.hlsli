@@ -5,7 +5,7 @@
 // src/libQuantiloom/renderer/FusionRecordLayout.hpp and carries the same
 // names and values -- change one side, change both. All Load/Store offsets
 // below are bytes; the host indexes the same fields in u32 words.
-[[vk::binding(36, 0)]] RWByteAddressBuffer fusionRecords;
+RWByteAddressBuffer fusionRecords : register(u36, space0);
 
 // Header words (byte offset = word * 4).
 static const uint kFusionEnabledWord = 0;          // recording armed
