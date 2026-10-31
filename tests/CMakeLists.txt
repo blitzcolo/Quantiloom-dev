@@ -528,19 +528,60 @@ if(NOT QUANTILOOM_STANDALONE_TESTS)
     file(WRITE "${_ql_neutrality_dir}/control.cpp"
          "#include \"renderer/interop/VulkanInterop.hpp\"\n")
 
-    set(_ql_neutrality_flags
-        CMAKE_FLAGS
-            "-DINCLUDE_DIRECTORIES=${_ql_public_inc};${CMAKE_BINARY_DIR}/src/libQuantiloom;${glm_SOURCE_DIR}"
-            "-DCMAKE_CXX_STANDARD=20"
-            "-DCMAKE_CXX_STANDARD_REQUIRED=ON"
-        COMPILE_DEFINITIONS
-            "-DQUANTILOOM_PLATFORM_WINDOWS"
-            "-DQL_USE_SHARED"
+    # glm is the one third-party header the public API includes. Take its
+    # directory from glm::glm when that carries one (CPM's source tree or a
+    # find_package), with glm_SOURCE_DIR as the fallback, and insist that it
+    # really holds glm/glm.hpp -- an empty entry would make the gate fail on
+    # glm rather than on Vulkan, which proves nothing.
+    set(_ql_glm_hints "${glm_SOURCE_DIR}")
+    if(TARGET glm::glm)
+        get_target_property(_ql_glm_dirs glm::glm INTERFACE_INCLUDE_DIRECTORIES)
+        if(_ql_glm_dirs)
+            string(REGEX REPLACE "\\$<BUILD_INTERFACE:([^>]*)>" "\\1" _ql_glm_dirs "${_ql_glm_dirs}")
+            string(REGEX REPLACE "\\$<INSTALL_INTERFACE:[^>]*>" "" _ql_glm_dirs "${_ql_glm_dirs}")
+            list(APPEND _ql_glm_hints ${_ql_glm_dirs})
+        endif()
+    endif()
+    find_path(QL_NEUTRALITY_GLM_INCLUDE glm/glm.hpp HINTS ${_ql_glm_hints} NO_DEFAULT_PATH)
+    if(NOT QL_NEUTRALITY_GLM_INCLUDE)
+        message(FATAL_ERROR
+            "Header-neutrality gate: no glm/glm.hpp under '${_ql_glm_hints}'.")
+    endif()
+
+    # What a consumer of the base package compiles with: the public root, the
+    # binary dir holding the generated core/LibVersion.hpp (both are
+    # libQuantiloom's PUBLIC include directories), glm, the platform macro
+    # core/Platform.hpp requires, and the dllimport side of QL_API. On MSVC
+    # also /utf-8 and /permissive-, as the main build: several public headers
+    # carry UTF-8 comments, and parsed in a GBK codepage those can swallow a
+    # newline and fail for a reason that has nothing to do with Vulkan.
+    set(_ql_neutrality_includes
+        "${_ql_public_inc}"
+        "${CMAKE_BINARY_DIR}/src/libQuantiloom"
+        "${QL_NEUTRALITY_GLM_INCLUDE}"
     )
+    if(WIN32)
+        set(_ql_neutrality_defines -DQUANTILOOM_PLATFORM_WINDOWS -DQL_USE_SHARED)
+    elseif(APPLE)
+        set(_ql_neutrality_defines -DQUANTILOOM_PLATFORM_MACOS -DQL_USE_SHARED)
+    else()
+        set(_ql_neutrality_defines -DQUANTILOOM_PLATFORM_LINUX -DQL_USE_SHARED)
+    endif()
+    if(MSVC)
+        list(APPEND _ql_neutrality_defines /utf-8 /permissive- /EHsc)
+    endif()
+
+    # The include list goes in ONE quoted argument, so its semicolons reach the
+    # inner project as a list. Held in a list variable and expanded unquoted,
+    # the separators split it and only the first directory survived. Both
+    # try_compile calls below spell the same arguments from these variables.
     try_compile(QL_PUBLIC_HEADERS_NEUTRAL
         "${_ql_neutrality_dir}/neutral_build"
         SOURCES "${_ql_neutrality_dir}/neutral.cpp"
-        ${_ql_neutrality_flags}
+        CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${_ql_neutrality_includes}"
+        COMPILE_DEFINITIONS ${_ql_neutrality_defines}
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
         OUTPUT_VARIABLE _ql_neutral_output
     )
     if(NOT QL_PUBLIC_HEADERS_NEUTRAL)
@@ -552,13 +593,23 @@ if(NOT QUANTILOOM_STANDALONE_TESTS)
     try_compile(QL_INTEROP_CONTROL_COMPILES
         "${_ql_neutrality_dir}/control_build"
         SOURCES "${_ql_neutrality_dir}/control.cpp"
-        ${_ql_neutrality_flags}
+        CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${_ql_neutrality_includes}"
+        COMPILE_DEFINITIONS ${_ql_neutrality_defines}
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
         OUTPUT_VARIABLE _ql_control_output
     )
     if(QL_INTEROP_CONTROL_COMPILES)
         message(FATAL_ERROR
             "The header-neutrality gate is vacuous: renderer/interop/VulkanInterop.hpp "
             "compiled without a Vulkan include directory.")
+    endif()
+    # The control must fail on vulkan.h and nothing else; failing on glm or on
+    # a platform macro would make the neutral pass above meaningless too.
+    if(NOT _ql_control_output MATCHES "vulkan[/\\\\]vulkan\\.h")
+        message(FATAL_ERROR
+            "The header-neutrality control failed for a reason other than the missing "
+            "vulkan/vulkan.h:\n${_ql_control_output}")
     endif()
     message(STATUS
         "Public header neutrality: the non-interop public headers compile with no Vulkan "
