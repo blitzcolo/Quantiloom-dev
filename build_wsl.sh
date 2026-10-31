@@ -40,6 +40,41 @@ cmake.exe -B build -G "Visual Studio 18 2026" -A x64 \
 # compile lines and POST_BUILD copy chatter are suppressed.
 cmake.exe --build build --config Release -j -- /v:q /nologo
 
+# --- Shader portability gate ----------------------------------------------------
+# The build above also compiled every shader to DXIL and, where Apple's Metal
+# Shader Converter is installed, on to a metallib (src/shaders/CMakeLists.txt).
+# A shader either compiler rejects has already failed the build. What is left
+# is to make the metallib half's absence loud, because a gate that skips
+# quietly reads as a gate that passed.
+
+portability_dir=build/src/shaders/portability
+if [ -f "$portability_dir/manifest.txt" ]; then
+    msc=$(sed -n 's/^msc=//p' "$portability_dir/manifest.txt" | tr -d '\r')
+    shader_count=0
+    missing=0
+    while read -r name; do
+        name=${name%$'\r'}
+        [ -n "$name" ] || continue
+        shader_count=$((shader_count + 1))
+        [ -f "$portability_dir/$name.dxil" ] || missing=$((missing + 1))
+        if [ "$msc" = 1 ] && [ ! -f "$portability_dir/$name.metallib" ]; then
+            missing=$((missing + 1))
+        fi
+    done < <(grep -v '^msc=' "$portability_dir/manifest.txt")
+    if [ "$missing" != 0 ]; then
+        echo "Shader portability gate: $missing outputs missing -- not installing." >&2
+        exit 1
+    fi
+    if [ "$msc" = 1 ]; then
+        echo "Shader portability: $shader_count/$shader_count DXIL, $shader_count/$shader_count metallib"
+    else
+        echo "WARNING: shader portability gate checked DXIL only ($shader_count shaders):" \
+             "Metal Shader Converter not found (METAL_SHADER_CONVERTER_DIR)" >&2
+    fi
+else
+    echo "WARNING: shader portability check is off (QUANTILOOM_SHADER_PORTABILITY_CHECK)" >&2
+fi
+
 # --- Test gate ---------------------------------------------------------------
 # No CI runs this suite; this is the only automated gate. A red suite must
 # never reach the install step, or broken code lands in the SDK consumed by

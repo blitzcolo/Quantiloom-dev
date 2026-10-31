@@ -96,6 +96,36 @@ Assert-ExitZero "cmake configure"
 cmake --build build --config Release -j -- /v:q /nologo
 Assert-ExitZero "cmake build"
 
+# --- Shader portability gate ----------------------------------------------------
+# The build above also compiled every shader to DXIL and, where Apple's Metal
+# Shader Converter is installed, on to a metallib (src\shaders\CMakeLists.txt).
+# A shader either compiler rejects has already failed the build. What is left
+# is to make the metallib half's absence loud, because a gate that skips
+# quietly reads as a gate that passed. Same check as build_wsl.sh.
+$PortabilityDir = Join-Path $BuildDir "src\shaders\portability"
+$PortabilityManifest = Join-Path $PortabilityDir "manifest.txt"
+if (Test-Path $PortabilityManifest) {
+    $lines = Get-Content $PortabilityManifest | Where-Object { $_ -ne "" }
+    $msc = (($lines | Where-Object { $_ -like "msc=*" } | Select-Object -First 1) -replace "^msc=", "")
+    $names = @($lines | Where-Object { $_ -notlike "msc=*" })
+    $missing = 0
+    foreach ($name in $names) {
+        if (-not (Test-Path (Join-Path $PortabilityDir "$name.dxil"))) { $missing++ }
+        if ($msc -eq "1" -and -not (Test-Path (Join-Path $PortabilityDir "$name.metallib"))) { $missing++ }
+    }
+    if ($missing -ne 0) { throw "Shader portability gate: $missing outputs missing -- not installing." }
+    if ($msc -eq "1") {
+        $ShaderPortability = "$($names.Count)/$($names.Count) DXIL, $($names.Count)/$($names.Count) metallib"
+        Write-Host "Shader portability: $ShaderPortability"
+    } else {
+        $ShaderPortability = "DXIL only ($($names.Count) shaders): Metal Shader Converter not found"
+        Write-Warning "shader portability gate checked $ShaderPortability (METAL_SHADER_CONVERTER_DIR)"
+    }
+} else {
+    $ShaderPortability = "off"
+    Write-Warning "shader portability check is off (QUANTILOOM_SHADER_PORTABILITY_CHECK)"
+}
+
 # --- Test gate ---------------------------------------------------------------
 # No CI runs this suite; the gates here are the only automated ones. A red suite
 # must never reach the install step, or broken code lands in the SDK that
@@ -181,10 +211,11 @@ $stamp = [ordered]@{
     dllWriteUtc  = (Get-Item $Dll).LastWriteTimeUtc.ToString("o")
     tests        = "passed"
     abi          = "passed"
+    shaders      = $ShaderPortability
     renderGates  = $RenderGates
 }
 $stamp | ConvertTo-Json | Set-Content -Path (Join-Path $BuildDir ".gates-passed.json") -Encoding utf8
 
 Write-Host ""
-Write-Host "Build OK. Gates: tests passed, ABI passed, render gates $RenderGates." -ForegroundColor Green
+Write-Host "Build OK. Gates: shader portability $ShaderPortability, tests passed, ABI passed, render gates $RenderGates." -ForegroundColor Green
 Write-Host "Run ./install_windows.ps1 to publish the SDK."
