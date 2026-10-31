@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include "renderer/CommandHelper.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/GpuBuffer.hpp"
 #include "renderer/GpuClahe.hpp"
 #include "renderer/GpuImage.hpp"
@@ -108,10 +109,10 @@ ClaheFixture MakeClahe(VulkanContext& context, u32 width, u32 height, const std:
         context.GetAllocator(), context.GetDevice(), width, height, VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
     if (!fixture.input || !fixture.output->IsValid()) return fixture;
-    auto created = GpuClahe::Create(context);
+    auto created = GpuClahe::Create(GpuDevice());
     if (created) {
         fixture.clahe = std::move(created.value());
-        fixture.clahe->BindAll(*fixture.input, *fixture.output);
+        fixture.clahe->BindAll(gpu::vulkan::Ref(*fixture.input), gpu::vulkan::Ref(*fixture.output));
         const auto range = FiniteRgbRange(rgba);
         fixture.inputMin = range.first;
         fixture.inputMax = range.second;
@@ -127,9 +128,11 @@ std::vector<f32> RunClahe(ClaheFixture& fixture, u32 width, u32 height,
     run.params = params;
     run.inputMin = fixture.inputMin;
     run.inputMax = fixture.inputMax;
-    run.inputWrittenByCompute = true;
-    CommandHelper::ExecuteImmediate(fixture.context,
-                                    [&](VkCommandBuffer cmd) { fixture.clahe->Record(cmd, *fixture.input, run); });
+    run.inputProducer = gpu::Access::ComputeWrite;
+    CommandHelper::ExecuteImmediate(fixture.context, [&](VkCommandBuffer cmd) {
+        auto list = gpu::vulkan::Wrap(cmd);
+        fixture.clahe->Record(list, gpu::vulkan::Ref(*fixture.input), run);
+    });
     return CommandHelper::ReadbackImage(fixture.context, fixture.output->GetImage(),
                                         VK_FORMAT_R32G32B32A32_SFLOAT, width, height);
 }

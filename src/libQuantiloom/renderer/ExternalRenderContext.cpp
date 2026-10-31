@@ -4417,7 +4417,7 @@ void ExternalRenderContext::SetDisplayEnhancementParams(
 
     // Initialize the pipeline if enabling for the first time
     if (params.enabled && !wasEnabled && !m_impl->clahe) {
-        auto created = rendercore::GpuClahe::Create(*m_impl->contextAdapter);
+        auto created = rendercore::GpuClahe::Create(*m_impl->gpuDevice);
         if (created) {
             m_impl->clahe = std::move(created.value());
             m_impl->CreateClaheDisplayImage();
@@ -6478,7 +6478,7 @@ void ExternalRenderContext::Impl::CreateClaheDisplayImage() {
     // At creation the raw accumulation is the input, as it was when the
     // pipeline lived in this Impl; Record() rewrites binding 0 on the first
     // run anyway (the module's bound-input view starts null).
-    clahe->BindAll(*outputImage, *displayImage);
+    clahe->BindAll(gpu::vulkan::Ref(*outputImage), gpu::vulkan::Ref(*displayImage));
 }
 
 void ExternalRenderContext::Impl::RecreateClaheDisplayImage() {
@@ -6504,7 +6504,7 @@ void ExternalRenderContext::Impl::RecreateClaheDisplayImage() {
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_GENERAL
     );
-    clahe->SetOutput(*displayImage);
+    clahe->SetOutput(gpu::vulkan::Ref(*displayImage));
     // A fresh allocation holds nothing worth presenting until a run writes it.
     displayImageValid = false;
 }
@@ -6650,9 +6650,10 @@ void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u
     // (visible) feeds CLAHE when the camera is enabled; otherwise the raw
     // accumulation. Callers only run CLAHE once a camera acquisition has
     // completed, so the input product is present whenever the camera is.
-    clahe->Record(cmd, *ClaheInputImage(), rendercore::ClaheRun{
+    auto list = gpu::vulkan::Wrap(cmd);
+    clahe->Record(list, gpu::vulkan::Ref(*ClaheInputImage()), rendercore::ClaheRun{
         width, height, displayParams, cachedImageMin, cachedImageMax,
-        cameraConfig.enabled});
+        cameraConfig.enabled ? gpu::Access::ComputeWrite : gpu::Access::RayTraceWrite});
 
     // The pass recorded above writes the image this frame; a present or
     // reprocess that picks it later is reading real content.
