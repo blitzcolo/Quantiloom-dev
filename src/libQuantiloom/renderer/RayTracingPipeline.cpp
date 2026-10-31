@@ -758,6 +758,15 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[36].stageFlags |= VK_SHADER_STAGE_MISS_BIT_KHR;
     bindings[37] = bindings[35];
     bindings[37].binding = 37;
+    // raygen shades path vertices itself (P04): the library the closest-hit and
+    // miss stages shade with is compiled into raygen as well, so every binding
+    // either of them reads, raygen reads. No binding becomes newly used by the
+    // pipeline, so what each host must write is unchanged.
+    for (auto& binding : bindings) {
+        if ((binding.stageFlags &
+             (VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR)) != 0)
+            binding.stageFlags |= VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    }
     for (auto& binding : bindings)
         binding.stageFlags |= VK_SHADER_STAGE_COMPUTE_BIT;
     std::vector<VkDescriptorBindingFlags> bindingFlags(38, 0);

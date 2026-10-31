@@ -186,10 +186,14 @@ QL_SPEC_CONSTANT(1, uint, SPEC_DEBUG_ENABLED, QL_SPEC_DEBUG_ENABLED);
 // ============================================================================
 // Carries radiance information through the ray tracing pipeline
 //
-// SIZE: 152 bytes -- 44 of transport (radiance through primaryMaterialFlags)
-// and 108 of fusion-export bookkeeping (the fusion* fields and the 8-entry
-// medium stack), carried by every ray including shadow rays whether or not a
-// fusion export is running. (This note said 148 -- 44 and 104 -- for a while;
+// SIZE: 252 bytes -- 44 of transport (radiance through primaryMaterialFlags),
+// 108 of fusion-export bookkeeping (the fusion* fields and the 8-entry
+// medium stack), and 100 for the hit record and recordOnly that a vertex
+// shaded in raygen reads back, carried by every ray including shadow rays
+// whether or not a fusion export is running. The last 100 are transitional:
+// they exist while the integrator moves out of the hit stages (P04), and the
+// payload ends as the hit record alone. (This note said 152 before the hit
+// record arrived, and 148 -- 44 and 104 -- for a while before that;
 // both were undercounts once fusionTerminalDepth, fusionForced and
 // fusionBranchMask joined the struct. It said 24 bytes for a long time before
 // that; that predates the hero quartet and fusion export.) Payload size is
@@ -220,6 +224,20 @@ QL_SPEC_CONSTANT(1, uint, SPEC_DEBUG_ENABLED, QL_SPEC_DEBUG_ENABLED);
 // kFusionNoPath; the buffer offsets live in fusion_records.hlsli.
 static const uint kFusionMaxInitialMedia = 8;
 static const uint kFusionNoPath = 0xFFFFFFFFu;
+
+// What a hit leaves behind for the vertex that shades it. raygen cannot call
+// ObjectToWorld3x4()/WorldToObject3x4(), so both 3x3s travel in the record:
+// normals want the inverse transpose and tangents the forward matrix, and
+// recomputing either would not give the same bits.
+struct HitRecord {
+    float  t;                  // RayTCurrent(); < 0 means the ray missed
+    float2 bary;
+    uint   instanceIndex;
+    uint   primitiveIndex;
+    uint   reserved;
+    float3 o2w0, o2w1, o2w2;
+    float3 w2o0, w2o1, w2o2;
+};
 
 struct Payload {
     // Accumulated radiance (W·sr⁻¹·m⁻²), read two ways today:
@@ -358,6 +376,15 @@ struct Payload {
     // an ordinary ray claim to be a light-sampling candidate and lose the
     // emission it should have carried. primaryMaterialFlags has the same
     // "uninitialised reads as the safest class" property: 0 is diffuse.
+
+    // A vertex that raygen shades only asks where its ray landed. With
+    // recordOnly set, closest-hit writes `hit` and returns, and miss writes
+    // hit.t = -1; every field above is left as the caller set it, which is
+    // what the any-hit stage reads. Every other ray leaves recordOnly 0 and is
+    // shaded by the hit and miss stages. QlToRay starts from a zeroed payload,
+    // so one built from a vertex is never record-only by accident.
+    HitRecord hit;
+    uint recordOnly;
 };
 
 // Per-vertex path state: what the old child Payload carried in each direction,

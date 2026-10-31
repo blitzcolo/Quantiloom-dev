@@ -12,6 +12,10 @@
 #include "camera_response.hlsli"
 #include "camera_projection.hlsli"
 #include "fusion_records.hlsli"
+// The vertex shading the hit and miss stages run, and the loop that walks a
+// path with it. It declares the acceleration structure (binding 1), the
+// lighting parameters (2) and the camera response table (29) this stage uses.
+#include "path_driver.hlsli"
 
 // ============================================================================
 // Bindings
@@ -23,7 +27,6 @@ RWTexture2D<float4> outputImage : register(u0, space0);
 // depth blit. The runtime layer count arrives in the push constants; the
 // image is allocated with kCameraTimeStrataMax layers regardless.
 RWTexture2DArray<float4> cameraMeasurementImage : register(u28, space0);
-ByteAddressBuffer cameraResponseTable : register(t29, space0);
 // Per-stratum primary-hit depth (RayTCurrent, -1 on miss), same layering as
 // binding 28. Consumed by camera_dynamic.comp for reprojection consistency.
 RWTexture2DArray<float> cameraMeasurementDepthImage : register(u31, space0);
@@ -32,8 +35,6 @@ RWTexture2DArray<float> cameraMeasurementDepthImage : register(u31, space0);
 // pixel-sample; the host normalizes by pixels x samples). Zeroed by the host
 // before each acquisition's trace loop.
 RWByteAddressBuffer cameraDynamicCounters : register(u30, space0);
-RaytracingAccelerationStructure scene : register(t1, space0);
-StructuredBuffer<LightingParams> lightingParams : register(t2, space0);  // Fallback lighting (unused here)
 
 // Primary-hit depth AOV: distance along the normalized primary ray, -1 on
 // miss. Overwritten every frame (never accumulated) so it always reflects the
@@ -273,28 +274,22 @@ void main() {
     // Initialize RNG state from pixel seed for stochastic decisions
     payload.rngState = seed;
 
-    // Miss sentinel for the depth AOV; the closest-hit shader overwrites it
+    // Miss sentinel for the depth AOV; shading the primary hit overwrites it
     payload.primaryHitT = -1.0;
 
-    // Diffuse by default; the closest-hit shader classifies the primary
-    // surface so the dynamic-exposure counters can weight it.
+    // Diffuse by default; shading the primary hit classifies the surface so
+    // the dynamic-exposure counters can weight it.
     payload.primaryMaterialFlags = 0u;
 
     // A primary ray is not a BSDF sample, so an emitter it lands on shows its
     // full emission -- what the camera sees looking straight at a light.
     payload.bsdfPdf = 0.0;
 
-    // Trace ray (hit group index 0, miss index 0)
-    TraceRay(
-        scene,              // Acceleration structure
-        RAY_FLAG_NONE,      // Ray flags
-        0xFF,               // Instance mask (all instances visible)
-        0,                  // SBT ray contribution offset
-        0,                  // SBT multiplier
-        0,                  // Miss index
-        ray,                // Ray descriptor
-        payload             // Ray payload
-    );
+    // Trace the primary ray and shade its path (hit group 0, miss index 0).
+    // Its vertices are shaded here, by path_driver.hlsli, as far as the bounce
+    // chain reaches; what comes back is what the primary payload carried out
+    // of the recursion.
+    payload = QlToRay(RunPath(ray, RAY_FLAG_NONE, QlFromRay(payload)));
 
     // Snapshot the primary hit distance before anything else can touch the
     // payload. Written unconditionally: unlike radiance this is not averaged,

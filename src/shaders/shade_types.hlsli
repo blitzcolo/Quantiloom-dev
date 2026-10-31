@@ -1,20 +1,8 @@
 #ifndef QUANTILOOM_SHADE_TYPES_HLSLI
 #define QUANTILOOM_SHADE_TYPES_HLSLI
 
-// What a hit leaves behind for the vertex that shades it. raygen cannot call
-// ObjectToWorld3x4()/WorldToObject3x4(), so both 3x3s travel in the record:
-// normals want the inverse transpose and tangents the forward matrix, and
-// recomputing either would not give the same bits.
-struct HitRecord {
-    float  t;                  // RayTCurrent(); < 0 means the ray missed
-    float2 bary;
-    uint   instanceIndex;
-    uint   primitiveIndex;
-    uint   reserved;
-    float3 o2w0, o2w1, o2w2;
-    float3 w2o0, w2o1, w2o2;
-};
-
+// HitRecord itself is declared in common.hlsli, ahead of Payload, which
+// carries one back to a vertex that raygen shades.
 float3x3 QlObjectToWorld(HitRecord hit) {
     float3x3 m;
     m[0] = hit.o2w0; m[1] = hit.o2w1; m[2] = hit.o2w2;
@@ -46,7 +34,9 @@ struct ChildRequest {
 };
 
 // Per-vertex state <-> ray payload. The two carry the same fields while a
-// subtree can still be traced recursively; only their owners differ.
+// subtree can still be traced recursively; only their owners differ. The
+// payload's hit record and recordOnly have no vertex counterpart: QlToRay
+// zeroes them, so a payload built from a vertex asks for full shading.
 PathVertex QlFromRay(Payload p) {
     PathVertex v;
     v.radiance = p.radiance;
@@ -74,7 +64,7 @@ PathVertex QlFromRay(Payload p) {
     return v;
 }
 Payload QlToRay(PathVertex v) {
-    Payload p;
+    Payload p = (Payload)0;
     p.radiance = v.radiance;
     p.isShadowed = v.isShadowed;
     p.depth = v.depth;

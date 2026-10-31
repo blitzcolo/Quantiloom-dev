@@ -23,10 +23,12 @@ bool QlVisible(RayDesc ray) {
     return p.isShadowed == 0;
 }
 
-// The one site that traces a radiance ray for a vertex's child. The statics
-// fusionActiveMedia* hold the vertex's entry medium here, as they did at every
-// TraceRay of the old recursive body.
-PathVertex QlTraceRadiance(ChildRequest req) {
+// A child's payload as its parent fills it: the request's fields, and the
+// medium the statics fusionActiveMedia* hold, which is the parent's entry
+// medium, as it was at every TraceRay of the old recursive body. Whether the
+// child is then shaded by the hit stage (QlTraceRadiance) or in raygen
+// (path_driver.hlsli), it starts from exactly this.
+Payload QlChildPayload(ChildRequest req) {
     Payload child = (Payload)0;
     child.radiance    = float4(0.0, 0.0, 0.0, 0.0);
     child.isShadowed  = 0;
@@ -35,11 +37,30 @@ PathVertex QlTraceRadiance(ChildRequest req) {
     child.heroLambda  = req.heroLambda;
     child.primaryHitT = -1.0;
     child.bsdfPdf     = req.bsdfPdf;
-    const FusionMediumContext context = SaveFusionMedium();
     InheritFusionMedium(child);
+    return child;
+}
+
+// The one site that traces a radiance ray for a child the hit stage shades,
+// the whole subtree under it included.
+PathVertex QlTraceRadiance(ChildRequest req) {
+    Payload child = QlChildPayload(req);
+    const FusionMediumContext context = SaveFusionMedium();
     TraceRay(scene, req.rayFlags, 0xFF, 0, 0, 0, req.ray, child);
     RestoreFusionMedium(context);
     return QlFromRay(child);
+}
+
+// Where a ray lands, and nothing more: closest-hit writes the hit record and
+// returns, miss writes hit.t = -1, and the caller shades the vertex itself.
+// The payload is the one the hit stage would have been handed for this vertex
+// -- the any-hit stage reads its fusionPrevious* fields -- with recordOnly set.
+bool QlTraceRecord(RayDesc ray, uint rayFlags, PathVertex v, out HitRecord rec) {
+    Payload p = QlToRay(v);
+    p.recordOnly = 1u;
+    TraceRay(scene, rayFlags, 0xFF, 0, 0, 0, ray, p);
+    rec = p.hit;
+    return rec.t >= 0.0;
 }
 
 #endif // QUANTILOOM_QL_TRACE_HLSLI
