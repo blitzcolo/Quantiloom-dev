@@ -229,6 +229,7 @@ struct DeviceInfo {
     u64 rtScratchAlignment = 0;            // minAccelerationStructureScratchOffsetAlignment, as reported
     bool timestampsOnAllQueues = false;    // limits.timestampComputeAndGraphics
     bool linearFilterRGBA32Float = false;  // RGBA32Float supports linear filtering (optimal tiling)
+    u32 apiVersion = 0;                    // the device's packed Vulkan API version; 0 on Metal
 };
 
 }  // namespace quantiloom::gpu

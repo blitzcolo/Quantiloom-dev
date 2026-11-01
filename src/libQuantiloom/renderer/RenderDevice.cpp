@@ -15,16 +15,16 @@
 #include "core/Log.hpp"
 #include "core/ResourceLocator.hpp"
 #include "gpu/Device.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
+#include "gpu/DeviceFactory.hpp"
 #include "renderer/RayTracingPipeline.hpp"
 
 namespace quantiloom {
 
 RenderDevice::Impl::~Impl() {
-    // Before the members go, because the cache was created against the context
-    // and the context is one of them. Saved on the way out so the next process
+    // Before the members go, because the cache was created against the device
+    // and the device is one of them. Saved on the way out so the next process
     // starts warm -- once for the whole batch rather than once per render.
-    if (pipelineCache && context) {
+    if (pipelineCache && gpuDevice) {
         if (!init.pipelineCachePath.empty()) {
             RayTracingPipeline::SavePipelineCache(pipelineCache.get(),
                                                   init.pipelineCachePath);
@@ -53,30 +53,32 @@ Result<std::unique_ptr<RenderDevice>, String> RenderDevice::Create(
     impl.init = params;
 
     QL_LOG_INFO("Initializing shared Vulkan context...");
-    impl.context = std::make_unique<VulkanContext>();
-    if (!impl.context->IsRayTracingSupported()) {
+    // What the context's constructor threw is now the Err; the callers test the Result.
+    auto created = gpu::CreateSystemDevice(gpu::Backend::Vulkan);
+    if (!created) {
+        return CreateResult::Err(std::move(created).error());
+    }
+    impl.gpuDevice = std::move(created).value();
+    gpu::Device& gpuDevice = *impl.gpuDevice;
+    if (!gpuDevice.Info().hardwareRayTracing) {
         return CreateResult::Err("Ray tracing not supported on this device");
     }
 
-    // The cache and the four stages below create gpu:: objects, which need no device
-    // after they exist, so one adoption of the context serves them all.
-    const std::unique_ptr<gpu::Device> gpuDevice = gpu::vulkan::AdoptContext(*impl.context);
-
     if (!params.pipelineCachePath.empty()) {
         impl.pipelineCache = RayTracingPipeline::LoadPipelineCache(
-            *gpuDevice, params.pipelineCachePath);
+            gpuDevice, params.pipelineCachePath);
     }
 
     // Generated or read from its own binary cache, and either way seconds of work
     // at the default resolution. Once per device, not once per scene.
-    impl.brdfLut = rendercore::BrdfLut::Create(*gpuDevice);
+    impl.brdfLut = rendercore::BrdfLut::Create(gpuDevice);
     if (!impl.brdfLut.IsValid()) {
         return CreateResult::Err("Failed to create BRDF LUT sampler");
     }
 
-    impl.cieCMF_LUTBuffer = rendercore::CreateCieColourMatchingBuffer(*gpuDevice);
-    impl.rgbToSpectrumBuffer = rendercore::CreateRgbToSpectrumBuffer(*gpuDevice);
-    impl.fallbackEnvMap = rendercore::EnvironmentCubemap::Fallback(*gpuDevice);
+    impl.cieCMF_LUTBuffer = rendercore::CreateCieColourMatchingBuffer(gpuDevice);
+    impl.rgbToSpectrumBuffer = rendercore::CreateRgbToSpectrumBuffer(gpuDevice);
+    impl.fallbackEnvMap = rendercore::EnvironmentCubemap::Fallback(gpuDevice);
 
     QL_LOG_INFO("  Shared render device ready");
     return CreateResult(std::move(self));

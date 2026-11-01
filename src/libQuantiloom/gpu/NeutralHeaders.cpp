@@ -5,6 +5,7 @@
 #include "gpu/Binding.hpp"
 #include "gpu/CommandList.hpp"
 #include "gpu/Device.hpp"
+#include "gpu/DeviceFactory.hpp"
 #include "gpu/GpuTypes.hpp"
 #include "gpu/Kernel.hpp"
 #include "gpu/Resources.hpp"

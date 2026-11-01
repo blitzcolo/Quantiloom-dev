@@ -48,8 +48,17 @@ VulkanDevice::VulkanDevice(VulkanContext& context) : context_(context) {
     vkGetPhysicalDeviceFormatProperties(context.GetPhysicalDevice(), VK_FORMAT_R32G32B32A32_SFLOAT, &accumulation);
     info_.linearFilterRGBA32Float =
         (accumulation.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0U;
+    info_.apiVersion = props.apiVersion;
     rt_ = LoadRtFunctions(context.GetDevice());
 }
+
+// The adopting constructor does the device's work against the context, then this one
+// takes ownership; context_ still names the same object after the move.
+VulkanDevice::VulkanDevice(std::unique_ptr<VulkanContext> context) : VulkanDevice(*context) {
+    ownedContext_ = std::move(context);
+}
+
+VulkanDevice::~VulkanDevice() = default;
 
 Result<std::unique_ptr<Buffer>, String> VulkanDevice::CreateBuffer(const BufferDesc& desc) {
     try {

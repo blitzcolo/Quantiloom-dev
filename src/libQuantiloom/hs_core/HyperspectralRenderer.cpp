@@ -34,9 +34,8 @@
 #include "hs_core/AdaptiveGridGenerator.hpp"
 #include "hs_core/SpectralReconstructor.hpp"
 #include "hs_core/GpuSpectralReconstructor.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
+#include "gpu/Device.hpp"
 #include "renderer/RayTracingPipeline.hpp"
-#include "renderer/VulkanContext.hpp"
 #include "scene/Scene.hpp"
 #include "core/Log.hpp"
 #include "core/Image.hpp"
@@ -97,7 +96,8 @@ f64 EstimateRenderTime(const HyperspectralConfig& config, f64 singleBandTime) {
 // ============================================================================
 
 struct HyperspectralRenderer::Impl {
-    VulkanContext& context;
+    /// The caller's; the batch renderer and the reconstructor below borrow it too.
+    gpu::Device& device;
     RayTracingPipeline& pipeline;
     Scene& scene;
 
@@ -105,7 +105,6 @@ struct HyperspectralRenderer::Impl {
     std::unique_ptr<BatchRenderer> batchRenderer;
 
     // Phase 4: GPU-accelerated spectral reconstruction
-    std::unique_ptr<gpu::Device> gpuDevice;
     std::unique_ptr<GpuSpectralReconstructor> gpuReconstructor;
 
     SpectralCube result;
@@ -118,17 +117,13 @@ struct HyperspectralRenderer::Impl {
     AdaptiveGridInfo adaptiveGrid;
     SpectralAnalysisResult analysisResult;
 
-    Impl(VulkanContext& ctx, RayTracingPipeline& pipe, Scene& sc)
-        : context(ctx), pipeline(pipe), scene(sc)
+    Impl(gpu::Device& dev, RayTracingPipeline& pipe, Scene& sc)
+        : device(dev), pipeline(pipe), scene(sc)
     {
         // Create BatchRenderer instance
-        batchRenderer = std::make_unique<BatchRenderer>(ctx, pipe, sc);
+        batchRenderer = std::make_unique<BatchRenderer>(dev, pipe, sc);
 
-        // Adopt the compute RHI view of the context, then the GPU
-        // reconstructor; gpuDevice is declared above gpuReconstructor so it
-        // outlives every gpu:: object the reconstructor holds.
-        gpuDevice = gpu::vulkan::AdoptContext(ctx);
-        gpuReconstructor = std::make_unique<GpuSpectralReconstructor>(*gpuDevice);
+        gpuReconstructor = std::make_unique<GpuSpectralReconstructor>(dev);
     }
 
     /**
@@ -171,10 +166,10 @@ struct HyperspectralRenderer::Impl {
 // ============================================================================
 
 HyperspectralRenderer::HyperspectralRenderer(
-    VulkanContext& context,
+    gpu::Device& device,
     RayTracingPipeline& pipeline,
     Scene& scene
-) : m_impl(std::make_unique<Impl>(context, pipeline, scene)) {
+) : m_impl(std::make_unique<Impl>(device, pipeline, scene)) {
     LOG_INFO("HyperspectralRenderer initialized (Phase 3 with BatchRenderer)");
 }
 
@@ -314,7 +309,7 @@ HyperspectralStatus HyperspectralRenderer::Render(
         LOG_INFO("Reconstructing full spectrum from adaptive samples...");
 
         // Phase 4: Use GPU reconstruction if enabled and available
-        if (config.useGpuReconstruction && IsGpuReconstructionSupported(*m_impl->gpuDevice)) {
+        if (config.useGpuReconstruction && IsGpuReconstructionSupported(m_impl->device)) {
             LOG_INFO("Using GPU-accelerated reconstruction");
 
             GpuReconstructorConfig gpuConfig;

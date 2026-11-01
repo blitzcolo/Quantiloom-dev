@@ -11,7 +11,12 @@ namespace quantiloom::gpu::vulkan {
 
 class VulkanDevice final : public Device {
 public:
+    /// Non-owning: `context` outlives this device (AdoptContext, until S19).
     explicit VulkanDevice(VulkanContext& context);
+    /// Owns `context`, a VulkanContext or a VulkanContextAdapter, and destroys it after
+    /// everything else this device holds (CreateSystemDevice, CreateDeviceFromHandles).
+    explicit VulkanDevice(std::unique_ptr<VulkanContext> context);
+    ~VulkanDevice() override;
 
     [[nodiscard]] const DeviceInfo& Info() const override { return info_; }
     [[nodiscard]] const ShaderLibrary& Shaders() const override { return shaders_; }
@@ -56,6 +61,7 @@ public:
     [[nodiscard]] VulkanContext& Context() const { return context_; }
 
 private:
+    std::unique_ptr<VulkanContext> ownedContext_;  // first, so destroyed last; null when adopted
     VulkanContext& context_;
     DeviceInfo info_;
     ShaderLibrary shaders_{ShaderFormat::SpirV};

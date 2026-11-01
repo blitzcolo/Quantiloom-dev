@@ -7,12 +7,9 @@
 
 #include "hs_core/BatchRenderer.hpp"
 #include "renderer/RayTracingPipeline.hpp"
-#include "renderer/VulkanContext.hpp"
-#include "renderer/GpuImage.hpp"
-#include "renderer/GpuBuffer.hpp"
+#include "renderer/GpuAlloc.hpp"
 #include "renderer/TextureTransitions.hpp"
 #include "gpu/Device.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
 #include "scene/Scene.hpp"
 #include "scene/Camera.hpp"
 #include "core/Log.hpp"
@@ -56,10 +53,9 @@ const char* BatchRenderStatusToString(BatchRenderStatus status) {
 // ============================================================================
 
 struct BatchRenderer::Impl {
-    VulkanContext& context;
-    /// The compute RHI's view of `context`, adopted and non-owning. Declared
-    /// right after the context so every gpu:: object dies before it does.
-    std::unique_ptr<gpu::Device> gpuDevice;
+    /// The caller's, and outlives this renderer, so every gpu:: object below dies
+    /// before it does.
+    gpu::Device& gpuDevice;
     RayTracingPipeline& pipeline;
     Scene& scene;
 
@@ -71,12 +67,12 @@ struct BatchRenderer::Impl {
     u32 lastBandCount = 0;
 
     // GPU resources for single-wavelength rendering
-    std::unique_ptr<GpuImage> outputImage;
+    std::unique_ptr<gpu::Texture> outputImage;
     u32 imageWidth = 0;
     u32 imageHeight = 0;
 
-    Impl(VulkanContext& ctx, RayTracingPipeline& pipe, Scene& sc)
-        : context(ctx), gpuDevice(gpu::vulkan::AdoptContext(ctx)), pipeline(pipe), scene(sc) {}
+    Impl(gpu::Device& device, RayTracingPipeline& pipe, Scene& sc)
+        : gpuDevice(device), pipeline(pipe), scene(sc) {}
 
     /**
      * @brief Initialize GPU output image if needed
@@ -88,18 +84,16 @@ struct BatchRenderer::Impl {
 
         try {
             // Create RGBA32F storage image for ray tracing output
-            outputImage = std::make_unique<GpuImage>(
-                context.GetAllocator(),
-                context.GetDevice(),
-                width,
-                height,
-                VK_FORMAT_R32G32B32A32_SFLOAT,
-                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-            );
+            gpu::TextureDesc desc;
+            desc.width = width;
+            desc.height = height;
+            desc.format = gpu::Format::RGBA32Float;
+            desc.usage = gpu::TextureUsage::Storage | gpu::TextureUsage::TransferSrc;
+            outputImage = CreateTextureOrThrow(gpuDevice, desc);
 
             // Transition to GENERAL layout for storage image usage
             rendercore::LegacyTransitionImmediate(
-                *gpuDevice, gpu::vulkan::Ref(*outputImage),
+                gpuDevice, outputImage->Ref(),
                 rendercore::Layout::Undefined, rendercore::Layout::General
             );
 
@@ -136,7 +130,7 @@ struct BatchRenderer::Impl {
         cameraData.spectral_mode = 0;  // SPECTRAL_MODE_SINGLE
 
         // Bind output image
-        pipeline.BindOutputImage(gpu::vulkan::Ref(*outputImage));
+        pipeline.BindOutputImage(outputImage->Ref());
 
         // Render with accumulation (multiple samples)
         // Common random numbers across wavelengths reduce the variance of a
@@ -160,7 +154,7 @@ struct BatchRenderer::Impl {
             gpu::CommandPoolDesc poolDesc;
             poolDesc.transient = true;
             poolDesc.resettable = true;
-            auto createdPool = gpuDevice->CreateCommandPool(poolDesc);
+            auto createdPool = gpuDevice.CreateCommandPool(poolDesc);
             if (!createdPool) {
                 LOG_ERROR("BatchRenderer: Failed to create command pool");
                 return false;
@@ -171,7 +165,7 @@ struct BatchRenderer::Impl {
             std::unique_ptr<gpu::CommandPool> cmdPool = std::move(createdPool).value();
 
             auto allocated = cmdPool->Allocate();
-            auto createdFence = gpuDevice->CreateFence();
+            auto createdFence = gpuDevice.CreateFence();
             if (!allocated || !createdFence) {
                 // Neither call was checked before; the batch failed at its submit.
                 LOG_ERROR("BatchRenderer: GPU submit/wait failed (possible device lost)");
@@ -214,7 +208,7 @@ struct BatchRenderer::Impl {
                 static_cast<void>(cmd->End());
 
                 static_cast<void>(fence->Reset());
-                if (!gpuDevice->Submit(*cmd, fence.get()) || !fence->Wait()) {
+                if (!gpuDevice.Submit(*cmd, fence.get()) || !fence->Wait()) {
                     LOG_ERROR("BatchRenderer: GPU submit/wait failed (possible device lost)");
                     return false;
                 }
@@ -222,18 +216,16 @@ struct BatchRenderer::Impl {
         }
 
         // Read back result to CPU
-        VkDeviceSize bufferSize = imageWidth * imageHeight * 4 * sizeof(f32);
-        GpuBuffer stagingBuffer(
-            context.GetAllocator(),
-            bufferSize,
-            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_CPU_ONLY
+        u64 bufferSize = imageWidth * imageHeight * 4 * sizeof(f32);
+        const std::unique_ptr<gpu::Buffer> stagingBuffer = CreateBufferOrThrow(
+            gpuDevice,
+            gpu::BufferDesc{bufferSize, gpu::BufferUsage::TransferDst, gpu::MemoryClass::HostOnly, 0}
         );
 
         // Copy image to staging buffer
         const gpu::TextureRef source =
-            gpu::vulkan::Ref(*outputImage).WithLayout(gpu::TextureLayoutPolicy::Optimal);
-        gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
+            outputImage->Ref().WithLayout(gpu::TextureLayoutPolicy::Optimal);
+        gpuDevice.ExecuteImmediate([&](gpu::CommandList& list) {
             // Transition image for transfer
             const gpu::TextureBarrier toTransfer{source, gpu::Access::RayTraceWrite,
                                                  gpu::Access::TransferRead};
@@ -245,7 +237,7 @@ struct BatchRenderer::Impl {
             gpu::BufferTextureCopy region;
             region.width = imageWidth;
             region.height = imageHeight;
-            list.CopyTextureToBuffer(source, gpu::vulkan::Ref(stagingBuffer), region);
+            list.CopyTextureToBuffer(source, stagingBuffer->Ref(), region);
 
             // Transition back to general layout
             const gpu::TextureBarrier toGeneral{source, gpu::Access::TransferRead,
@@ -256,7 +248,7 @@ struct BatchRenderer::Impl {
         });
 
         // Map and copy data
-        f32* mappedData = static_cast<f32*>(stagingBuffer.Map());
+        f32* mappedData = static_cast<f32*>(stagingBuffer->Map());
         if (!mappedData) {
             LOG_ERROR("BatchRenderer: Failed to map staging buffer");
             return false;
@@ -273,7 +265,7 @@ struct BatchRenderer::Impl {
             }
         }
 
-        stagingBuffer.Unmap();
+        stagingBuffer->Unmap();
         return true;
     }
 };
@@ -283,10 +275,10 @@ struct BatchRenderer::Impl {
 // ============================================================================
 
 BatchRenderer::BatchRenderer(
-    VulkanContext& context,
+    gpu::Device& device,
     RayTracingPipeline& pipeline,
     Scene& scene
-) : m_impl(std::make_unique<Impl>(context, pipeline, scene)) {
+) : m_impl(std::make_unique<Impl>(device, pipeline, scene)) {
     LOG_DEBUG("BatchRenderer initialized");
 }
 

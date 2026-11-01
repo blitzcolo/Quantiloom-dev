@@ -36,8 +36,10 @@ namespace quantiloom {
 // Forward declarations
 class RayTracingPipeline;
 class Scene;
-class VulkanContext;
 struct CameraData;
+namespace gpu {
+class Device;
+}
 
 // ============================================================================
 // Batch Rendering Status
@@ -143,7 +145,7 @@ struct BatchRenderParams {
  * Example usage:
  * @code
  * // Create renderer
- * BatchRenderer batchRenderer(vulkanContext, pipeline, scene);
+ * BatchRenderer batchRenderer(device, pipeline, scene);
  *
  * // Define wavelengths to render (could be from AdaptiveGridGenerator)
  * Vector<f32> wavelengths = {3000.0f, 3100.0f, 3200.0f, 3400.0f, 3600.0f};
@@ -174,12 +176,12 @@ public:
 
     /**
      * @brief Construct batch renderer
-     * @param context Vulkan context (must remain valid during rendering)
+     * @param device The device the pipeline was created on (must outlive the renderer)
      * @param pipeline Ray tracing pipeline (must support single-wavelength mode)
      * @param scene Scene to render (must remain valid during rendering)
      */
     BatchRenderer(
-        VulkanContext& context,
+        gpu::Device& device,
         RayTracingPipeline& pipeline,
         Scene& scene
     );

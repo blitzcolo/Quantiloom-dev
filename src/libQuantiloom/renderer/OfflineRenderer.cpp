@@ -48,18 +48,17 @@
 #include "renderer/TimelineState.hpp"
 #include "thermal/ThermalEpochs.hpp"
 #include "core/LibVersion.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
+#include "gpu/Device.hpp"
+#include "gpu/DeviceFactory.hpp"
 #include "renderer/GpuThermalStepper.hpp"
 #include "thermal/CpuCrankNicolsonStepper.hpp"
 #include "thermal/ThermalMesh.hpp"
 #include "thermal/ThermalSolveCache.hpp"
 #include "thermal/ThermalSolver.hpp"
-#include "renderer/VulkanContext.hpp"
 #include "renderer/RayTracingPipeline.hpp"
-#include "renderer/GpuBuffer.hpp"
-#include "renderer/GpuImage.hpp"
+#include "renderer/GpuAlloc.hpp"
 #include "renderer/TextureManager.hpp"
-#include "renderer/CommandHelper.hpp"
+#include "renderer/TextureTransitions.hpp"
 #include "renderer/OfflineBatchScheduler.hpp"
 #include "renderer/PerformanceLogger.hpp"
 #include "renderer/LightingParams.hpp"
@@ -105,6 +104,18 @@ bool EnvFlagEnabled(const char* name) {
     std::transform(lowered.begin(), lowered.end(), lowered.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return lowered == "1" || lowered == "on" || lowered == "true" || lowered == "yes";
+}
+
+/// A host-visible storage buffer, the kind every buffer this file fills by hand is.
+std::unique_ptr<gpu::Buffer> CreateUploadStorageBuffer(gpu::Device& device, u64 bytes) {
+    return CreateBufferOrThrow(
+        device, gpu::BufferDesc{bytes, gpu::BufferUsage::Storage, gpu::MemoryClass::Upload, 0});
+}
+
+/// A buffer that may not exist, as a binding names it: the empty ref for null, which the
+/// pipeline's optional binders read as "none".
+gpu::BufferRef RefOrEmpty(const gpu::Buffer* buffer) {
+    return buffer != nullptr ? buffer->Ref() : gpu::BufferRef{};
 }
 }  // namespace
 
@@ -154,7 +165,7 @@ struct OfflineRenderer::Impl {
         const auto calibration = productGeometry.ToJson();
         if (!calibration)
             throw std::runtime_error(calibration.error());
-        const auto& gpu = contextRef->GetDeviceProperties();
+        const auto& gpu = gpuDevice->Info();
         const auto vector = [](const glm::vec3& v) { return Json::array({v.x, v.y, v.z}); };
         const auto& sun = lightingParams.sunDirection;
         f64 azimuth = std::atan2(sun.x, sun.z) * 180.0 / constants::PI;
@@ -165,9 +176,9 @@ struct OfflineRenderer::Impl {
             {"geometry", Json::parse(calibration.value())},
             {"software", {{"sdk_version", version::LibVersionString}}},
             {"device",
-             {{"name", gpu.deviceName},
-              {"vendor_id", gpu.vendorID},
-              {"device_id", gpu.deviceID},
+             {{"name", gpu.name},
+              {"vendor_id", gpu.vendorId},
+              {"device_id", gpu.deviceId},
               {"driver_version", gpu.driverVersion},
               {"vulkan_api_version", gpu.apiVersion}}},
             {"lighting",
@@ -225,46 +236,45 @@ struct OfflineRenderer::Impl {
 
     // ------------------------------------------------------------------
     // GPU state. DECLARATION ORDER IS DESTRUCTION ORDER -- see the file
-    // comment. This is the order the same objects had as locals, context
-    // first so that it dies last.
+    // comment. This is the order the same objects had as locals, device
+    // first so that it dies last: every member that holds it (the geometry's
+    // acceleration structures, the texture manager, the pipeline, the perf
+    // logger, the batch renderer, and the thermal stepper and precomputes
+    // further down) is destroyed before it.
     //
     // Held by pointer only so that it is created where the original code
     // created it -- after the config is parsed. A config error should not
-    // cost a device. Each method below binds it back to a plain `context`
-    // reference, which is also why nothing here is *named* context: a member
-    // of that name would be shadowed rather than referenced (MSVC C4458).
+    // cost a device.
     //
     // Null when InitParams::sharedDevice was given: the device is then a
-    // RenderDevice's and outlives this instance. `contextRef` is the one to
+    // RenderDevice's and outlives this instance. `gpuDevice` is the one to
     // read; it points at whichever of the two is in play.
     // ------------------------------------------------------------------
-    std::unique_ptr<VulkanContext> contextPtr;
-    /// The compute RHI's view of whichever context contextRef names, adopted
-    /// once in Create. Declared right after the context so every member that
-    /// uses it (perfLogger, the GPU thermal stepper) is destroyed first.
-    std::unique_ptr<gpu::Device> gpuDevice;
+    std::unique_ptr<gpu::Device> ownedDevice;
+    /// ownedDevice, or the shared RenderDevice's; set once in Create.
+    gpu::Device* gpuDevice = nullptr;
     Scene loadedScene;
     rendercore::SceneGeometry geometry;
     std::unique_ptr<gpu::Texture> outputImage;
     LightingParams lightingParams{};
-    std::unique_ptr<GpuBuffer> lightingParamsBuffer;
+    std::unique_ptr<gpu::Buffer> lightingParamsBuffer;
     std::unique_ptr<TextureManager> textureManager;
-    std::unique_ptr<GpuBuffer> spectralCurvesBuffer;
-    std::unique_ptr<GpuBuffer> criBuffer;
-    std::unique_ptr<GpuBuffer> solarSpectralLUTBuffer;
-    std::unique_ptr<GpuBuffer> atmosHeaderBuffer;
-    std::unique_ptr<GpuBuffer> atmosDataBuffer;
+    std::unique_ptr<gpu::Buffer> spectralCurvesBuffer;
+    std::unique_ptr<gpu::Buffer> criBuffer;
+    std::unique_ptr<gpu::Buffer> solarSpectralLUTBuffer;
+    std::unique_ptr<gpu::Buffer> atmosHeaderBuffer;
+    std::unique_ptr<gpu::Buffer> atmosDataBuffer;
     std::unique_ptr<gpu::Buffer> cieCMF_LUTBuffer;
     std::unique_ptr<gpu::Buffer> rgbToSpectrumBuffer;
     std::unique_ptr<gpu::Buffer> emissiveTriangleBuffer;
     /// Per-element surface temperatures from the thermal solver. Always
     /// created -- an unbound descriptor is not a valid one -- with a single
     /// zero entry when no solve ran.
-    std::unique_ptr<GpuBuffer> thermalTemperatureBuffer;
-    std::unique_ptr<GpuBuffer> thermalSunResponseBuffer;
+    std::unique_ptr<gpu::Buffer> thermalTemperatureBuffer;
+    std::unique_ptr<gpu::Buffer> thermalSunResponseBuffer;
     /// Binding 27, the what-if field. The offline path never previews anything,
     /// so this is always the inert record: step 0 and one zero tangent.
-    std::unique_ptr<GpuBuffer> thermalParameterTangentBuffer;
+    std::unique_ptr<gpu::Buffer> thermalParameterTangentBuffer;
     std::unique_ptr<gpu::Buffer> materialBuffer;
     rendercore::BrdfLut brdfLut;
     rendercore::EnvironmentCubemap envMap;
@@ -275,12 +285,12 @@ struct OfflineRenderer::Impl {
     std::unique_ptr<RayTracingPipeline> pipeline;
     std::unique_ptr<PerformanceLogger> perfLogger;
     std::unique_ptr<BatchRenderer> cameraBatchRenderer;
-    std::unique_ptr<GpuBuffer> cameraAtmosHeaderBuffer;
+    std::unique_ptr<gpu::Buffer> cameraAtmosHeaderBuffer;
     /// The network pack the per-wavelength camera bakes read. It caches every
     /// net it loads, so it lives as long as the renderer: a fresh one per
     /// camera wavelength re-read the .safetensors from disk for each of them.
     std::unique_ptr<AtmosModelPack> cameraAtmosPack;
-    std::unique_ptr<GpuBuffer> cameraAtmosDataBuffer;
+    std::unique_ptr<gpu::Buffer> cameraAtmosDataBuffer;
 
     // ------------------------------------------------------------------
     // Borrowed from a shared RenderDevice, or all null. Not GPU state this
@@ -288,10 +298,9 @@ struct OfflineRenderer::Impl {
     // none of it is destroyed here.
     //
     // Filled in by Create(), which is the friend RenderDevice named; keeping
-    // the reach into RenderDevice::Impl in one place is why these are five
-    // plain pointers rather than one pointer to that Impl.
+    // the reach into RenderDevice::Impl in one place is why these, gpuDevice
+    // and pipelineCache are plain pointers rather than one pointer to that Impl.
     // ------------------------------------------------------------------
-    VulkanContext* contextRef = nullptr;
     const rendercore::BrdfLut* brdfLutRef = nullptr;
     const rendercore::EnvironmentCubemap* fallbackEnvMapRef = nullptr;
     /// Either the shared fallback or `envMap` above, decided in BuildPipeline.
@@ -301,11 +310,11 @@ struct OfflineRenderer::Impl {
     bool borrowingDevice = false;
 
     ~Impl() {
-        // Before the members go, because it was created against the context and
-        // the context is one of them. Saved on the way out so the next run
+        // Before the members go, because it was created against the device and
+        // the device is one of them. Saved on the way out so the next run
         // starts warm. A borrowed cache belongs to the RenderDevice, which saves
         // and destroys it once for the whole batch.
-        if (!borrowingDevice && ownedPipelineCache && contextPtr) {
+        if (!borrowingDevice && ownedPipelineCache && ownedDevice) {
             if (!init.pipelineCachePath.empty()) {
                 RayTracingPipeline::SavePipelineCache(ownedPipelineCache.get(),
                                                       init.pipelineCachePath);
@@ -483,21 +492,17 @@ SetupResult OfflineRenderer::Impl::BuildScene() {
 }
 
 void OfflineRenderer::Impl::UploadThermalResult(const thermal::ThermalResult& result) {
-    VulkanContext& context = *contextRef;
-
     // Uploaded in place whenever the size did not move, which is every frame of
     // a sequence: the pipeline's descriptor points at the buffer OBJECT, so
     // replacing it without rebinding would leave the shader reading memory that
     // has been freed.
-    const auto upload = [&](std::unique_ptr<GpuBuffer>& buffer, const void* data,
+    const auto upload = [&](std::unique_ptr<gpu::Buffer>& buffer, const void* data,
                             usize bytes, auto&& rebind) {
-        if (buffer && buffer->GetSize() == bytes) {
+        if (buffer && buffer->Size() == bytes) {
             buffer->Upload(data, bytes);
             return;
         }
-        buffer = std::make_unique<GpuBuffer>(context.GetAllocator(), bytes,
-                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                             VMA_MEMORY_USAGE_CPU_TO_GPU);
+        buffer = CreateUploadStorageBuffer(*gpuDevice, bytes);
         buffer->Upload(data, bytes);
         // Null before BuildPipeline runs, which is the first call; the pipeline
         // picks these up from the bindings struct then.
@@ -510,7 +515,7 @@ void OfflineRenderer::Impl::UploadThermalResult(const thermal::ThermalResult& re
            empty ? static_cast<const void*>(&zero)
                  : static_cast<const void*>(result.surfaceTemperature_K.data()),
            empty ? sizeof(f32) : result.surfaceTemperature_K.size() * sizeof(f32),
-           [this](const GpuBuffer& b) { pipeline->BindThermalTemperatureBuffer(gpu::vulkan::Ref(b)); });
+           [this](const gpu::Buffer& b) { pipeline->BindThermalTemperatureBuffer(b.Ref()); });
 
     // The sun response goes up wherever the temperatures do, including on
     // every failure path: binding 26 has no partially-bound flag either, so
@@ -520,7 +525,7 @@ void OfflineRenderer::Impl::UploadThermalResult(const thermal::ThermalResult& re
         result.lagSensitivity_K, result.lagVisibility, result.lagDirection);
     upload(thermalSunResponseBuffer, records.data(),
            records.size() * sizeof(rendercore::ThermalSunResponseGpu),
-           [this](const GpuBuffer& b) { pipeline->BindThermalSunResponseBuffer(gpu::vulkan::Ref(b)); });
+           [this](const gpu::Buffer& b) { pipeline->BindThermalSunResponseBuffer(b.Ref()); });
 
     // Binding 27 has no partially-bound flag either, and the vertex shading
     // reads its step on every thermal-element hit. This path never previews a
@@ -529,7 +534,7 @@ void OfflineRenderer::Impl::UploadThermalResult(const thermal::ThermalResult& re
     // previewed").
     const f32 inertTangent[2] = {0.0f, 0.0f};
     upload(thermalParameterTangentBuffer, inertTangent, sizeof(inertTangent),
-           [this](const GpuBuffer& b) { pipeline->BindThermalTangentBuffer(gpu::vulkan::Ref(b)); });
+           [this](const gpu::Buffer& b) { pipeline->BindThermalTangentBuffer(b.Ref()); });
 
     // Point the instances at their elements. This is the whole of how a
     // triangle in the shader finds the temperature the balance gave it.
@@ -649,8 +654,8 @@ void OfflineRenderer::Impl::BuildThermalSession() {
     thermalMaterialCoverage = rendercore::ComputeMaterialCoverage(loadedScene);
     {
         // The same properties the cache key always used, read through the RHI:
-        // the adopted device's Info() is filled from this context's device
-        // properties, and Info().name stops at the name's first NUL just as
+        // the device's Info() is filled from its physical device's properties,
+        // and Info().name stops at the name's first NUL just as
         // MakeGpuIdentity trims the fixed-size array it was handed before.
         const gpu::DeviceInfo& info = gpuDevice->Info();
         thermalGpuIdentity = thermal::MakeGpuIdentity(info.name, info.vendorId, info.deviceId,
@@ -835,8 +840,6 @@ void OfflineRenderer::Impl::UploadThermalFieldAt(const f64 time_h) {
 }
 
 SetupResult OfflineRenderer::Impl::BuildIlluminants() {
-    VulkanContext& context = *contextRef;
-
     // Nothing here reads the config any more: the curves, the illuminant and
     // the atmosphere configuration all arrived resolved. What is left is
     // putting them on the device, in the order the file comment describes.
@@ -852,24 +855,15 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
     // A buffer is created either way: an empty binding is not a valid one, so
     // an unconfigured scene gets a single zeroed curve rather than nothing.
     if (!spectra.curves.empty()) {
-        spectralCurvesBuffer = std::make_unique<GpuBuffer>(
-            context.GetAllocator(),
-            spectra.curves.size() * sizeof(SpectralCurveGPU),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU
-        );
+        spectralCurvesBuffer = CreateUploadStorageBuffer(
+            *gpuDevice, spectra.curves.size() * sizeof(SpectralCurveGPU));
         spectralCurvesBuffer->Upload(spectra.curves.data(),
                                      spectra.curves.size() * sizeof(SpectralCurveGPU));
         QL_LOG_INFO("  Uploaded {} bytes to GPU",
                     spectra.curves.size() * sizeof(SpectralCurveGPU));
     } else {
         SpectralCurveGPU dummyCurve{};
-        spectralCurvesBuffer = std::make_unique<GpuBuffer>(
-            context.GetAllocator(),
-            sizeof(SpectralCurveGPU),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU
-        );
+        spectralCurvesBuffer = CreateUploadStorageBuffer(*gpuDevice, sizeof(SpectralCurveGPU));
         spectralCurvesBuffer->Upload(&dummyCurve, sizeof(SpectralCurveGPU));
         QL_LOG_INFO("  Created dummy spectral curves buffer (no curves loaded)");
     }
@@ -878,12 +872,8 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
     // Complex refractive indices
     // ====================================================================
     if (!spectra.refractiveIndices.empty()) {
-        criBuffer = std::make_unique<GpuBuffer>(
-            context.GetAllocator(),
-            spectra.refractiveIndices.size() * sizeof(ComplexRefractiveIndexGPU),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU
-        );
+        criBuffer = CreateUploadStorageBuffer(
+            *gpuDevice, spectra.refractiveIndices.size() * sizeof(ComplexRefractiveIndexGPU));
         criBuffer->Upload(
             spectra.refractiveIndices.data(),
             spectra.refractiveIndices.size() * sizeof(ComplexRefractiveIndexGPU));
@@ -893,12 +883,7 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
                     sizeof(ComplexRefractiveIndexGPU));
     } else {
         ComplexRefractiveIndexGPU dummyCRI{};
-        criBuffer = std::make_unique<GpuBuffer>(
-            context.GetAllocator(),
-            sizeof(ComplexRefractiveIndexGPU),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU
-        );
+        criBuffer = CreateUploadStorageBuffer(*gpuDevice, sizeof(ComplexRefractiveIndexGPU));
         criBuffer->Upload(&dummyCRI, sizeof(ComplexRefractiveIndexGPU));
         QL_LOG_INFO("  Created dummy CRI buffer (no data loaded)");
         QL_LOG_INFO("  NOTE: Add [refractive_index] section to config for physical "
@@ -923,12 +908,7 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
         }
     }
 
-    solarSpectralLUTBuffer = std::make_unique<GpuBuffer>(
-        context.GetAllocator(),
-        sizeof(SolarSpectralLUT),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
+    solarSpectralLUTBuffer = CreateUploadStorageBuffer(*gpuDevice, sizeof(SolarSpectralLUT));
     solarSpectralLUTBuffer->Upload(&solarLUT, sizeof(SolarSpectralLUT));
 
     // ====================================================================
@@ -966,20 +946,10 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
         }
     }
 
-    atmosHeaderBuffer = std::make_unique<GpuBuffer>(
-        context.GetAllocator(),
-        sizeof(AtmosNNHeaderGPU),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
+    atmosHeaderBuffer = CreateUploadStorageBuffer(*gpuDevice, sizeof(AtmosNNHeaderGPU));
     atmosHeaderBuffer->Upload(&atmosHeader, sizeof(AtmosNNHeaderGPU));
 
-    atmosDataBuffer = std::make_unique<GpuBuffer>(
-        context.GetAllocator(),
-        atmosData.size() * sizeof(f32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
+    atmosDataBuffer = CreateUploadStorageBuffer(*gpuDevice, atmosData.size() * sizeof(f32));
     atmosDataBuffer->Upload(atmosData.data(), atmosData.size() * sizeof(f32));
 
     // ====================================================================
@@ -1184,23 +1154,23 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     rendercore::PipelineBindings bindings;
     bindings.outputImage = outputImage ? outputImage->Ref() : gpu::TextureRef{};
     bindings.geometry = &geometry;
-    bindings.lightingParams = gpu::vulkan::RefOrEmpty(lightingParamsBuffer.get());
+    bindings.lightingParams = RefOrEmpty(lightingParamsBuffer.get());
     bindings.materials = materialBuffer ? materialBuffer->Ref() : gpu::BufferRef{};
     bindings.textures = textureManager.get();
     bindings.environment = envMapRef;
     bindings.brdfLut = brdfLutRef;
-    bindings.spectralCurves = gpu::vulkan::RefOrEmpty(spectralCurvesBuffer.get());
-    bindings.complexRefractiveIndex = gpu::vulkan::RefOrEmpty(criBuffer.get());
-    bindings.solarLut = gpu::vulkan::RefOrEmpty(solarSpectralLUTBuffer.get());
-    bindings.atmosphereHeader = gpu::vulkan::RefOrEmpty(atmosHeaderBuffer.get());
-    bindings.atmosphereData = gpu::vulkan::RefOrEmpty(atmosDataBuffer.get());
+    bindings.spectralCurves = RefOrEmpty(spectralCurvesBuffer.get());
+    bindings.complexRefractiveIndex = RefOrEmpty(criBuffer.get());
+    bindings.solarLut = RefOrEmpty(solarSpectralLUTBuffer.get());
+    bindings.atmosphereHeader = RefOrEmpty(atmosHeaderBuffer.get());
+    bindings.atmosphereData = RefOrEmpty(atmosDataBuffer.get());
     bindings.cieColourMatching = cieCMF_LUTRef ? cieCMF_LUTRef->Ref() : gpu::BufferRef{};
     bindings.rgbToSpectrum = rgbToSpectrumRef ? rgbToSpectrumRef->Ref() : gpu::BufferRef{};
     bindings.emissiveTriangles =
         emissiveTriangleBuffer ? emissiveTriangleBuffer->Ref() : gpu::BufferRef{};
-    bindings.thermalTemperatures = gpu::vulkan::RefOrEmpty(thermalTemperatureBuffer.get());
-    bindings.thermalSunResponse = gpu::vulkan::RefOrEmpty(thermalSunResponseBuffer.get());
-    bindings.thermalParameterTangent = gpu::vulkan::RefOrEmpty(thermalParameterTangentBuffer.get());
+    bindings.thermalTemperatures = RefOrEmpty(thermalTemperatureBuffer.get());
+    bindings.thermalSunResponse = RefOrEmpty(thermalSunResponseBuffer.get());
+    bindings.thermalParameterTangent = RefOrEmpty(thermalParameterTangentBuffer.get());
 
     pipeline = rendercore::CreateRayTracingPipeline(*gpuDevice, pipelineCache, bindings);
     pipeline->SetFusionTransport(spectra.fusionTransport);
@@ -1287,14 +1257,14 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
     impl.lightingParams = impl.resolved.lighting;
 
     // ====================================================================
-    // Initialize Vulkan Context
+    // Initialize the GPU device
     // ====================================================================
     if (params.sharedDevice) {
         // The one place that reaches into RenderDevice::Impl -- this function is
         // the friend it named. Everything below works off the plain pointers.
         RenderDevice::Impl& shared = *params.sharedDevice->m_impl;
         impl.borrowingDevice = true;
-        impl.contextRef = shared.context.get();
+        impl.gpuDevice = shared.gpuDevice.get();
         impl.brdfLutRef = &shared.brdfLut;
         impl.fallbackEnvMapRef = &shared.fallbackEnvMap;
         impl.cieCMF_LUTRef = shared.cieCMF_LUTBuffer.get();
@@ -1302,15 +1272,19 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
         impl.pipelineCache = shared.pipelineCache.get();
     } else {
         QL_LOG_INFO("Initializing Vulkan context...");
-        impl.contextPtr = std::make_unique<VulkanContext>();
-        impl.contextRef = impl.contextPtr.get();
+        // What the context's constructor threw is now the Err; the callers test the Result.
+        auto created = gpu::CreateSystemDevice(gpu::Backend::Vulkan);
+        if (!created) {
+            return CreateResult::Err(std::move(created).error());
+        }
+        impl.ownedDevice = std::move(created).value();
+        impl.gpuDevice = impl.ownedDevice.get();
 
-        if (!impl.contextPtr->IsRayTracingSupported()) {
+        if (!impl.gpuDevice->Info().hardwareRayTracing) {
             return CreateResult::Err("Ray tracing not supported on this device");
         }
     }
-    // contextRef names one context for the life of this instance.
-    impl.gpuDevice = gpu::vulkan::AdoptContext(*impl.contextRef);
+    // gpuDevice names one device for the life of this instance.
 
     if (auto r = impl.BuildScene(); !r.has_value()) {
         return CreateResult::Err(std::move(r).error());
@@ -1339,12 +1313,7 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
     impl.BuildThermalSession();
     impl.UploadThermalFieldAt(impl.ThermalHourNow());
 
-    impl.lightingParamsBuffer = std::make_unique<GpuBuffer>(
-        impl.contextRef->GetAllocator(),
-        sizeof(LightingParams),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
+    impl.lightingParamsBuffer = CreateUploadStorageBuffer(*impl.gpuDevice, sizeof(LightingParams));
     impl.lightingParamsBuffer->Upload(&impl.lightingParams, sizeof(LightingParams));
 
     if (auto r = impl.BuildIlluminants(); !r.has_value()) {
@@ -1983,8 +1952,8 @@ OfflineRenderer::Impl::RenderCameraWavelength(f64 wavelengthNm, u64 acquisitionI
             host.pipeline->SetCameraProjection(nullptr);
             host.pipeline->SetSpecConstants(static_cast<u32>(host.params.mode),
                                             original.debug_mode != 0);
-            host.pipeline->BindAtmosphereNN(gpu::vulkan::RefOrEmpty(host.atmosHeaderBuffer.get()),
-                                            gpu::vulkan::RefOrEmpty(host.atmosDataBuffer.get()));
+            host.pipeline->BindAtmosphereNN(RefOrEmpty(host.atmosHeaderBuffer.get()),
+                                            RefOrEmpty(host.atmosDataBuffer.get()));
         }
     } restore{*this, original, lightingParams.enableEnvironmentMap};
     if (lightingParams.enableEnvironmentMap != 0) {
@@ -2016,24 +1985,21 @@ OfflineRenderer::Impl::RenderCameraWavelength(f64 wavelengthNm, u64 acquisitionI
             // has finished (RenderSingleBand returns the read-back image), so
             // nothing on the GPU is still reading them.
             if (!cameraAtmosHeaderBuffer)
-                cameraAtmosHeaderBuffer = std::make_unique<GpuBuffer>(
-                    contextRef->GetAllocator(), sizeof(AtmosNNHeaderGPU),
-                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+                cameraAtmosHeaderBuffer =
+                    CreateUploadStorageBuffer(*gpuDevice, sizeof(AtmosNNHeaderGPU));
             cameraAtmosHeaderBuffer->Upload(&baked.header, sizeof(AtmosNNHeaderGPU));
-            const VkDeviceSize dataBytes = baked.data.size() * sizeof(f32);
-            if (!cameraAtmosDataBuffer || cameraAtmosDataBuffer->GetSize() != dataBytes)
-                cameraAtmosDataBuffer = std::make_unique<GpuBuffer>(
-                    contextRef->GetAllocator(), dataBytes,
-                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+            const u64 dataBytes = baked.data.size() * sizeof(f32);
+            if (!cameraAtmosDataBuffer || cameraAtmosDataBuffer->Size() != dataBytes)
+                cameraAtmosDataBuffer = CreateUploadStorageBuffer(*gpuDevice, dataBytes);
             cameraAtmosDataBuffer->Upload(baked.data.data(), dataBytes);
-            pipeline->BindAtmosphereNN(gpu::vulkan::RefOrEmpty(cameraAtmosHeaderBuffer.get()),
-                                       gpu::vulkan::RefOrEmpty(cameraAtmosDataBuffer.get()));
+            pipeline->BindAtmosphereNN(RefOrEmpty(cameraAtmosHeaderBuffer.get()),
+                                       RefOrEmpty(cameraAtmosDataBuffer.get()));
         } catch (const std::exception& e) {
             return Result<Image, String>::Err(String("camera atmosphere bake failed: ") + e.what());
         }
     }
     if (!cameraBatchRenderer)
-        cameraBatchRenderer = std::make_unique<BatchRenderer>(*contextRef, *pipeline, loadedScene);
+        cameraBatchRenderer = std::make_unique<BatchRenderer>(*gpuDevice, *pipeline, loadedScene);
     BatchRenderParams sample;
     sample.spp = params.spp;
     sample.frameIndex = static_cast<u32>(acquisitionIndex);
@@ -2707,8 +2673,6 @@ TimelineInfo OfflineRenderer::GetTimelineInfo() const {
 }
 
 OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
-    VulkanContext& context = *contextRef;
-
     // BatchRenderer reads Scene::camera for every wavelength. Bind the current
     // authored pose for this cube and restore the scene camera on every exit,
     // including cancellation and writer failures.
@@ -2803,7 +2767,7 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
     }
 
     // Create hyperspectral renderer
-    HyperspectralRenderer hsRenderer(context, *pipeline, loadedScene);
+    HyperspectralRenderer hsRenderer(*gpuDevice, *pipeline, loadedScene);
 
     // Progress: the log line every ten bands as before, plus the host's
     // callback on every band when it asked for one. The void* the internal
@@ -2895,8 +2859,6 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
 }
 
 OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
-    VulkanContext& context = *contextRef;
-
     const u32 width = params.width;
     const u32 height = params.height;
     const u32 spp = params.spp;
@@ -3073,10 +3035,9 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
     QL_LOG_INFO("Reading back and saving image...");
     QL_LOG_DEBUG("  [DEBUG] Starting image readback...");
 
-    std::vector<f32> pixels = CommandHelper::ReadbackImage(
-        context,
-        gpu::vulkan::AsGpuImage(*outputImage).GetImage(),
-        gpu::vulkan::AsGpuImage(*outputImage).GetFormat(),
+    std::vector<f32> pixels = rendercore::ReadbackTexture(
+        *gpuDevice,
+        outputImage->Ref(),
         width,
         height
     );

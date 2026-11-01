@@ -190,6 +190,10 @@ add_library(quantiloom_core OBJECT
     gpu/Sync.hpp
     gpu/RtScene.hpp
     gpu/Trace.hpp
+    gpu/DeviceFactory.hpp
+    gpu/DeviceFactory.cpp
+    # The Metal entry points until gpu/metal/ exists: every build answers Metal with an Err
+    gpu/NoMetalBackend.cpp
     gpu/ShaderLibrary.hpp
     gpu/ShaderLibrary.cpp
     gpu/NeutralHeaders.cpp
@@ -201,6 +205,7 @@ add_library(quantiloom_core OBJECT
     gpu/vulkan/VulkanCommandList.cpp
     gpu/vulkan/VulkanDevice.hpp
     gpu/vulkan/VulkanDevice.cpp
+    gpu/vulkan/VulkanDeviceFactory.cpp
     gpu/vulkan/VulkanSync.hpp
     gpu/vulkan/VulkanSync.cpp
     gpu/vulkan/VulkanRt.hpp
