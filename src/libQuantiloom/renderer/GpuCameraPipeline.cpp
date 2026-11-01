@@ -619,7 +619,9 @@ Result<void, String> GpuCameraPipeline::Impl::Initialize() {
     fastRgbKernel = std::move(fastRgbResult.value());
     dynamicKernel = std::move(dynamicResult.value());
     descriptorPool = std::move(poolResult.value());
-    groups = std::move(allocated.value());
+    const auto allocatedGroups = allocated.value();
+    for (size_t i = 0; i < groups.size(); ++i)
+        groups[i] = allocatedGroups[i];
     layerCameraBuffer = std::move(layerCameraResult.value());
     dynamicCounterBuffer = std::move(dynamicCounterResult.value());
     ispStatsBuffer = std::move(ispStatsResult.value());

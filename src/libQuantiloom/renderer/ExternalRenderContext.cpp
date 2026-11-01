@@ -5086,7 +5086,7 @@ Result<camera::CameraOutput, String> ExternalRenderContext::CaptureCameraProduct
         return signal;
     };
     const auto makeProduct =
-        [&](const GpuImage* source,
+        [&](gpu::TextureRef source,
             camera::SignalDescriptor signal) -> Result<camera::CameraProduct, String> {
         auto image = readProductImage(source);
         if (!image)
@@ -5145,9 +5145,10 @@ Result<camera::CameraOutput, String> ExternalRenderContext::CaptureCameraProduct
         // In the persistent-Clahe mode the on-screen display is the CLAHE
         // pipeline's output, not the camera chain's grey scalar; export what
         // the viewer sees.
-        const GpuImage* displaySource = (m_impl->CameraClahePersistent() && m_impl->displayImage)
-                                            ? m_impl->displayImage.get()
-                                            : outputs.display;
+        const gpu::TextureRef displaySource =
+            (m_impl->CameraClahePersistent() && m_impl->displayImage)
+                ? gpu::vulkan::Ref(*m_impl->displayImage)
+                : outputs.display;
         auto display =
             makeProduct(displaySource, descriptor(camera::SignalKind::DisplaySrgb, "encoded sRGB"));
         if (!display)
