@@ -188,6 +188,8 @@ Result<UsdLoadOptions::VariantSelections, String> ParseUsdVariantSpec(StringView
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <dlfcn.h>
 #endif
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -235,11 +237,18 @@ static void InitializeUsdPlugins() {
         searchPaths.push_back(moduleDir / ".." / "lib" / "usd");
     }
 #else
-    // On Linux/macOS, use /proc/self/exe or dladdr
-    std::filesystem::path exePath = std::filesystem::read_symlink("/proc/self/exe");
-    std::filesystem::path exeDir = exePath.parent_path();
-    searchPaths.push_back(exeDir / "usd");
-    searchPaths.push_back(exeDir / ".." / "lib" / "usd");
+    // The library's own location, not the host executable's: the CLI loads
+    // libQuantiloom, and on macOS a .app bundle keeps the library under
+    // Contents/Frameworks, so executable-relative probing looks in the wrong
+    // place. Mirrors LibraryDirectory() in core/ResourceLocator.cpp.
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&InitializeUsdPlugins), &info) != 0 &&
+        info.dli_fname != nullptr) {
+        const std::filesystem::path moduleDir =
+            std::filesystem::path(info.dli_fname).parent_path();
+        searchPaths.push_back(moduleDir / "usd");
+        searchPaths.push_back(moduleDir / ".." / "lib" / "usd");
+    }
 #endif
 
     // Also check USD_ROOT environment variable
