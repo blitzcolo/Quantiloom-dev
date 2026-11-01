@@ -1,13 +1,15 @@
 #include <gtest/gtest.h>
 
-#include "gpu/vulkan/VulkanBridge.hpp"
+#include "gpu/Device.hpp"
+#include "gpu/vulkan/VulkanCommandList.hpp"
+#include "gpu/vulkan/VulkanResources.hpp"
 #include "postprocess/CpuCameraPipeline.hpp"
-#include "renderer/CommandHelper.hpp"
+#include "gpu/vulkan/CommandHelper.hpp"
 #include "renderer/ExternalRenderContext.hpp"
-#include "renderer/GpuBuffer.hpp"
+#include "gpu/vulkan/GpuBuffer.hpp"
 #include "renderer/GpuCameraPipeline.hpp"
-#include "renderer/GpuImage.hpp"
-#include "renderer/VulkanContext.hpp"
+#include "gpu/vulkan/GpuImage.hpp"
+#include "gpu/vulkan/VulkanContext.hpp"
 #include "support/GpuInteropTestUtils.hpp"
 #include "support/VulkanTestDevice.hpp"
 

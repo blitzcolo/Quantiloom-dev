@@ -3,11 +3,11 @@
 #include "gpu/DeviceFactory.hpp"
 
 #include "core/ResultFail.hpp"
+#include "gpu/vulkan/VulkanContext.hpp"
+#include "gpu/vulkan/VulkanContextAdapter.hpp"
 #include "gpu/vulkan/VulkanDevice.hpp"
 #include "gpu/vulkan/VulkanMapping.hpp"
 #include "renderer/GpuInterop.hpp"
-#include "renderer/VulkanContext.hpp"
-#include "renderer/VulkanContextAdapter.hpp"
 
 #include <exception>
 #include <memory>

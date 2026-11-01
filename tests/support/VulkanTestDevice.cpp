@@ -1,7 +1,7 @@
 #include "support/VulkanTestDevice.hpp"
 
-#include "gpu/vulkan/VulkanBridge.hpp"
-#include "renderer/VulkanContext.hpp"
+#include "gpu/vulkan/VulkanDevice.hpp"
+#include "gpu/vulkan/VulkanContext.hpp"
 
 #include <exception>
 #include <memory>
@@ -52,7 +52,7 @@ const std::string& VulkanDeviceUnavailableReason() {
 
 gpu::Device* SharedGpuDevice() {
     if (!g_gpuDevice && SharedVulkanDevice() != nullptr) {
-        g_gpuDevice = gpu::vulkan::AdoptContext(*g_device);
+        g_gpuDevice = std::make_unique<gpu::vulkan::VulkanDevice>(*g_device);
     }
     return g_gpuDevice.get();
 }

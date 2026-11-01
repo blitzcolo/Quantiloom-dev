@@ -34,6 +34,10 @@ struct BufferBarrier {
     u64 size = kWholeSize;
 };
 
+/// The host layout token of a host image left for sampling, for a caller that must name one
+/// itself (pinned in VulkanMapping.cpp). Metal ignores it.
+inline constexpr u32 kHostLayoutShaderReadOnly = 5;  // VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+
 struct TextureBarrier {
     TextureRef texture;
     Access from = Access::None;

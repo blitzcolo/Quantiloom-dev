@@ -9,7 +9,7 @@
 
 #pragma once
 
-#include "renderer/VulkanContext.hpp"
+#include "gpu/vulkan/VulkanContext.hpp"
 #include "renderer/interop/VulkanInterop.hpp"
 
 namespace quantiloom::testing {

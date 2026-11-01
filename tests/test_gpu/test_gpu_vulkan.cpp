@@ -3,7 +3,7 @@
 #include "support/VulkanTestDevice.hpp"
 
 #include "gpu/Device.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
+#include "gpu/vulkan/VulkanResources.hpp"
 
 #include <array>
 #include <cstring>

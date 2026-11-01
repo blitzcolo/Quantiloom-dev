@@ -5,7 +5,7 @@
 #include "gpu/Resources.hpp"
 #include "gpu/ShaderLibrary.hpp"
 #include "gpu/vulkan/VulkanMapping.hpp"
-#include "renderer/GpuImage.hpp"
+#include "gpu/vulkan/GpuImage.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -51,6 +51,28 @@ private:
     GpuImage image_;
     TextureDesc desc_;
 };
+
+// A raw GpuImage or GpuBuffer as a ref, and the GpuImage behind a texture, for Vulkan-only code
+// that holds raw objects (the Vulkan-only tests). The image ref's policy is General.
+[[nodiscard]] inline TextureRef Ref(const GpuImage& image, u32 layers = 1) {
+    TextureRef ref;
+    ref.image = ToHandle(image.GetImage());
+    ref.view = ToHandle(image.GetView());
+    ref.format = FromVk(image.GetFormat());
+    ref.width = image.GetExtent().width;
+    ref.height = image.GetExtent().height;
+    ref.layers = layers;
+    ref.layout = TextureLayoutPolicy::General;
+    return ref;
+}
+
+[[nodiscard]] inline BufferRef Ref(const GpuBuffer& buffer) {
+    return BufferRef{ToHandle(buffer.GetHandle()), static_cast<u64>(buffer.GetSize())};
+}
+
+[[nodiscard]] inline const GpuImage& AsGpuImage(const Texture& texture) {
+    return static_cast<const VulkanTexture&>(texture).Native();
+}
 
 class VulkanBindingLayout final : public BindingLayout {
 public:

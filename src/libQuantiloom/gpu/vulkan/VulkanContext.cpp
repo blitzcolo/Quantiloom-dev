@@ -2,7 +2,7 @@
 #include <vk_mem_alloc.h>
 
 #include "VulkanContext.hpp"
-#include "renderer/VulkanDeviceRequirements.hpp"
+#include "gpu/vulkan/VulkanDeviceRequirements.hpp"
 #include "core/Log.hpp"
 #include <stdexcept>
 #include <set>
@@ -439,7 +439,7 @@ void VulkanContext::CreateDevice() {
     queueCreateInfo.pQueuePriorities = &queuePriority;
 
     // The extension list and the feature chain are shared with the public
-    // vk::CreateDevice() helper (renderer/VulkanDeviceRequirements.hpp), so a
+    // vk::CreateDevice() helper (gpu/vulkan/VulkanDeviceRequirements.hpp), so a
     // windowed host and the CLI cannot drift into asking for different devices.
     const auto& deviceExtensions = vulkan::RequiredDeviceExtensions();
     if (m_capabilities.hasVulkan13) {

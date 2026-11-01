@@ -9,10 +9,10 @@
 
 #pragma once
 
-#include "renderer/CommandHelper.hpp"
+#include "gpu/vulkan/CommandHelper.hpp"
 #include "renderer/ExternalRenderContext.hpp"
-#include "renderer/GpuImage.hpp"
-#include "renderer/VulkanContext.hpp"
+#include "gpu/vulkan/GpuImage.hpp"
+#include "gpu/vulkan/VulkanContext.hpp"
 #include "support/GpuInteropTestUtils.hpp"
 
 #include <array>

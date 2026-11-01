@@ -20,11 +20,11 @@
 #include "renderer/ThermalExchangePrecompute.hpp"
 
 #include "gpu/Device.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
-#include "renderer/CommandHelper.hpp"
-#include "renderer/GpuBuffer.hpp"
+#include "gpu/vulkan/VulkanMapping.hpp"
+#include "gpu/vulkan/CommandHelper.hpp"
+#include "gpu/vulkan/GpuBuffer.hpp"
 #include "renderer/RenderCore.hpp"
-#include "renderer/VulkanContext.hpp"
+#include "gpu/vulkan/VulkanContext.hpp"
 #include "support/VulkanTestDevice.hpp"
 #include "thermal/ThermalMesh.hpp"
 

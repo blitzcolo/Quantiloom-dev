@@ -16,12 +16,14 @@
 
 #include <gtest/gtest.h>
 
-#include "renderer/CommandHelper.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
-#include "renderer/GpuBuffer.hpp"
+#include "gpu/vulkan/CommandHelper.hpp"
+#include "gpu/Device.hpp"
+#include "gpu/vulkan/VulkanCommandList.hpp"
+#include "gpu/vulkan/VulkanResources.hpp"
+#include "gpu/vulkan/GpuBuffer.hpp"
 #include "renderer/GpuClahe.hpp"
-#include "renderer/GpuImage.hpp"
-#include "renderer/VulkanContext.hpp"
+#include "gpu/vulkan/GpuImage.hpp"
+#include "gpu/vulkan/VulkanContext.hpp"
 #include "support/VulkanTestDevice.hpp"
 
 #include <algorithm>

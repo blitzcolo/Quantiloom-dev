@@ -15,10 +15,10 @@
 #include "support/VulkanTestDevice.hpp"
 
 #include "gpu/Device.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
+#include "gpu/vulkan/VulkanResources.hpp"
 #include "renderer/DeferredBufferUploads.hpp"
-#include "renderer/GpuBuffer.hpp"
-#include "renderer/VulkanContext.hpp"
+#include "gpu/vulkan/GpuBuffer.hpp"
+#include "gpu/vulkan/VulkanContext.hpp"
 
 #include <cstring>
 #include <numeric>

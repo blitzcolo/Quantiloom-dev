@@ -4,7 +4,7 @@
 #include "gpu/CommandList.hpp"
 #include "gpu/GpuTypes.hpp"
 #include "gpu/Resources.hpp"
-#include "renderer/GpuBuffer.hpp"
+#include "gpu/vulkan/GpuBuffer.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -51,6 +51,20 @@ template <class T>
     } else {
         return static_cast<T>(handle);
     }
+}
+
+// The native object behind a ref, and a ref over a raw query pool, for Vulkan-only code that
+// records on raw handles (the Vulkan-only tests).
+[[nodiscard]] inline VkImage NativeImage(TextureRef ref) {
+    return FromHandle<VkImage>(ref.image);
+}
+
+[[nodiscard]] inline VkBuffer NativeBuffer(BufferRef ref) {
+    return FromHandle<VkBuffer>(ref.handle);
+}
+
+[[nodiscard]] inline TimestampPoolRef Ref(VkQueryPool pool, u32 count) {
+    return TimestampPoolRef{ToHandle(pool), count};
 }
 
 }  // namespace quantiloom::gpu::vulkan

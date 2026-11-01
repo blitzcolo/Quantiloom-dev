@@ -16,20 +16,22 @@
 #include "support/FacadeScene.hpp"
 #include "support/VulkanTestDevice.hpp"
 
-#include "gpu/vulkan/VulkanBridge.hpp"
+#include "gpu/Device.hpp"
+#include "gpu/vulkan/VulkanCommandList.hpp"
+#include "gpu/vulkan/VulkanResources.hpp"
 
 #include "core/Sha256.hpp"
 #include "core/SpectralCube.hpp"
 #include "hs_core/GpuSpectralReconstructor.hpp"
 #include "postprocess/CameraPhysics.hpp"
-#include "renderer/CommandHelper.hpp"
+#include "gpu/vulkan/CommandHelper.hpp"
 #include "renderer/ExternalRenderContext.hpp"
-#include "renderer/GpuBuffer.hpp"
+#include "gpu/vulkan/GpuBuffer.hpp"
 #include "renderer/GpuCameraPipeline.hpp"
 #include "renderer/GpuDisplayRange.hpp"
-#include "renderer/GpuImage.hpp"
+#include "gpu/vulkan/GpuImage.hpp"
 #include "renderer/GpuThermalStepper.hpp"
-#include "renderer/VulkanContext.hpp"
+#include "gpu/vulkan/VulkanContext.hpp"
 #include "thermal/ThermalSolver.hpp"
 
 #include <array>

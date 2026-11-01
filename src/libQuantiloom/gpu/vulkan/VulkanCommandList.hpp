@@ -50,4 +50,10 @@ private:
     RtFunctions rt_{};
 };
 
+/// A list over a raw command buffer, for Vulkan-only code that records on one (the Vulkan-only
+/// tests). It has no ray tracing entry points.
+[[nodiscard]] inline VulkanCommandList Wrap(VkCommandBuffer cmd) {
+    return VulkanCommandList(cmd);
+}
+
 }  // namespace quantiloom::gpu::vulkan

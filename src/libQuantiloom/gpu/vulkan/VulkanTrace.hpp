@@ -2,7 +2,7 @@
 
 #include "gpu/Trace.hpp"
 #include "gpu/vulkan/VulkanRt.hpp"
-#include "renderer/GpuBuffer.hpp"
+#include "gpu/vulkan/GpuBuffer.hpp"
 
 #include <vulkan/vulkan.h>
 

@@ -158,9 +158,9 @@ gpu::Format HostTargetFormat(GpuTargetFormat format) {
 
 /// The layout a depth target that names no final layout is left in. Host
 /// layouts are the backend's own tokens and travel verbatim (GpuInterop.hpp);
-/// this is the value of Vulkan's shader-read-only-optimal layout, the one a
-/// host samples a depth AOV in. A backend without layouts ignores it.
-constexpr u32 kDepthTargetDefaultFinalLayout = 5;
+/// this is the shader-read-only one, the layout a host samples a depth AOV in.
+/// A backend without layouts ignores it.
+constexpr u32 kDepthTargetDefaultFinalLayout = gpu::kHostLayoutShaderReadOnly;
 
 }  // namespace
 

@@ -6,6 +6,7 @@ namespace quantiloom::gpu::vulkan {
 
 static_assert(kRemaining == VK_REMAINING_MIP_LEVELS && kRemaining == VK_REMAINING_ARRAY_LAYERS);
 static_assert(kLodClampNone == VK_LOD_CLAMP_NONE);
+static_assert(kHostLayoutShaderReadOnly == static_cast<u32>(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
 
 namespace {
 

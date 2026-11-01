@@ -2,12 +2,13 @@
 
 #include "support/VulkanTestDevice.hpp"
 
-#include "renderer/CommandHelper.hpp"
-#include "renderer/GpuBuffer.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
+#include "gpu/vulkan/CommandHelper.hpp"
+#include "gpu/vulkan/GpuBuffer.hpp"
+#include "gpu/Device.hpp"
+#include "gpu/vulkan/VulkanResources.hpp"
 #include "renderer/GpuDisplayRange.hpp"
-#include "renderer/GpuImage.hpp"
-#include "renderer/VulkanContext.hpp"
+#include "gpu/vulkan/GpuImage.hpp"
+#include "gpu/vulkan/VulkanContext.hpp"
 
 #include <algorithm>
 #include <array>

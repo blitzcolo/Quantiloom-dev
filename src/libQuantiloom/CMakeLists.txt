@@ -117,14 +117,7 @@ add_library(quantiloom_core OBJECT
     atmos/AtmosphereBaker.hpp
     atmos/AtmosNNGpuTypes.hpp
 
-    # Renderer module (Vulkan + VMA wrappers)
-    renderer/VmaImpl.cpp
-    renderer/VulkanContext.cpp
-    renderer/VulkanContext.hpp
-    renderer/GpuBuffer.cpp
-    renderer/GpuBuffer.hpp
-    renderer/GpuImage.cpp
-    renderer/GpuImage.hpp
+    # Renderer module
     renderer/TextureManager.cpp
     renderer/TextureManager.hpp
     renderer/TextureTransitions.cpp
@@ -135,8 +128,6 @@ add_library(quantiloom_core OBJECT
     renderer/RtBindings.hpp
     renderer/AccelerationStructure.cpp
     renderer/AccelerationStructure.hpp
-    renderer/CommandHelper.cpp
-    renderer/CommandHelper.hpp
     renderer/AsyncPixelReadback.cpp
     renderer/AsyncPixelReadback.hpp
     renderer/DeferredBufferUploads.cpp
@@ -148,8 +139,6 @@ add_library(quantiloom_core OBJECT
     renderer/TextureCompressor.cpp
     renderer/TextureCompressor.hpp
     ${QL_PUBLIC_INC}/renderer/LightingParams.hpp
-    renderer/VulkanContextAdapter.cpp
-    renderer/VulkanContextAdapter.hpp
     renderer/RenderCore.cpp
     renderer/FusionTransport.cpp
     renderer/FusionTransport.hpp
@@ -212,11 +201,22 @@ add_library(quantiloom_core OBJECT
     gpu/vulkan/VulkanRt.cpp
     gpu/vulkan/VulkanTrace.hpp
     gpu/vulkan/VulkanTrace.cpp
-    gpu/vulkan/VulkanBridge.hpp
-    gpu/vulkan/VulkanBridge.cpp
-    renderer/VulkanDeviceRequirements.cpp
-    renderer/VulkanDeviceRequirements.hpp
-    renderer/interop/VulkanInterop.cpp
+    # The context the backend runs on, its VMA allocator and buffer/image wrappers, the
+    # immediate submissions, and the exported vk::CreateDevice
+    gpu/vulkan/VmaImpl.cpp
+    gpu/vulkan/VulkanContext.cpp
+    gpu/vulkan/VulkanContext.hpp
+    gpu/vulkan/VulkanContextAdapter.cpp
+    gpu/vulkan/VulkanContextAdapter.hpp
+    gpu/vulkan/VulkanDeviceRequirements.cpp
+    gpu/vulkan/VulkanDeviceRequirements.hpp
+    gpu/vulkan/GpuBuffer.cpp
+    gpu/vulkan/GpuBuffer.hpp
+    gpu/vulkan/GpuImage.cpp
+    gpu/vulkan/GpuImage.hpp
+    gpu/vulkan/CommandHelper.cpp
+    gpu/vulkan/CommandHelper.hpp
+    gpu/vulkan/VulkanInterop.cpp
     ${QL_PUBLIC_INC}/renderer/GpuInterop.hpp
     ${QL_PUBLIC_INC}/renderer/interop/VulkanInterop.hpp
     ${QL_PUBLIC_INC}/renderer/interop/MetalInterop.hpp

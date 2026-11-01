@@ -11,7 +11,7 @@ namespace quantiloom::gpu::vulkan {
 
 class VulkanDevice final : public Device {
 public:
-    /// Non-owning: `context` outlives this device (AdoptContext, until S19).
+    /// Non-owning: `context` outlives this device (the Vulkan-only tests' shared device).
     explicit VulkanDevice(VulkanContext& context);
     /// Owns `context`, a VulkanContext or a VulkanContextAdapter, and destroys it after
     /// everything else this device holds (CreateSystemDevice, CreateDeviceFromHandles).

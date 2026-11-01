@@ -47,6 +47,17 @@ no `QL_API`, no header under `include/`, no `docs/abi/exports.golden` change.
   declare a different member than the backend defines (and `VulkanDevice` is `final`, so calls
   devirtualize to a symbol that does not exist). Hence `CreateGpuEvent`.
 - **Shaders** come from `core/ResourceLocator` through `ShaderLibrary`; there is no second search list.
-- **Transition.** `GpuBuffer`/`GpuImage`/`CommandHelper` are wrapped, not moved. `VulkanBridge.hpp`
-  carries the transitional accessors and is deleted once ray tracing has migrated.
+- **Backend files.** `gpu/vulkan/` is the whole Vulkan backend: the `gpu::` implementation
+  (`VulkanDevice`, `VulkanDeviceFactory`, `VulkanCommandList`, `VulkanResources`, `VulkanSync`,
+  `VulkanRt`, `VulkanTrace`, `VulkanMapping`), the context it runs on (`VulkanContext`, or
+  `VulkanContextAdapter` over a host's handles, with `VulkanDeviceRequirements`), the VMA
+  wrappers `GpuBuffer`/`GpuImage` and `VmaImpl.cpp`, `CommandHelper`'s immediate submissions,
+  and the exported `vk::CreateDevice` (`VulkanInterop.cpp`). Library code outside it reaches
+  the backend only through `gpu/DeviceFactory.hpp`; no file outside it calls a raw `vk*`
+  function (`vk_residual.sh` prints 0).
+- **No bridge.** The conversions between native objects and refs live beside their types:
+  `Wrap` in `VulkanCommandList.hpp`, `NativeImage`/`NativeBuffer`/`Ref(VkQueryPool, count)` in
+  `VulkanMapping.hpp`, `Ref(GpuImage)`/`Ref(GpuBuffer)`/`AsGpuImage` in `VulkanResources.hpp`.
+  Only Vulkan-only code uses them: the tests that record on raw handles, which reach the context
+  through `VulkanDevice::Context()`.
 - New compute code uses `gpu::`, not raw `vk*`.

@@ -12,7 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "renderer/ExternalRenderContext.hpp"
-#include "renderer/VulkanContext.hpp"
+#include "gpu/vulkan/VulkanContext.hpp"
 #include "support/GpuInteropTestUtils.hpp"
 #include "support/VulkanTestDevice.hpp"
 

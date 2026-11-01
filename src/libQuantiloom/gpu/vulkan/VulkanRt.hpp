@@ -2,7 +2,7 @@
 
 #include "gpu/RtScene.hpp"
 #include "gpu/vulkan/VulkanMapping.hpp"
-#include "renderer/GpuBuffer.hpp"
+#include "gpu/vulkan/GpuBuffer.hpp"
 
 #include <vulkan/vulkan.h>
 
