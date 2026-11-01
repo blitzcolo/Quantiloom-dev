@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Compare the built DLLs' export tables against the reviewed baselines in
-# docs/abi/. Exports are the SDK's contract: adding one is a SemVer minor and
-# a promise to keep it working, removing one is a major. Neither should happen
-# because somebody wanted a unit test to link.
+# Compare the built shared libraries' export tables against the reviewed
+# baselines in docs/abi/. Exports are the SDK's contract: adding one is a
+# SemVer minor and a promise to keep it working, removing one is a major.
+# Neither should happen because somebody wanted a unit test to link.
 #
 #   ./scripts/check_exports.sh            # verify (what build_wsl.sh runs)
 #   ./scripts/check_exports.sh --update   # accept the current tables
@@ -23,6 +23,11 @@ esac
 BUILD_DIR="${BUILD_DIR:-build}"
 ABI_DIR="docs/abi"
 
+# Two export readers: dumpbin/undname on Windows (WSL or Git Bash), nm/c++filt
+# on macOS, each compared against its own golden. Everything else about the
+# gate -- the CLI, the sorting, the diff -- is shared.
+PLATFORM="$(uname -s)"
+
 # --- Shell portability -------------------------------------------------------
 # This runs from WSL (build_wsl.sh) and from Git Bash (build_windows.ps1), which
 # mount the Windows drives at different roots and hand Windows paths to native
@@ -39,9 +44,11 @@ else
     C_DRIVE=/c
 fi
 
-# --- Locate the MSVC tools ---------------------------------------------------
-# Neither is on PATH outside a developer prompt, so glob the VS installs. Any
-# toolset version works; the export table does not depend on which one reads it.
+# --- Locate the export reader ------------------------------------------------
+# Neither Windows tool is on PATH outside a developer prompt, so glob the VS
+# installs. Any toolset version works; the export table does not depend on
+# which one reads it.
+if [[ "$PLATFORM" != "Darwin" ]]; then
 find_msvc_tool() {
     local name="$1" override="$2" found
     if [[ -n "${!override:-}" ]]; then printf '%s' "${!override}"; return 0; fi
@@ -58,6 +65,25 @@ find_msvc_tool() {
 
 DUMPBIN=$(find_msvc_tool dumpbin.exe QL_DUMPBIN)
 UNDNAME=$(find_msvc_tool undname.exe QL_UNDNAME)
+fi
+
+# --- Read one dylib's export table (macOS) ------------------------------------
+# nm's -U is BSD's "defined symbols only" (the inverse of -u), so nm -gU lists
+# the defined external symbols: the dylib's exports, the same population
+# dumpbin -exports reports for a DLL. Mach-O rows are "address type name";
+# keep the text/data letters, take the name, demangle, sort. Sorting is what
+# makes the baseline stable, as on the Windows path.
+dump_exports_darwin() {
+    local dylib="$1" decorated
+    decorated=$(mktemp)
+    nm -gU "$dylib" | awk '$2 ~ /^[TtDdBbRrSsWw]$/ {print $3}' > "$decorated"
+    if [[ ! -s "$decorated" ]]; then
+        echo "check_exports: no exports found in $dylib -- is it built?" >&2
+        rm -f "$decorated"; exit 1
+    fi
+    c++filt < "$decorated" | grep -v '^$' | sort -u
+    rm -f "$decorated"
+}
 
 # --- Read one DLL's export table --------------------------------------------
 # dumpbin's export rows are "ordinal hint RVA name"; take the name, undecorate,
@@ -70,6 +96,10 @@ UNDNAME=$(find_msvc_tool undname.exe QL_UNDNAME)
 # the dash form means the same thing in both shells.
 dump_exports() {
     local dll="$1" decorated
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        dump_exports_darwin "$dll"
+        return
+    fi
     decorated=$(mktemp)
     "$DUMPBIN" -nologo -exports "$(to_win "$dll")" \
         | tr -d '\r' \
@@ -107,7 +137,13 @@ check_one() {
     fi
 
     if [[ ! -f "$golden" ]]; then
-        echo "check_exports: no baseline at $golden. Run with --update to create it." >&2
+        if [[ "$PLATFORM" == "Darwin" ]]; then
+            echo "check_exports: no baseline at $golden. Only a Mac can create it:" >&2
+            echo "  run ./scripts/check_exports.sh --update here, review the" >&2
+            echo "  result, then commit it." >&2
+        else
+            echo "check_exports: no baseline at $golden. Run with --update to create it." >&2
+        fi
         rm -f "$actual"; status=1; return 0
     fi
 
@@ -129,7 +165,24 @@ check_one() {
     rm -f "$actual"
 }
 
-check_one "libQuantiloom" "$BUILD_DIR/src/libQuantiloom/Release/Quantiloom.dll"   exports.golden
-check_one "libSpectraForge" "$BUILD_DIR/src/libSpectraForge/Release/SpectraForge.dll" spectraforge-exports.golden
+if [[ "$PLATFORM" == "Darwin" ]]; then
+    # The Mac build may be single- or multi-config; take whichever layout exists.
+    first_existing() {
+        local p
+        for p in "$@"; do
+            if [[ -f "$p" ]]; then printf '%s' "$p"; return 0; fi
+        done
+        printf '%s' "$1"
+    }
+    check_one "libQuantiloom" "$(first_existing \
+        "$BUILD_DIR/src/libQuantiloom/Release/libQuantiloom.dylib" \
+        "$BUILD_DIR/src/libQuantiloom/libQuantiloom.dylib")" exports.macos.golden
+    check_one "libSpectraForge" "$(first_existing \
+        "$BUILD_DIR/src/libSpectraForge/Release/libSpectraForge.dylib" \
+        "$BUILD_DIR/src/libSpectraForge/libSpectraForge.dylib")" spectraforge-exports.macos.golden
+else
+    check_one "libQuantiloom" "$BUILD_DIR/src/libQuantiloom/Release/Quantiloom.dll"   exports.golden
+    check_one "libSpectraForge" "$BUILD_DIR/src/libSpectraForge/Release/SpectraForge.dll" spectraforge-exports.golden
+fi
 
 exit $status
