@@ -10,7 +10,9 @@
 #include "renderer/VulkanContext.hpp"
 #include "renderer/GpuImage.hpp"
 #include "renderer/GpuBuffer.hpp"
-#include "renderer/CommandHelper.hpp"
+#include "renderer/TextureTransitions.hpp"
+#include "gpu/Device.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "scene/Scene.hpp"
 #include "scene/Camera.hpp"
 #include "core/Log.hpp"
@@ -18,6 +20,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cstring>
+#include <span>
 
 namespace quantiloom {
 
@@ -54,6 +57,9 @@ const char* BatchRenderStatusToString(BatchRenderStatus status) {
 
 struct BatchRenderer::Impl {
     VulkanContext& context;
+    /// The compute RHI's view of `context`, adopted and non-owning. Declared
+    /// right after the context so every gpu:: object dies before it does.
+    std::unique_ptr<gpu::Device> gpuDevice;
     RayTracingPipeline& pipeline;
     Scene& scene;
 
@@ -70,7 +76,7 @@ struct BatchRenderer::Impl {
     u32 imageHeight = 0;
 
     Impl(VulkanContext& ctx, RayTracingPipeline& pipe, Scene& sc)
-        : context(ctx), pipeline(pipe), scene(sc) {}
+        : context(ctx), gpuDevice(gpu::vulkan::AdoptContext(ctx)), pipeline(pipe), scene(sc) {}
 
     /**
      * @brief Initialize GPU output image if needed
@@ -92,12 +98,9 @@ struct BatchRenderer::Impl {
             );
 
             // Transition to GENERAL layout for storage image usage
-            CommandHelper::TransitionImageLayoutImmediate(
-                context,
-                outputImage->GetImage(),
-                VK_FORMAT_R32G32B32A32_SFLOAT,
-                VK_IMAGE_LAYOUT_UNDEFINED,
-                VK_IMAGE_LAYOUT_GENERAL
+            rendercore::LegacyTransitionImmediate(
+                *gpuDevice, gpu::vulkan::Ref(*outputImage),
+                rendercore::Layout::Undefined, rendercore::Layout::General
             );
 
             imageWidth = width;
@@ -153,80 +156,71 @@ struct BatchRenderer::Impl {
         // Keep each submit well under the ~2s Windows TDR limit
         constexpr u32 BATCH_SIZE = 2;
 
-        VkCommandPoolCreateInfo cmdPoolInfo{};
-        cmdPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        cmdPoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        cmdPoolInfo.queueFamilyIndex = context.GetGraphicsQueueFamily();
-
-        VkCommandPool cmdPool = VK_NULL_HANDLE;
-        if (vkCreateCommandPool(context.GetDevice(), &cmdPoolInfo, nullptr, &cmdPool) != VK_SUCCESS) {
-            LOG_ERROR("BatchRenderer: Failed to create command pool");
-            return false;
-        }
-
-        VkCommandBufferAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        allocInfo.commandPool = cmdPool;
-        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = 1;
-
-        VkCommandBuffer cmd = VK_NULL_HANDLE;
-        vkAllocateCommandBuffers(context.GetDevice(), &allocInfo, &cmd);
-
-        VkFenceCreateInfo fenceCreateInfo{};
-        fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        VkFence fence = VK_NULL_HANDLE;
-        vkCreateFence(context.GetDevice(), &fenceCreateInfo, nullptr, &fence);
-
-        for (u32 batchStart = 0; batchStart < params.spp; batchStart += BATCH_SIZE) {
-            u32 batchEnd = std::min(batchStart + BATCH_SIZE, params.spp);
-
-            // A primary command buffer must return to INITIAL before it is
-            // begun again. The pool permits individual resets; omitting this
-            // was invalid Vulkan and made repeated camera wavelength renders
-            // fail nondeterministically after the first two-sample batch.
-            if (batchStart != 0 &&
-                vkResetCommandBuffer(cmd, 0) != VK_SUCCESS) {
-                LOG_ERROR("BatchRenderer: Failed to reset command buffer");
-                vkDestroyFence(context.GetDevice(), fence, nullptr);
-                vkDestroyCommandPool(context.GetDevice(), cmdPool, nullptr);
+        {
+            gpu::CommandPoolDesc poolDesc;
+            poolDesc.transient = true;
+            poolDesc.resettable = true;
+            auto createdPool = gpuDevice->CreateCommandPool(poolDesc);
+            if (!createdPool) {
+                LOG_ERROR("BatchRenderer: Failed to create command pool");
                 return false;
             }
+            // Reverse declaration order at every exit: fence, then the command
+            // buffer, then the pool. The scope ends before the readback, where
+            // the hand-written destroys were.
+            std::unique_ptr<gpu::CommandPool> cmdPool = std::move(createdPool).value();
 
-            VkCommandBufferBeginInfo beginInfo{};
-            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            vkBeginCommandBuffer(cmd, &beginInfo);
-
-            for (u32 sample = batchStart; sample < batchEnd; ++sample) {
-                // The per-sample seed changes; the sequence seed does not --
-                // it fixes the Owen scrambles for the whole accumulation, which
-                // is what makes the samples stratified against each other.
-                const u32 sampleSeed = StableMix(sequenceSeed ^ StableMix(sample));
-                pipeline.SetSamplingParams(params.frameIndex, sample, params.spp,
-                                           sampleSeed, sequenceSeed);
-                pipeline.TraceRays(cmd, imageWidth, imageHeight, sample == params.spp - 1);
-            }
-
-            vkEndCommandBuffer(cmd);
-
-            vkResetFences(context.GetDevice(), 1, &fence);
-            VkSubmitInfo submitInfo{};
-            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            submitInfo.commandBufferCount = 1;
-            submitInfo.pCommandBuffers = &cmd;
-            if (vkQueueSubmit(context.GetGraphicsQueue(), 1, &submitInfo, fence) != VK_SUCCESS ||
-                vkWaitForFences(context.GetDevice(), 1, &fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+            auto allocated = cmdPool->Allocate();
+            auto createdFence = gpuDevice->CreateFence();
+            if (!allocated || !createdFence) {
+                // Neither call was checked before; the batch failed at its submit.
                 LOG_ERROR("BatchRenderer: GPU submit/wait failed (possible device lost)");
-                vkDestroyFence(context.GetDevice(), fence, nullptr);
-                vkDestroyCommandPool(context.GetDevice(), cmdPool, nullptr);
                 return false;
             }
+            std::unique_ptr<gpu::CommandBuffer> cmd = std::move(allocated).value();
+            std::unique_ptr<gpu::Fence> fence = std::move(createdFence).value();
+
+            for (u32 batchStart = 0; batchStart < params.spp; batchStart += BATCH_SIZE) {
+                u32 batchEnd = std::min(batchStart + BATCH_SIZE, params.spp);
+
+                // A primary command buffer must return to INITIAL before it is
+                // begun again. The pool permits individual resets; omitting this
+                // was invalid Vulkan and made repeated camera wavelength renders
+                // fail nondeterministically after the first two-sample batch.
+                if (batchStart != 0 && !cmd->Reset()) {
+                    LOG_ERROR("BatchRenderer: Failed to reset command buffer");
+                    return false;
+                }
+
+                auto begun = cmd->Begin();
+                if (!begun) {
+                    // Unchecked before, as were end and the fence reset below;
+                    // the batch failed at its submit, whose text this keeps.
+                    LOG_ERROR("BatchRenderer: GPU submit/wait failed (possible device lost)");
+                    return false;
+                }
+                gpu::CommandList& list = *begun.value();
+                const VkCommandBuffer nativeCmd = gpu::vulkan::NativeCommandBuffer(list);
+
+                for (u32 sample = batchStart; sample < batchEnd; ++sample) {
+                    // The per-sample seed changes; the sequence seed does not --
+                    // it fixes the Owen scrambles for the whole accumulation, which
+                    // is what makes the samples stratified against each other.
+                    const u32 sampleSeed = StableMix(sequenceSeed ^ StableMix(sample));
+                    pipeline.SetSamplingParams(params.frameIndex, sample, params.spp,
+                                               sampleSeed, sequenceSeed);
+                    pipeline.TraceRays(nativeCmd, imageWidth, imageHeight, sample == params.spp - 1);
+                }
+
+                static_cast<void>(cmd->End());
+
+                static_cast<void>(fence->Reset());
+                if (!gpuDevice->Submit(*cmd, fence.get()) || !fence->Wait()) {
+                    LOG_ERROR("BatchRenderer: GPU submit/wait failed (possible device lost)");
+                    return false;
+                }
+            }
         }
-
-
-        vkDestroyFence(context.GetDevice(), fence, nullptr);
-        vkDestroyCommandPool(context.GetDevice(), cmdPool, nullptr);
 
         // Read back result to CPU
         VkDeviceSize bufferSize = imageWidth * imageHeight * 4 * sizeof(f32);
@@ -238,44 +232,28 @@ struct BatchRenderer::Impl {
         );
 
         // Copy image to staging buffer
-        CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
+        const gpu::TextureRef source =
+            gpu::vulkan::Ref(*outputImage).WithLayout(gpu::TextureLayoutPolicy::Optimal);
+        gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
             // Transition image for transfer
-            VkImageMemoryBarrier barrier{};
-            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            barrier.image = outputImage->GetImage();
-            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            barrier.subresourceRange.levelCount = 1;
-            barrier.subresourceRange.layerCount = 1;
-
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                0, 0, nullptr, 0, nullptr, 1, &barrier);
+            const gpu::TextureBarrier toTransfer{source, gpu::Access::RayTraceWrite,
+                                                 gpu::Access::TransferRead};
+            gpu::BarrierBatch before;
+            before.textures = std::span<const gpu::TextureBarrier>(&toTransfer, 1);
+            list.Barrier(before);
 
             // Copy to buffer
-            VkBufferImageCopy region{};
-            region.imageExtent = {imageWidth, imageHeight, 1};
-            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.layerCount = 1;
-
-            vkCmdCopyImageToBuffer(cmd, outputImage->GetImage(),
-                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                stagingBuffer.GetHandle(), 1, &region);
+            gpu::BufferTextureCopy region;
+            region.width = imageWidth;
+            region.height = imageHeight;
+            list.CopyTextureToBuffer(source, gpu::vulkan::Ref(stagingBuffer), region);
 
             // Transition back to general layout
-            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                0, 0, nullptr, 0, nullptr, 1, &barrier);
+            const gpu::TextureBarrier toGeneral{source, gpu::Access::TransferRead,
+                                                gpu::Access::RayTraceWrite};
+            gpu::BarrierBatch after;
+            after.textures = std::span<const gpu::TextureBarrier>(&toGeneral, 1);
+            list.Barrier(after);
         });
 
         // Map and copy data

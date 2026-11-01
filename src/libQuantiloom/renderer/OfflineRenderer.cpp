@@ -652,10 +652,13 @@ void OfflineRenderer::Impl::BuildThermalSession() {
     // than beside the precompute because the early cache lookup below needs it.
     thermalMaterialCoverage = rendercore::ComputeMaterialCoverage(loadedScene);
     {
-        const VkPhysicalDeviceProperties& gpu = context.GetDeviceProperties();
-        thermalGpuIdentity =
-            thermal::MakeGpuIdentity(StringView(gpu.deviceName, sizeof(gpu.deviceName)),
-                                     gpu.vendorID, gpu.deviceID, gpu.driverVersion);
+        // The same properties the cache key always used, read through the RHI:
+        // the adopted device's Info() is filled from this context's device
+        // properties, and Info().name stops at the name's first NUL just as
+        // MakeGpuIdentity trims the fixed-size array it was handed before.
+        const gpu::DeviceInfo& info = gpuDevice->Info();
+        thermalGpuIdentity = thermal::MakeGpuIdentity(info.name, info.vendorId, info.deviceId,
+                                                      info.driverVersion);
     }
 
     // A static scene can ask the cache before measuring anything, which is
@@ -2979,43 +2982,28 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
         u32 submitCount = 0;
         u32 largestBatch = 0;
 
-        VkCommandPoolCreateInfo poolInfo{};
-        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        poolInfo.queueFamilyIndex = context.GetGraphicsQueueFamily();
-
-        // Owns the pool and the fence so that every throw below releases them.
-        struct SubmitResources {
-            VkDevice device;
-            VkCommandPool pool = VK_NULL_HANDLE;
-            VkFence fence = VK_NULL_HANDLE;
-            ~SubmitResources() {
-                if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
-                if (pool != VK_NULL_HANDLE) vkDestroyCommandPool(device, pool, nullptr);
-            }
-        } submitResources{context.GetDevice()};
-        VkCommandPool& cmdPool = submitResources.pool;
-        if (vkCreateCommandPool(context.GetDevice(), &poolInfo, nullptr, &cmdPool) != VK_SUCCESS) {
+        // Owns the pool, the command buffer and the fence so that every throw
+        // below releases them, in reverse declaration order: fence, buffer, pool.
+        gpu::CommandPoolDesc poolDesc;
+        poolDesc.transient = true;
+        poolDesc.resettable = true;
+        auto createdPool = gpuDevice->CreateCommandPool(poolDesc);
+        if (!createdPool) {
             throw std::runtime_error("Failed to create command pool for batched rendering");
         }
+        std::unique_ptr<gpu::CommandPool> cmdPool = std::move(createdPool).value();
 
-        VkCommandBufferAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        allocInfo.commandPool = cmdPool;
-        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = 1;
-
-        VkCommandBuffer cmd = VK_NULL_HANDLE;
-        if (vkAllocateCommandBuffers(context.GetDevice(), &allocInfo, &cmd) != VK_SUCCESS) {
+        auto allocated = cmdPool->Allocate();
+        if (!allocated) {
             throw std::runtime_error("Failed to allocate offline render command buffer");
         }
+        std::unique_ptr<gpu::CommandBuffer> cmd = std::move(allocated).value();
 
-        VkFenceCreateInfo fenceInfo{};
-        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        VkFence& fence = submitResources.fence;
-        if (vkCreateFence(context.GetDevice(), &fenceInfo, nullptr, &fence) != VK_SUCCESS) {
+        auto createdFence = gpuDevice->CreateFence();
+        if (!createdFence) {
             throw std::runtime_error("Failed to create offline render fence");
         }
+        std::unique_ptr<gpu::Fence> fence = std::move(createdFence).value();
 
         for (u32 batchStart = 0; batchStart < spp;) {
             const u32 batchSize = batchScheduler.NextBatchSize(spp - batchStart);
@@ -3023,36 +3011,37 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
 
             // A submitted primary command buffer is EXECUTABLE, not INITIAL.
             // Reset it before recording the next batch into the same handle.
-            if (batchStart != 0 && vkResetCommandBuffer(cmd, 0) != VK_SUCCESS) {
+            if (batchStart != 0 && !cmd->Reset()) {
                 throw std::runtime_error("Failed to reset offline render command buffer");
             }
 
-            VkCommandBufferBeginInfo beginInfo{};
-            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            vkBeginCommandBuffer(cmd, &beginInfo);
+            auto begun = cmd->Begin();
+            if (!begun) {
+                // The begin call's result was not checked before; the batch then
+                // failed at its submit, whose text this keeps. End and the fence
+                // reset stay unchecked, as they were.
+                throw std::runtime_error("Queue submit failed");
+            }
+            gpu::CommandList& list = *begun.value();
+            const VkCommandBuffer nativeCmd = gpu::vulkan::NativeCommandBuffer(list);
 
             for (u32 sampleIndex = batchStart; sampleIndex < batchEnd; ++sampleIndex) {
                 u32 randomSeed = dist(rng) ^ (frameIndex * 997 + sampleIndex * 1009);
                 pipeline->SetSamplingParams(frameIndex, sampleIndex, spp, randomSeed, sequenceSeed);
 
-                perfLogger->BeginFrame(cmd);
+                perfLogger->BeginFrame(nativeCmd);
                 bool isFinal = (sampleIndex == spp - 1);
-                pipeline->TraceRays(cmd, width, height, isFinal);
-                perfLogger->EndFrame(cmd);
+                pipeline->TraceRays(nativeCmd, width, height, isFinal);
+                perfLogger->EndFrame(nativeCmd);
             }
 
-            vkEndCommandBuffer(cmd);
+            static_cast<void>(cmd->End());
 
-            vkResetFences(context.GetDevice(), 1, &fence);
-            VkSubmitInfo submitInfo{};
-            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            submitInfo.commandBufferCount = 1;
-            submitInfo.pCommandBuffers = &cmd;
-            if (vkQueueSubmit(context.GetGraphicsQueue(), 1, &submitInfo, fence) != VK_SUCCESS) {
+            static_cast<void>(fence->Reset());
+            if (!gpuDevice->Submit(*cmd, fence.get())) {
                 throw std::runtime_error("Queue submit failed");
             }
-            if (vkWaitForFences(context.GetDevice(), 1, &fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+            if (!fence->Wait()) {
                 throw std::runtime_error("Fence wait failed (possible GPU timeout / device lost)");
             }
 
