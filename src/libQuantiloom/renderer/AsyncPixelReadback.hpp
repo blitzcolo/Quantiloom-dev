@@ -9,17 +9,22 @@
 
 #pragma once
 
-#include "renderer/GpuBuffer.hpp"
+#include "gpu/Resources.hpp"
+#include "gpu/Sync.hpp"
 #include "renderer/PixelReading.hpp"
-#include "renderer/VulkanContext.hpp"
+#include <vulkan/vulkan.h>
 #include <array>
 #include <memory>
+
+namespace quantiloom::gpu {
+class Device;
+}
 
 namespace quantiloom::rendercore {
 
 class AsyncPixelReadback {
 public:
-    explicit AsyncPixelReadback(const VulkanContext& context);
+    explicit AsyncPixelReadback(gpu::Device& device);
     ~AsyncPixelReadback();
     AsyncPixelReadback(const AsyncPixelReadback&) = delete;
     AsyncPixelReadback& operator=(const AsyncPixelReadback&) = delete;
@@ -33,18 +38,17 @@ public:
     Optional<PixelReading> Poll(u64 generation, u64 acquisition);
 
 private:
-    static void Check(VkResult result);
     void Cleanup() noexcept;
     struct Slot {
-        std::unique_ptr<GpuBuffer> buffer;
-        VkCommandBuffer command = VK_NULL_HANDLE;
-        VkFence fence = VK_NULL_HANDLE;
+        std::unique_ptr<gpu::Buffer> buffer;
+        std::unique_ptr<gpu::CommandBuffer> command;
+        std::unique_ptr<gpu::Fence> fence;
         bool pending = false;
         u64 serial = 0;
         PixelReading reading;
     };
-    const VulkanContext& m_context;
-    VkCommandPool m_pool = VK_NULL_HANDLE;
+    gpu::Device& m_device;
+    std::unique_ptr<gpu::CommandPool> m_pool;  // outlives the slots' command buffers
     std::array<Slot, 3> m_slots;
     u64 m_serial = 0;
 };

@@ -4148,7 +4148,7 @@ Result<bool, String> ExternalRenderContext::RequestPixelValue(u32 x, u32 y, u64 
     try {
         if (!m_impl->asyncPixelReadback)
             m_impl->asyncPixelReadback =
-                std::make_unique<rendercore::AsyncPixelReadback>(*m_impl->contextAdapter);
+                std::make_unique<rendercore::AsyncPixelReadback>(*m_impl->gpuDevice);
         PixelReading reading;
         reading.requestId = requestId;
         reading.imageGeneration = m_impl->pixelImageGeneration;
