@@ -64,7 +64,7 @@ Key outputs:
 - **Script fails after "Build" with GoogleTest output** — that's the test gate doing its job, not a build error. Read the `[  FAILED  ]` lines and follow the run-tests skill.
 - **`libQuantiloom export surface changed`** — the ABI gate. It prints the added (`+`) and removed (`-`) symbols; decide which case you are in before touching anything:
   - **Intended** (you deliberately promoted something to public API): `./scripts/check_exports.sh --update`, then commit `docs/abi/exports.golden` **with** the change. The baseline diff is what gets reviewed, and it doubles as the SemVer trigger — a removed line is a major, an added line a minor.
-  - **Unintended** (`+` lines you did not mean to publish): almost always a new class that picked up `QL_API` out of habit. New code in `src/libQuantiloom/` is internal by default; the tests link the objects and see it without any export. See `src/libQuantiloom/CLAUDE.md`.
+  - **Unintended** (`+` lines you did not mean to publish): almost always a new class that picked up `QL_API` out of habit. New code in `src/libQuantiloom/` is internal by default; the tests link the objects and see it without any export. See `src/libQuantiloom/AGENTS.md`.
   - Never silence the gate by editing `build_wsl.sh`. An unreviewed export is a promise to Quantiloom-Qt that nobody made on purpose.
 
 ## Linux portability rules (apply to every code change)
