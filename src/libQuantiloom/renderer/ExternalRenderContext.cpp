@@ -15,6 +15,7 @@
 #include "core/ResourceLocator.hpp"
 #include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/ConfigResolve.hpp"
+#include "renderer/GpuAlloc.hpp"
 #include "renderer/ShaderBinary.hpp"
 #include "renderer/SkyDome.hpp"
 #include "renderer/SpectralUnmixer.hpp"
@@ -237,18 +238,18 @@ struct ExternalRenderContext::Impl {
     // GPU resources
     std::unique_ptr<gpu::Texture> outputImage;
     std::unique_ptr<gpu::Texture> depthAovImage;  // primary-hit distance, R32_SFLOAT (binding 22)
-    std::unique_ptr<GpuBuffer> lightingParamsBuffer;
+    std::unique_ptr<gpu::Buffer> lightingParamsBuffer;
     std::unique_ptr<gpu::Buffer> materialBuffer;
-    std::unique_ptr<GpuBuffer> spectralCurvesBuffer;
-    std::unique_ptr<GpuBuffer> cameraLightingParamsBuffer;
-    std::unique_ptr<GpuBuffer> criBuffer;
-    std::unique_ptr<GpuBuffer> solarLutBuffer;
+    std::unique_ptr<gpu::Buffer> spectralCurvesBuffer;
+    std::unique_ptr<gpu::Buffer> cameraLightingParamsBuffer;
+    std::unique_ptr<gpu::Buffer> criBuffer;
+    std::unique_ptr<gpu::Buffer> solarLutBuffer;
     /// The curves behind solarLutBuffer, kept for the camera chain. Present
     /// exactly when an illuminant is bound, which is what HasSolarSpectralLUT
     /// reports.
     std::optional<std::pair<SpectralCurve, SpectralCurve>> cameraSolarSources;
-    std::unique_ptr<GpuBuffer> atmosHeaderBuffer;  // AtmosNNHeaderGPU (binding 17)
-    std::unique_ptr<GpuBuffer> atmosDataBuffer;    // Baked LUT blob (binding 20)
+    std::unique_ptr<gpu::Buffer> atmosHeaderBuffer;  // AtmosNNHeaderGPU (binding 17)
+    std::unique_ptr<gpu::Buffer> atmosDataBuffer;    // Baked LUT blob (binding 20)
     std::unique_ptr<gpu::Buffer> cieCmfBuffer;  // CIE 1931 CMF LUT for VIS_Fused mode (binding 19)
     std::unique_ptr<gpu::Buffer> rgbToSpectrumBuffer;  // Jakob-Hanika coefficients (binding 25)
     std::unique_ptr<gpu::Buffer> emissiveTriangleBuffer;  // world-space emitters for NEE (binding 23)
@@ -259,9 +260,9 @@ struct ExternalRenderContext::Impl {
     /// so this is one zero entry, which every instance's sentinel keeps the
     /// shader from reading. Bound because an unbound descriptor is not a valid
     /// one, and reading one is a device loss rather than a wrong colour.
-    std::unique_ptr<GpuBuffer> thermalTemperatureBuffer;
-    std::unique_ptr<GpuBuffer> thermalSunResponseBuffer;
-    std::unique_ptr<GpuBuffer> thermalParameterTangentBuffer;
+    std::unique_ptr<gpu::Buffer> thermalTemperatureBuffer;
+    std::unique_ptr<gpu::Buffer> thermalSunResponseBuffer;
+    std::unique_ptr<gpu::Buffer> thermalParameterTangentBuffer;
     /// What the tangent buffer currently holds, so a repeat ask is a
     /// no-op rather than a reupload and an accumulation reset.
     ThermalSensitivityParameter whatIfParameter = ThermalSensitivityParameter::Convection;
@@ -748,16 +749,16 @@ struct ExternalRenderContext::Impl {
     }
 
     template<class Entry>
-    std::unique_ptr<GpuBuffer> PrepareLookupTable(const Vector<Entry>& entries) {
+    std::unique_ptr<gpu::Buffer> PrepareLookupTable(const Vector<Entry>& entries) {
         if (entries.empty())
             return nullptr;
         // Spare capacity and TRANSFER_DST: after this upload the table can be
         // appended in place -- see AppendLookupEntry.
         const auto bytes = LookupCapacity(entries.size()) * sizeof(Entry);
-        auto buffer = std::make_unique<GpuBuffer>(contextAdapter->GetAllocator(), bytes,
-                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                                      VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                                  VMA_MEMORY_USAGE_CPU_TO_GPU);
+        auto buffer = CreateBufferOrThrow(
+            *gpuDevice,
+            gpu::BufferDesc{bytes, gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
+                            gpu::MemoryClass::Upload, 0});
         buffer->Upload(entries.data(), entries.size() * sizeof(Entry));
         return buffer;
     }
@@ -785,7 +786,7 @@ struct ExternalRenderContext::Impl {
     ///         published state is left intact in that case.
     template<class Entry>
     bool AppendLookupEntry(const Entry& entry, Vector<Entry>& current,
-                           std::unique_ptr<GpuBuffer>& buffer, usize& capacity) {
+                           std::unique_ptr<gpu::Buffer>& buffer, usize& capacity) {
         const usize index = current.size();
         if (buffer && capacity > index) {
             UploadDeferred(*buffer, index * sizeof(Entry), &entry, sizeof(Entry));
@@ -797,10 +798,11 @@ struct ExternalRenderContext::Impl {
         // Prepare before waiting; failed synchronization leaves all published
         // state intact.
         const usize newCapacity = std::max(LookupCapacity(grown.size()), capacity * 2);
-        auto replacement = std::make_unique<GpuBuffer>(
-            contextAdapter->GetAllocator(), newCapacity * sizeof(Entry),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        auto replacement = CreateBufferOrThrow(
+            *gpuDevice,
+            gpu::BufferDesc{newCapacity * sizeof(Entry),
+                            gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
+                            gpu::MemoryClass::Upload, 0});
         replacement->Upload(grown.data(), grown.size() * sizeof(Entry));
         // Queued deferred appends still name the buffer being replaced.
         FlushPendingGpuWork();
@@ -808,9 +810,9 @@ struct ExternalRenderContext::Impl {
             return false;
         if (pipeline) {
             if constexpr (std::is_same_v<Entry, SpectralCurveGPU>)
-                pipeline->BindSpectralCurvesBuffer(gpu::vulkan::RefOrEmpty(replacement.get()));
+                pipeline->BindSpectralCurvesBuffer(replacement->Ref());
             else
-                pipeline->BindComplexRefractiveIndexBuffer(gpu::vulkan::RefOrEmpty(replacement.get()));
+                pipeline->BindComplexRefractiveIndexBuffer(replacement->Ref());
         }
         buffer = std::move(replacement);
         capacity = newCapacity;
@@ -865,7 +867,7 @@ struct ExternalRenderContext::Impl {
     /// drain the queue, write through the mapping, and on a failed wait log
     /// rather than throw -- the device is already lost at that point, and a
     /// setter has no error channel.
-    void UploadDeferred(GpuBuffer& dst, VkDeviceSize offset, const void* data, VkDeviceSize bytes);
+    void UploadDeferred(gpu::Buffer& dst, u64 offset, const void* data, u64 bytes);
     // Config's renderer.enable_light_sampling. Held here rather than in
     // LightingParams, which has no bits left: turning it off is expressed by
     // publishing an emitter count of zero, which is the same thing the shader
@@ -1221,12 +1223,11 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
                                                    gpu::Format::R32Float);
 
     // Create lighting params buffer
-    lightingParamsBuffer = std::make_unique<GpuBuffer>(
-        contextAdapter->GetAllocator(),
-        sizeof(LightingParams),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
+    lightingParamsBuffer = CreateBufferOrThrow(
+        *gpuDevice,
+        gpu::BufferDesc{sizeof(LightingParams),
+                        gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
+                        gpu::MemoryClass::Upload, 0});
     UploadLightingParams();
 
     // Create dummy buffers for optional bindings
@@ -1834,19 +1835,19 @@ bool ExternalRenderContext::Impl::UploadThermalSunResponse(
     const auto records = rendercore::MakeThermalSunResponse(
         sunSensitivity_K, sunVisibility, sunDirection, lagSensitivity_K, lagVisibility,
         lagDirection);
-    const VkDeviceSize bytes =
+    const u64 bytes =
         records.size() * sizeof(rendercore::ThermalSunResponseGpu);
 
     const bool reallocate =
-        !thermalSunResponseBuffer || thermalSunResponseBuffer->GetSize() != bytes;
+        !thermalSunResponseBuffer || thermalSunResponseBuffer->Size() != bytes;
     if (reallocate) {
         // A pending upload would still name the buffer being replaced.
         FlushPendingGpuWork();
         if (thermalSunResponseBuffer) (void)gpuDevice->WaitIdle();
-        thermalSunResponseBuffer = std::make_unique<GpuBuffer>(
-            contextAdapter->GetAllocator(), bytes,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        thermalSunResponseBuffer = CreateBufferOrThrow(
+            *gpuDevice,
+            gpu::BufferDesc{bytes, gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
+                            gpu::MemoryClass::Upload, 0});
         thermalSunResponseBuffer->Upload(records.data(), bytes);
         return reallocate;
     }
@@ -1870,17 +1871,17 @@ bool ExternalRenderContext::Impl::UploadThermalTangent(const Vector<f32>& tangen
     records.insert(records.end(), tangent.begin(), tangent.end());
     if (records.size() < 2) records.push_back(0.0f);
 
-    const VkDeviceSize bytes = records.size() * sizeof(f32);
+    const u64 bytes = records.size() * sizeof(f32);
     const bool reallocate =
-        !thermalParameterTangentBuffer || thermalParameterTangentBuffer->GetSize() != bytes;
+        !thermalParameterTangentBuffer || thermalParameterTangentBuffer->Size() != bytes;
     if (reallocate) {
         // A pending upload would still name the buffer being replaced.
         FlushPendingGpuWork();
         if (thermalParameterTangentBuffer) (void)gpuDevice->WaitIdle();
-        thermalParameterTangentBuffer = std::make_unique<GpuBuffer>(
-            contextAdapter->GetAllocator(), bytes,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        thermalParameterTangentBuffer = CreateBufferOrThrow(
+            *gpuDevice,
+            gpu::BufferDesc{bytes, gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
+                            gpu::MemoryClass::Upload, 0});
         thermalParameterTangentBuffer->Upload(records.data(), bytes);
         return reallocate;
     }
@@ -1924,14 +1925,15 @@ void ExternalRenderContext::Impl::UploadLightingParams() {
         (lightingParams.enableEnvironmentMap != 0 && hasCustomEnvMap && spectralMode==SpectralMode::RGB) ? 1u : 0u;
     UploadDeferred(*lightingParamsBuffer, 0, &effective, sizeof(LightingParams));
     if (!cameraLightingParamsBuffer) {
-        cameraLightingParamsBuffer = std::make_unique<GpuBuffer>(
-            contextAdapter->GetAllocator(), sizeof(LightingParams),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        cameraLightingParamsBuffer = CreateBufferOrThrow(
+            *gpuDevice,
+            gpu::BufferDesc{sizeof(LightingParams),
+                            gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
+                            gpu::MemoryClass::Upload, 0});
         // The descriptor names the buffer, not its contents: written once,
         // at creation, and never re-bound by the uploads below.
         if (pipeline)
-            pipeline->BindCameraLightingBuffer(gpu::vulkan::Ref(*cameraLightingParamsBuffer));
+            pipeline->BindCameraLightingBuffer(cameraLightingParamsBuffer->Ref());
     }
     if (cameraConfig.inputKind != camera::CameraInputKind::FastRgbApproximation)
         effective.enableEnvironmentMap = 0;
@@ -3010,8 +3012,8 @@ void ExternalRenderContext::Impl::UpdateMaterial(u32 materialIndex, const Materi
         material, wavelength_nm, indices, &resources);
 
     // 3. Partial upload at offset
-    VkDeviceSize offset = materialIndex * sizeof(MaterialDataCPU);
-    UploadDeferred(gpu::vulkan::AsGpuBuffer(*materialBuffer), offset, &cpuMat, sizeof(MaterialDataCPU));
+    u64 offset = materialIndex * sizeof(MaterialDataCPU);
+    UploadDeferred(*materialBuffer, offset, &cpuMat, sizeof(MaterialDataCPU));
 
     // 4. Rebuild the geometry only when the opacity classification actually
     //    moved. Doing it on every edit would put an acceleration-structure
@@ -3273,16 +3275,16 @@ void ExternalRenderContext::Impl::UploadSolarLut(const SolarSpectralLUT& lut) {
     // frame may still read it is invalid; solar edits are infrequent. Drain
     // the upload queue first so nothing pending still names the old buffer.
     FlushPendingGpuWork();
-    if (solarLutBuffer && device != VK_NULL_HANDLE)
+    if (solarLutBuffer && gpuDevice)
         (void)gpuDevice->WaitIdle();
 
-    solarLutBuffer = std::make_unique<GpuBuffer>(
-        contextAdapter->GetAllocator(), sizeof(SolarSpectralLUT),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    solarLutBuffer = CreateBufferOrThrow(
+        *gpuDevice, gpu::BufferDesc{sizeof(SolarSpectralLUT), gpu::BufferUsage::Storage,
+                                    gpu::MemoryClass::Upload, 0});
     solarLutBuffer->Upload(&lut, sizeof(SolarSpectralLUT));
 
     if (pipeline) {
-        pipeline->BindSolarSpectralLUT(gpu::vulkan::RefOrEmpty(solarLutBuffer.get()));
+        pipeline->BindSolarSpectralLUT(solarLutBuffer->Ref());
     }
     if (cameraConfig.enabled)
         cameraCapturePending = true;
@@ -3402,7 +3404,7 @@ Result<void, String> ExternalRenderContext::SetThermalWhatIf(
             m_impl->UploadThermalTangent({}, 0.0f);
             if (m_impl->pipeline) {
                 m_impl->pipeline->BindThermalTangentBuffer(
-                    gpu::vulkan::Ref(*m_impl->thermalParameterTangentBuffer));
+                    m_impl->thermalParameterTangentBuffer->Ref());
             }
             return WhatIfResult::Err(
                 "this solve does not carry a derivative with respect to that "
@@ -3412,7 +3414,7 @@ Result<void, String> ExternalRenderContext::SetThermalWhatIf(
     }
 
     if (m_impl->UploadThermalTangent(tangent, m_impl->whatIfStep) && m_impl->pipeline) {
-        m_impl->pipeline->BindThermalTangentBuffer(gpu::vulkan::Ref(*m_impl->thermalParameterTangentBuffer));
+        m_impl->pipeline->BindThermalTangentBuffer(m_impl->thermalParameterTangentBuffer->Ref());
     }
     ResetAccumulation();
     return WhatIfResult();
@@ -3443,18 +3445,19 @@ void ExternalRenderContext::SetThermalSolveEnabled(const bool enabled) {
             m_impl->FlushPendingGpuWork();
             (void)m_impl->gpuDevice->WaitIdle();
             const f32 zero = 0.0f;
-            m_impl->thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
-                m_impl->contextAdapter->GetAllocator(), sizeof(f32),
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                VMA_MEMORY_USAGE_CPU_TO_GPU);
+            m_impl->thermalTemperatureBuffer = CreateBufferOrThrow(
+                *m_impl->gpuDevice,
+                gpu::BufferDesc{sizeof(f32),
+                                gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
+                                gpu::MemoryClass::Upload, 0});
             m_impl->thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
             m_impl->UploadThermalSunResponse({}, {}, glm::vec3(0.0f));
             m_impl->UploadThermalTangent({}, 0.0f);
             m_impl->whatIfStep = 0.0f;
             if (m_impl->pipeline) {
-                m_impl->pipeline->BindThermalTemperatureBuffer(gpu::vulkan::Ref(*m_impl->thermalTemperatureBuffer));
-                m_impl->pipeline->BindThermalSunResponseBuffer(gpu::vulkan::Ref(*m_impl->thermalSunResponseBuffer));
-                m_impl->pipeline->BindThermalTangentBuffer(gpu::vulkan::Ref(*m_impl->thermalParameterTangentBuffer));
+                m_impl->pipeline->BindThermalTemperatureBuffer(m_impl->thermalTemperatureBuffer->Ref());
+                m_impl->pipeline->BindThermalSunResponseBuffer(m_impl->thermalSunResponseBuffer->Ref());
+                m_impl->pipeline->BindThermalTangentBuffer(m_impl->thermalParameterTangentBuffer->Ref());
             }
 
             m_impl->geometry.SetThermalElementBases({});
@@ -3491,20 +3494,20 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
     m_impl->thermalLastError.clear();
 
     if (result.elementCountChanged || result.surfaceTemperature_K.size() * sizeof(f32) !=
-            (m_impl->thermalTemperatureBuffer ? m_impl->thermalTemperatureBuffer->GetSize() : 0)) {
+            (m_impl->thermalTemperatureBuffer ? m_impl->thermalTemperatureBuffer->Size() : 0)) {
         // A pending upload would still name the buffer being replaced.
         m_impl->FlushPendingGpuWork();
         (void)m_impl->gpuDevice->WaitIdle();
-        m_impl->thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
-            m_impl->contextAdapter->GetAllocator(),
-            result.surfaceTemperature_K.size() * sizeof(f32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        m_impl->thermalTemperatureBuffer = CreateBufferOrThrow(
+            *m_impl->gpuDevice,
+            gpu::BufferDesc{result.surfaceTemperature_K.size() * sizeof(f32),
+                            gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
+                            gpu::MemoryClass::Upload, 0});
         m_impl->thermalTemperatureBuffer->Upload(
             result.surfaceTemperature_K.data(),
             result.surfaceTemperature_K.size() * sizeof(f32));
         if (m_impl->pipeline) {
-            m_impl->pipeline->BindThermalTemperatureBuffer(gpu::vulkan::Ref(*m_impl->thermalTemperatureBuffer));
+            m_impl->pipeline->BindThermalTemperatureBuffer(m_impl->thermalTemperatureBuffer->Ref());
         }
         m_impl->geometry.SetThermalElementBases(result.instanceElementBase);
     } else {
@@ -3522,7 +3525,7 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
                                          result.sunDirection, result.lagSensitivity_K,
                                          result.lagVisibility, result.lagDirection) &&
         m_impl->pipeline) {
-        m_impl->pipeline->BindThermalSunResponseBuffer(gpu::vulkan::Ref(*m_impl->thermalSunResponseBuffer));
+        m_impl->pipeline->BindThermalSunResponseBuffer(m_impl->thermalSunResponseBuffer->Ref());
     }
 
     // The what-if tangent is a field of the hour exactly as the temperatures
@@ -3532,7 +3535,7 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
         const auto tangent =
             m_impl->thermalPreview->ParameterSensitivityField(m_impl->whatIfParameter);
         if (m_impl->UploadThermalTangent(tangent, m_impl->whatIfStep) && m_impl->pipeline) {
-            m_impl->pipeline->BindThermalTangentBuffer(gpu::vulkan::Ref(*m_impl->thermalParameterTangentBuffer));
+            m_impl->pipeline->BindThermalTangentBuffer(m_impl->thermalParameterTangentBuffer->Ref());
         }
     }
 
@@ -3545,21 +3548,22 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
 // ============================================================================
 
 void ExternalRenderContext::Impl::FlushPendingGpuWork() {
-    if (!contextAdapter || (!pendingTlasRefit && pendingUploads.Empty()))
+    if (!gpuDevice || (!pendingTlasRefit && pendingUploads.Empty()))
         return;
-    CommandHelper::ExecuteImmediate(*contextAdapter, [this](VkCommandBuffer cmd) {
+    // The device's own list carries the refit's ray tracing entry points; the
+    // uploads ride the same list, after the refit.
+    gpuDevice->ExecuteImmediate([this](gpu::CommandList& list) {
         if (pendingTlasRefit)
-            geometry.RecordPreparedTlasRefit(*gpuDevice->WrapRecording(gpu::vulkan::ToHandle(cmd)));
-        auto list = gpu::vulkan::Wrap(cmd);
+            geometry.RecordPreparedTlasRefit(list);
         pendingUploads.Record(list);
     });
     pendingTlasRefit = false;
 }
 
-void ExternalRenderContext::Impl::UploadDeferred(GpuBuffer& dst, VkDeviceSize offset,
-                                                 const void* data, VkDeviceSize bytes) {
+void ExternalRenderContext::Impl::UploadDeferred(gpu::Buffer& dst, u64 offset,
+                                                 const void* data, u64 bytes) {
     if (bytes <= DeferredBufferUploads::kMaxPayloadBytes) {
-        pendingUploads.Enqueue(gpu::vulkan::Ref(dst), offset, data, bytes);
+        pendingUploads.Enqueue(dst.Ref(), offset, data, bytes);
         return;
     }
     // Too large to sit in a command buffer: drain and write through the
@@ -5146,7 +5150,7 @@ void ExternalRenderContext::Impl::UpdateGpuResources(bool rebuildEmitters) {
                 rendercore::ConvertMaterial(material, wavelength_nm, resolved, &resources));
         }
         if (!gpuMaterials.empty())
-            UploadDeferred(gpu::vulkan::AsGpuBuffer(*materialBuffer), 0, gpuMaterials.data(), bytes);
+            UploadDeferred(*materialBuffer, 0, gpuMaterials.data(), bytes);
     } else {
         // The material buffer is replaced outright below; a queued write
         // would still name the allocation that is about to die.
@@ -5197,7 +5201,7 @@ ExternalRenderContext::Impl::RebuildEmissiveGeometry(const bool mayReallocate) {
         const rendercore::EmissiveTriangleGPU empty{};
         const void* data = triangles.empty() ? static_cast<const void*>(&empty)
                                              : static_cast<const void*>(triangles.data());
-        UploadDeferred(gpu::vulkan::AsGpuBuffer(*emissiveTriangleBuffer), 0, data, bytes);
+        UploadDeferred(*emissiveTriangleBuffer, 0, data, bytes);
     }
 
     f32 totalPower = 0.0f;
@@ -5216,19 +5220,14 @@ ExternalRenderContext::Impl::RebuildEmissiveGeometry(const bool mayReallocate) {
 }
 
 void ExternalRenderContext::Impl::CreateDummyBuffers() {
-    auto allocator = contextAdapter->GetAllocator();
-
     // Create dummy spectral curves buffer
     struct DummySpectralCurve {
         f32 data[272 / sizeof(f32)];
     } dummyCurve{};
 
-    spectralCurvesBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        sizeof(DummySpectralCurve),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
+    spectralCurvesBuffer = CreateBufferOrThrow(
+        *gpuDevice, gpu::BufferDesc{sizeof(DummySpectralCurve), gpu::BufferUsage::Storage,
+                                    gpu::MemoryClass::Upload, 0});
     spectralCurvesBuffer->Upload(&dummyCurve, sizeof(DummySpectralCurve));
 
     // Create dummy CRI buffer
@@ -5236,12 +5235,9 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
         f32 data[528 / sizeof(f32)];
     } dummyCri{};
 
-    criBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        sizeof(DummyCRI),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
+    criBuffer = CreateBufferOrThrow(
+        *gpuDevice, gpu::BufferDesc{sizeof(DummyCRI), gpu::BufferUsage::Storage,
+                                    gpu::MemoryClass::Upload, 0});
     criBuffer->Upload(&dummyCri, sizeof(DummyCRI));
 
     // Create dummy solar LUT buffer
@@ -5249,12 +5245,9 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
         f32 data[544 / sizeof(f32)];
     } dummySolar{};
 
-    solarLutBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        sizeof(DummySolarLUT),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
+    solarLutBuffer = CreateBufferOrThrow(
+        *gpuDevice, gpu::BufferDesc{sizeof(DummySolarLUT), gpu::BufferUsage::Storage,
+                                    gpu::MemoryClass::Upload, 0});
     solarLutBuffer->Upload(&dummySolar, sizeof(DummySolarLUT));
     // The buffer is the zero LUT now, whatever was bound before.
     cameraSolarSources.reset();
@@ -5263,20 +5256,18 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
     // atmosphere off); the data blob is preallocated at its maximum size so
     // rebakes are pure uploads with no descriptor rebinding.
     AtmosNNHeaderGPU disabledHeader{};
-    atmosHeaderBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        sizeof(AtmosNNHeaderGPU),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
+    atmosHeaderBuffer = CreateBufferOrThrow(
+        *gpuDevice,
+        gpu::BufferDesc{sizeof(AtmosNNHeaderGPU),
+                        gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
+                        gpu::MemoryClass::Upload, 0});
     atmosHeaderBuffer->Upload(&disabledHeader, sizeof(AtmosNNHeaderGPU));
 
-    atmosDataBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        kAtmosMaxDataFloats * sizeof(f32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
+    atmosDataBuffer = CreateBufferOrThrow(
+        *gpuDevice,
+        gpu::BufferDesc{kAtmosMaxDataFloats * sizeof(f32),
+                        gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
+                        gpu::MemoryClass::Upload, 0});
     {
         std::vector<f32> zeroData(kAtmosMaxDataFloats, 0.0f);
         atmosDataBuffer->Upload(zeroData.data(), zeroData.size() * sizeof(f32));
@@ -5290,10 +5281,10 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
     emissiveTriangleBuffer = rendercore::CreateEmissiveTriangleBuffer(*gpuDevice, {});
     {
         const f32 zero = 0.0f;
-        thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
-            contextAdapter->GetAllocator(), sizeof(f32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        thermalTemperatureBuffer = CreateBufferOrThrow(
+            *gpuDevice,
+            gpu::BufferDesc{sizeof(f32), gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
+                            gpu::MemoryClass::Upload, 0});
         thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
     }
     UploadThermalSunResponse({}, {}, glm::vec3(0.0f));
@@ -5323,29 +5314,32 @@ void ExternalRenderContext::Impl::CreatePipeline() {
     bindings.outputImage = outputImage ? outputImage->Ref() : gpu::TextureRef{};
     bindings.depthImage = depthAovImage ? depthAovImage->Ref() : gpu::TextureRef{};
     bindings.geometry = &geometry;
-    bindings.lightingParams = gpu::vulkan::RefOrEmpty(lightingParamsBuffer.get());
+    bindings.lightingParams = lightingParamsBuffer ? lightingParamsBuffer->Ref() : gpu::BufferRef{};
     bindings.materials = materialBuffer ? materialBuffer->Ref() : gpu::BufferRef{};
     bindings.textures = textureManager.get();
     bindings.environment = &envMap;
     bindings.brdfLut = &brdfLut;
-    bindings.spectralCurves = gpu::vulkan::RefOrEmpty(spectralCurvesBuffer.get());
-    bindings.complexRefractiveIndex = gpu::vulkan::RefOrEmpty(criBuffer.get());
-    bindings.solarLut = gpu::vulkan::RefOrEmpty(solarLutBuffer.get());
-    bindings.atmosphereHeader = gpu::vulkan::RefOrEmpty(atmosHeaderBuffer.get());
-    bindings.atmosphereData = gpu::vulkan::RefOrEmpty(atmosDataBuffer.get());
+    bindings.spectralCurves = spectralCurvesBuffer ? spectralCurvesBuffer->Ref() : gpu::BufferRef{};
+    bindings.complexRefractiveIndex = criBuffer ? criBuffer->Ref() : gpu::BufferRef{};
+    bindings.solarLut = solarLutBuffer ? solarLutBuffer->Ref() : gpu::BufferRef{};
+    bindings.atmosphereHeader = atmosHeaderBuffer ? atmosHeaderBuffer->Ref() : gpu::BufferRef{};
+    bindings.atmosphereData = atmosDataBuffer ? atmosDataBuffer->Ref() : gpu::BufferRef{};
     bindings.cieColourMatching = cieCmfBuffer ? cieCmfBuffer->Ref() : gpu::BufferRef{};
     bindings.rgbToSpectrum = rgbToSpectrumBuffer ? rgbToSpectrumBuffer->Ref() : gpu::BufferRef{};
     bindings.emissiveTriangles =
         emissiveTriangleBuffer ? emissiveTriangleBuffer->Ref() : gpu::BufferRef{};
-    bindings.thermalTemperatures = gpu::vulkan::RefOrEmpty(thermalTemperatureBuffer.get());
-    bindings.thermalSunResponse = gpu::vulkan::RefOrEmpty(thermalSunResponseBuffer.get());
-    bindings.thermalParameterTangent = gpu::vulkan::RefOrEmpty(thermalParameterTangentBuffer.get());
+    bindings.thermalTemperatures =
+        thermalTemperatureBuffer ? thermalTemperatureBuffer->Ref() : gpu::BufferRef{};
+    bindings.thermalSunResponse =
+        thermalSunResponseBuffer ? thermalSunResponseBuffer->Ref() : gpu::BufferRef{};
+    bindings.thermalParameterTangent =
+        thermalParameterTangentBuffer ? thermalParameterTangentBuffer->Ref() : gpu::BufferRef{};
 
     pipeline = rendercore::CreateRayTracingPipeline(*gpuDevice, pipelineCache.get(),
                                                     bindings);
     pipeline->SetUploadQueue(&pendingUploads);
     if (cameraLightingParamsBuffer)
-        pipeline->BindCameraLightingBuffer(gpu::vulkan::Ref(*cameraLightingParamsBuffer));
+        pipeline->BindCameraLightingBuffer(cameraLightingParamsBuffer->Ref());
 }
 
 Result<void, String> ExternalRenderContext::Impl::UpdateCameraAtmosphere() {
@@ -5561,16 +5555,18 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
     pipeline->BindCameraDepthImage(gpu::vulkan::Ref(*cameraDepthImage));
     pipeline->BindCameraObserverOutputImage(gpu::vulkan::Ref(*cameraBaselineImage));
     pipeline->BindCameraObserverDepthImage(gpu::vulkan::Ref(*cameraDepthImage));
+    // A camera bake that is absent falls back to the viewport's own atmosphere buffers.
+    const gpu::BufferRef atmosHeader =
+        atmosHeaderBuffer ? atmosHeaderBuffer->Ref() : gpu::BufferRef{};
+    const gpu::BufferRef atmosData = atmosDataBuffer ? atmosDataBuffer->Ref() : gpu::BufferRef{};
     pipeline->BindCameraAtmosphereNN(
-        gpu::vulkan::RefOrEmpty(cameraAtmosHeaderBuffer ? cameraAtmosHeaderBuffer.get()
-                                                        : atmosHeaderBuffer.get()),
-        gpu::vulkan::RefOrEmpty(cameraAtmosDataBuffer ? cameraAtmosDataBuffer.get()
-                                                      : atmosDataBuffer.get()));
+        cameraAtmosHeaderBuffer ? gpu::vulkan::Ref(*cameraAtmosHeaderBuffer) : atmosHeader,
+        cameraAtmosDataBuffer ? gpu::vulkan::Ref(*cameraAtmosDataBuffer) : atmosData);
     pipeline->BindCameraObserverAtmosphereNN(
-        gpu::vulkan::RefOrEmpty(cameraBaselineAtmosHeaderBuffer ? cameraBaselineAtmosHeaderBuffer.get()
-                                                                : atmosHeaderBuffer.get()),
-        gpu::vulkan::RefOrEmpty(cameraBaselineAtmosDataBuffer ? cameraBaselineAtmosDataBuffer.get()
-                                                              : atmosDataBuffer.get()));
+        cameraBaselineAtmosHeaderBuffer ? gpu::vulkan::Ref(*cameraBaselineAtmosHeaderBuffer)
+                                        : atmosHeader,
+        cameraBaselineAtmosDataBuffer ? gpu::vulkan::Ref(*cameraBaselineAtmosDataBuffer)
+                                      : atmosData);
     auto gpu = rendercore::GpuCameraPipeline::Create(*gpuDevice, physicalW, physicalH);
     if (!gpu)
         return Result<void, String>::Err(gpu.error());
