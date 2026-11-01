@@ -73,9 +73,11 @@
 #include "GpuBuffer.hpp"
 #include "GpuImage.hpp"
 #include "scene/Camera.hpp"
+#include "gpu/Device.hpp"
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <cstddef>
+#include <span>
 #include <string>
 #include <memory>
 #include <unordered_map>
@@ -463,7 +465,7 @@ public:
     // ========================================================================
 
     [[nodiscard]] VkPipeline GetPipeline() const { return m_pipeline; }
-    [[nodiscard]] VkPipelineLayout GetPipelineLayout() const { return m_pipelineLayout; }
+    [[nodiscard]] VkPipelineLayout GetPipelineLayout() const;
 
 private:
     // ========================================================================
@@ -471,10 +473,8 @@ private:
     // ========================================================================
 
     void CreateDescriptorSetLayout();
-    void UpdateSharedDescriptorSets(VkDevice device, u32 writeCount,
-                                  const VkWriteDescriptorSet* writes,
-                                  u32 copyCount,
-                                  const VkCopyDescriptorSet* copies) const;
+    /// The same writes to the primary, camera and observer sets, in that order.
+    void UpdateSharedDescriptorSets(std::span<const gpu::BindingWrite> writes) const;
     void CreatePipelineLayout();
     void LoadShaders();
 
@@ -501,6 +501,9 @@ private:
     // ========================================================================
 
     VulkanContext& m_context;
+    // The gpu:: view of m_context (non-owning), adopted at construction; the
+    // descriptor objects below are created through it.
+    std::unique_ptr<gpu::Device> m_gpu;
 
     // Shader paths
     std::string m_raygenPath;
@@ -510,16 +513,16 @@ private:
     std::string m_anyHitPath;      // Named explicitly, unlike the shadow miss above
 
     // Pipeline objects
-    VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
-    VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
+    std::unique_ptr<gpu::BindingLayout> m_bindingLayout;  // the set of RtBindings.hpp, space 0
+    std::unique_ptr<gpu::KernelLayout> m_kernelLayout;    // that set plus TracePushConstants
     VkPipeline m_pipeline = VK_NULL_HANDLE;
     VkPipelineCache m_pipelineCache = VK_NULL_HANDLE;  // External, not owned
 
     // Descriptor pool and sets
-    VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;
-    VkDescriptorSet m_cameraDescriptorSet = VK_NULL_HANDLE;
-    VkDescriptorSet m_observerDescriptorSet = VK_NULL_HANDLE;
+    std::unique_ptr<gpu::BindGroupPool> m_bindGroupPool;
+    gpu::BindGroup m_descriptorSet{};
+    gpu::BindGroup m_cameraDescriptorSet{};
+    gpu::BindGroup m_observerDescriptorSet{};
     std::unique_ptr<GpuImage> m_cameraFallbackImage;
     std::unique_ptr<GpuImage> m_cameraFallbackDepth;
     std::unique_ptr<GpuBuffer> m_cameraFallbackResponse;

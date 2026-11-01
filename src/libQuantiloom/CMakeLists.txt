@@ -131,6 +131,7 @@ add_library(quantiloom_core OBJECT
     renderer/TextureManager.hpp
     renderer/RayTracingPipeline.cpp
     renderer/RayTracingPipeline.hpp
+    renderer/RtBindings.hpp
     renderer/AccelerationStructure.cpp
     renderer/AccelerationStructure.hpp
     renderer/CommandHelper.cpp

@@ -1,14 +1,18 @@
 #include "RayTracingPipeline.hpp"
 #include "CommandHelper.hpp"
 #include "DeferredBufferUploads.hpp"
+#include "RtBindings.hpp"
 #include "ShaderBinary.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "core/ResourceLocator.hpp"
 #include "renderer/FusionRecordLayout.hpp"
 #include "core/Log.hpp"
 #include "core/SpectralData.hpp"
 #include "core/Image.hpp"
 #include <algorithm>
+#include <array>
 #include <fstream>
+#include <span>
 #include <stdexcept>
 #include <cstring>
 #include <filesystem>
@@ -79,35 +83,24 @@ static void LogPipelineStackSizes(VkDevice device, VkPipeline pipeline, u32 spec
                 spectralMode, rgen, chit, ahit, miss, recursionDepth, pipelineDefault);
 }
 
-static void WriteStorageImage(VkDevice device, VkDescriptorSet set, u32 binding,
-                              const GpuImage& image) {
-    VkDescriptorImageInfo info{};
-    info.imageView = image.GetView();
-    info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = set;
-    write.dstBinding = binding;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    write.descriptorCount = 1;
-    write.pImageInfo = &info;
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+// A whole-buffer write of a storage buffer binding, with the kind its row in
+// RtBindings.hpp declares (read-only or read-write; both are storage buffers).
+static gpu::BindingWrite RtBufferWrite(u32 binding, const GpuBuffer& buffer) {
+    return gpu::BindingWrite::Buffer(binding, rendercore::kRtBindingTemplate[binding].kind,
+                                     gpu::vulkan::Ref(buffer));
 }
 
-static void WriteStorageBuffer(VkDevice device, VkDescriptorSet set, u32 binding,
+static void WriteStorageImage(gpu::Device& device, gpu::BindGroup set, u32 binding,
+                              const GpuImage& image) {
+    const gpu::BindingWrite writes[] = {
+        gpu::BindingWrite::StorageTexture(binding, gpu::vulkan::Ref(image))};
+    device.WriteBindGroup(set, writes);
+}
+
+static void WriteStorageBuffer(gpu::Device& device, gpu::BindGroup set, u32 binding,
                                const GpuBuffer& buffer) {
-    VkDescriptorBufferInfo info{};
-    info.buffer = buffer.GetHandle();
-    info.offset = 0;
-    info.range = VK_WHOLE_SIZE;
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = set;
-    write.dstBinding = binding;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &info;
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(binding, buffer)};
+    device.WriteBindGroup(set, writes);
 }
 
 // ============================================================================
@@ -212,6 +205,7 @@ RayTracingPipeline::RayTracingPipeline(
     const std::string& anyHitPath,
     VkPipelineCache pipelineCache)
     : m_context(context)
+    , m_gpu(gpu::vulkan::AdoptContext(context))
     , m_raygenPath(raygenPath)
     , m_closestHitPath(closestHitPath)
     , m_missPath(missPath)
@@ -311,18 +305,18 @@ RayTracingPipeline::RayTracingPipeline(
         const std::vector<f32> disabledAtmosData(2048u, 0.0f);
         m_cameraFallbackAtmosData->Upload(disabledAtmosData.data(),
                                           disabledAtmosData.size() * sizeof(f32));
-        for (VkDescriptorSet set :
+        for (gpu::BindGroup set :
              {m_descriptorSet, m_cameraDescriptorSet, m_observerDescriptorSet}) {
-            WriteStorageImage(m_context.GetDevice(), set, 28u, *m_cameraFallbackImage);
-            WriteStorageBuffer(m_context.GetDevice(), set, 29u, *m_cameraFallbackResponse);
-            WriteStorageBuffer(m_context.GetDevice(), set, 17u, *m_cameraFallbackAtmosHeader);
-            WriteStorageBuffer(m_context.GetDevice(), set, 20u, *m_cameraFallbackAtmosData);
+            WriteStorageImage(*m_gpu, set, 28u, *m_cameraFallbackImage);
+            WriteStorageBuffer(*m_gpu, set, 29u, *m_cameraFallbackResponse);
+            WriteStorageBuffer(*m_gpu, set, 17u, *m_cameraFallbackAtmosHeader);
+            WriteStorageBuffer(*m_gpu, set, 20u, *m_cameraFallbackAtmosData);
         }
-        for (VkDescriptorSet set : {m_cameraDescriptorSet, m_observerDescriptorSet}) {
-            WriteStorageImage(m_context.GetDevice(), set, 0u, *m_cameraFallbackImage);
-            WriteStorageImage(m_context.GetDevice(), set, 22u, *m_cameraFallbackDepth);
+        for (gpu::BindGroup set : {m_cameraDescriptorSet, m_observerDescriptorSet}) {
+            WriteStorageImage(*m_gpu, set, 0u, *m_cameraFallbackImage);
+            WriteStorageImage(*m_gpu, set, 22u, *m_cameraFallbackDepth);
         }
-        WriteStorageImage(m_context.GetDevice(), m_descriptorSet, 22u, *m_cameraFallbackDepth);
+        WriteStorageImage(*m_gpu, m_descriptorSet, 22u, *m_cameraFallbackDepth);
 
         QL_LOG_INFO("Ray Tracing pipeline created successfully");
     }
@@ -336,17 +330,9 @@ RayTracingPipeline::RayTracingPipeline(
         }
         m_variantCache.clear();
 
-        if (m_pipelineLayout != VK_NULL_HANDLE) {
-            vkDestroyPipelineLayout(device, m_pipelineLayout, nullptr);
-        }
-
-        if (m_descriptorPool != VK_NULL_HANDLE) {
-            vkDestroyDescriptorPool(device, m_descriptorPool, nullptr);
-        }
-
-        if (m_descriptorSetLayout != VK_NULL_HANDLE) {
-            vkDestroyDescriptorSetLayout(device, m_descriptorSetLayout, nullptr);
-        }
+        m_kernelLayout.reset();
+        m_bindGroupPool.reset();
+        m_bindingLayout.reset();
 
         QL_LOG_ERROR("Failed to create Ray Tracing pipeline: {}", e.what());
         throw;  // Rethrow the exception
@@ -368,15 +354,9 @@ RayTracingPipeline::~RayTracingPipeline() {
     }
     m_variantCache.clear();
 
-    if (m_descriptorPool != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(device, m_descriptorPool, nullptr);
-    }
-    if (m_pipelineLayout != VK_NULL_HANDLE) {
-        vkDestroyPipelineLayout(device, m_pipelineLayout, nullptr);
-    }
-    if (m_descriptorSetLayout != VK_NULL_HANDLE) {
-        vkDestroyDescriptorSetLayout(device, m_descriptorSetLayout, nullptr);
-    }
+    m_bindGroupPool.reset();
+    m_kernelLayout.reset();
+    m_bindingLayout.reset();
 
     QL_LOG_INFO("Ray Tracing pipeline destroyed");
 }
@@ -386,461 +366,36 @@ RayTracingPipeline::~RayTracingPipeline() {
 // ============================================================================
 
 void RayTracingPipeline::CreateDescriptorSetLayout() {
-    VkDevice device = m_context.GetDevice();
-
-    // Define bindings (matches shader layout)
-    // NOTE: Texture array size dynamically adjusted based on device capabilities
-    // 1024 if descriptor indexing available, 32 otherwise
-    std::vector<VkDescriptorSetLayoutBinding> bindings(38);
-
-    // Binding 0: Output image (RWTexture2D)
-    bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-    bindings[0].pImmutableSamplers = nullptr;
-
-    // Binding 1: Acceleration structure (TLAS)
-    // Every ray is traced from raygen now (src/shaders/path_driver.hlsli), so
-    // RAYGEN is the visibility that matters; accessing the TLAS from a stage
-    // without visibility is undefined behavior and crashes the device the
-    // moment a ray is traced. CLOSEST_HIT is left over from when that stage
-    // traced its own children, and is harmless.
-    bindings[1].binding = 1;
-    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[1].pImmutableSamplers = nullptr;
-
-    // Binding 2: LUT buffer (StructuredBuffer)
-    bindings[2].binding = 2;
-    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[2].descriptorCount = 1;
-    bindings[2].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;
-    bindings[2].pImmutableSamplers = nullptr;
-
-    // Binding 3: Vertex buffer (StructuredBuffer<float3>)
-    bindings[3].binding = 3;
-    bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[3].descriptorCount = 1;
-    bindings[3].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-    bindings[3].pImmutableSamplers = nullptr;
-
-    // Binding 4: Index buffer (StructuredBuffer<uint>)
-    bindings[4].binding = 4;
-    bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[4].descriptorCount = 1;
-    bindings[4].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-    bindings[4].pImmutableSamplers = nullptr;
-
-    // Binding 5: Material buffer (StructuredBuffer<MaterialData>)
-    bindings[5].binding = 5;
-    bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[5].descriptorCount = 1;
-    bindings[5].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-    bindings[5].pImmutableSamplers = nullptr;
-
-    // Binding 6: Texture array (Texture2D[])
-    // Uses VK_EXT_descriptor_indexing for runtime array indexing
-    // Array size dynamic: 1024 if descriptor indexing available, 32 otherwise
-    bindings[6].binding = 6;
-    bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    bindings[6].descriptorCount = m_maxTextures;
-    bindings[6].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-    bindings[6].pImmutableSamplers = nullptr;
-
-    // Binding 7: Sampler array (SamplerState[])
-    bindings[7].binding = 7;
-    bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    bindings[7].descriptorCount = m_maxTextures;
-    bindings[7].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-    bindings[7].pImmutableSamplers = nullptr;
-
-    // Binding 8: UV buffer (StructuredBuffer<float2>) - Optional
-    bindings[8].binding = 8;
-    bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[8].descriptorCount = 1;
-    bindings[8].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-    bindings[8].pImmutableSamplers = nullptr;
-
-    // Binding 9: Tangent buffer (StructuredBuffer<float4>) - Optional
-    bindings[9].binding = 9;
-    bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[9].descriptorCount = 1;
-    bindings[9].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[9].pImmutableSamplers = nullptr;
-
-    // ========================================================================
-    // IBL (Image-Based Lighting) Bindings
-    // ========================================================================
-    // These bindings provide environment map data for physically-based
-    // specular reflections on metallic and rough surfaces
-    // ========================================================================
-
-    // Binding 10: Prefiltered environment cubemap (TextureCube<float4>)
-    // Contains environment map convolved with GGX for different roughness levels (mipmap chain)
-    bindings[10].binding = 10;
-    bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    bindings[10].descriptorCount = 1;
-    bindings[10].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[10].pImmutableSamplers = nullptr;
-
-    // Binding 11: BRDF integration LUT texture (Texture2D<float2>)
-    // 2D lookup table: (NdotV, roughness) -> (scale, bias) for split-sum approximation
-    bindings[11].binding = 11;
-    bindings[11].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    bindings[11].descriptorCount = 1;
-    bindings[11].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[11].pImmutableSamplers = nullptr;
-
-    // Binding 12: IBL sampler (SamplerState)
-    // Linear sampler for IBL texture sampling (shared by prefiltered env and BRDF LUT)
-    bindings[12].binding = 12;
-    bindings[12].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    bindings[12].descriptorCount = 1;
-    bindings[12].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[12].pImmutableSamplers = nullptr;
-
-    // ========================================================================
-    // Spectral Curves Buffer (Binding 13)
-    // ========================================================================
-    // Contains measured spectral reflectance curves for quantitative rendering
-    // Each curve is a SpectralCurveGPU struct with uniform wavelength sampling
-    // ========================================================================
-
-    // Binding 13: Spectral curves buffer (StructuredBuffer<SpectralCurveGPU>)
-    bindings[13].binding = 13;
-    bindings[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[13].descriptorCount = 1;
-    bindings[13].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[13].pImmutableSamplers = nullptr;
-
-    // ========================================================================
-    // Complex Refractive Index Buffer (Binding 14)
-    // ========================================================================
-    // Contains measured complex refractive index (n, k) for physical Fresnel
-    // Each entry is a ComplexRefractiveIndexGPU struct (528 bytes)
-    // ========================================================================
-
-    // Binding 14: Complex refractive index buffer (StructuredBuffer<ComplexRefractiveIndexGPU>)
-    bindings[14].binding = 14;
-    bindings[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[14].descriptorCount = 1;
-    bindings[14].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[14].pImmutableSamplers = nullptr;
-
-    // ========================================================================
-    // Solar Spectral LUT Buffer (Binding 15)
-    // ========================================================================
-    // Contains ASTM G-173 solar irradiance curves for spectral rendering
-    // Structure: SolarSpectralLUT (544 bytes = 2 × SpectralCurveGPU)
-    // - sunIrradiance: Direct+circumsolar irradiance (W·m⁻²·nm⁻¹)
-    // - skyIrradiance: Diffuse sky irradiance (W·m⁻²·nm⁻¹)
-    // ========================================================================
-
-    // Binding 15: Solar spectral LUT buffer (SolarSpectralLUT)
-    bindings[15].binding = 15;
-    bindings[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[15].descriptorCount = 1;
-    bindings[15].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;
-    bindings[15].pImmutableSamplers = nullptr;
-
-    // ========================================================================
-    // Normal Buffer (Binding 16)
-    // ========================================================================
-    // Contains per-vertex normal vectors for smooth shading interpolation
-    // CRITICAL: Required for smooth shading. Without this, shaders compute
-    // geometric normals (flat shading), causing visible triangle boundaries.
-    // ========================================================================
-
-    // Binding 16: Normal buffer (StructuredBuffer<float3>)
-    bindings[16].binding = 16;
-    bindings[16].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[16].descriptorCount = 1;
-    bindings[16].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[16].pImmutableSamplers = nullptr;
-
-    // ========================================================================
-    // Binding 17: Atmospheric Parameters (StructuredBuffer<AtmosphericParams>)
-    // ========================================================================
-    // NN atmosphere LUT header (baked from MODTRAN surrogate networks)
-    // Used in both miss shader (sky) and closest hit (tau / path radiance)
-    // ========================================================================
-
-    // Binding 17: NN atmosphere header (StructuredBuffer<AtmosNNHeader>)
-    bindings[17].binding = 17;
-    bindings[17].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[17].descriptorCount = 1;
-    bindings[17].stageFlags = VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[17].pImmutableSamplers = nullptr;
-
-    // ========================================================================
-    // Binding 18: Instance Geometry Info (StructuredBuffer<InstanceGeometryInfo>)
-    // ========================================================================
-    // Per-TLAS-instance geometry offset information for multi-BLAS support
-    // Each entry contains offsets into merged global geometry buffers
-    // Indexed by InstanceIndex() in shader
-    // ========================================================================
-
-    // Binding 18: Instance geometry info buffer (StructuredBuffer<InstanceGeometryInfo>)
-    bindings[18].binding = 18;
-    bindings[18].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[18].descriptorCount = 1;
-    bindings[18].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-    bindings[18].pImmutableSamplers = nullptr;
-
-    // ========================================================================
-    // Binding 19: CIE 1931 Color Matching Functions LUT
-    // ========================================================================
-    // High-precision CIE XYZ CMFs for VIS_FUSED mode spectral integration
-    // 401 samples (380-780nm @ 1nm), each sample is float3(x_bar, y_bar, z_bar)
-    // Provides <0.1% error vs analytical approximation's 10-20% at edges
-    // ========================================================================
-
-    // Binding 19: CIE CMF LUT buffer (StructuredBuffer<float3>)
-    bindings[19].binding = 19;
-    bindings[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[19].descriptorCount = 1;
-    bindings[19].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;  // Allow both hit and miss shaders to access CIE LUT
-    bindings[19].pImmutableSamplers = nullptr;
-
-    // ========================================================================
-    // Binding 20: NN atmosphere LUT data blob (StructuredBuffer<float>)
-    // ========================================================================
-    // Flat float array holding the baked tau / lpath / ldown spectral grids;
-    // indexed via offsets in the binding-17 header.
-    // ========================================================================
-
-    bindings[20].binding = 20;
-    bindings[20].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[20].descriptorCount = 1;
-    bindings[20].stageFlags = VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[20].pImmutableSamplers = nullptr;
-
-    // ========================================================================
-    // Environment Map Sampler (Binding 21)
-    // ========================================================================
-    // Separate from the IBL sampler at binding 12, which clamps maxLod to 0. That
-    // is right for the single-level BRDF LUT and wrong for the environment map: it
-    // pinned every lookup to mip 0, so the prefiltered chain was never sampled.
-    bindings[21].binding = 21;
-    bindings[21].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    bindings[21].descriptorCount = 1;
-    bindings[21].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[21].pImmutableSamplers = nullptr;
-
-    // Binding 22: Primary-hit depth AOV (raygen writes hit distance, -1 = miss)
-    bindings[22].binding = 22;
-    bindings[22].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[22].descriptorCount = 1;
-    bindings[22].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-    bindings[22].pImmutableSamplers = nullptr;
-
-    // Binding 23: Emissive triangles for next-event estimation
-    // (StructuredBuffer<EmissiveTriangleGPU>). Always bound, possibly with a
-    // single zero entry; LightingParams::emissiveTriangleCount says whether the
-    // shader may read it.
-    bindings[23].binding = 23;
-    bindings[23].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[23].descriptorCount = 1;
-    bindings[23].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[23].pImmutableSamplers = nullptr;
-
-    // Binding 24: Per-element surface temperatures from the thermal solver
-    // (StructuredBuffer<float>). Always bound, with a single zero entry when
-    // no solve ran; InstanceGeometryInfo::thermalElementBase says whether the
-    // shader may read it, so a scene without a solver reads the material's own
-    // temperature exactly as before.
-    bindings[24].binding = 24;
-    bindings[24].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[24].descriptorCount = 1;
-    bindings[24].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[24].pImmutableSamplers = nullptr;
-
-    // Binding 25: Jakob-Hanika RGB -> spectrum coefficients
-    // (StructuredBuffer<float4>, xyz = c0,c1,c2, w unused). Three sub-tables of
-    // res^3 nodes selected by which RGB channel is largest; see
-    // core/RgbToSpectrum.hpp for the layout and the axis warp.
-    //
-    // Visible to the miss shader as well as closest hit, because the sky's
-    // fallback RGB radiance is upsampled there by the same rule a surface
-    // reflectance is.
-    bindings[25].binding = 25;
-    bindings[25].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[25].descriptorCount = 1;
-    bindings[25].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;
-    bindings[25].pImmutableSamplers = nullptr;
-
-    // Binding 26: how each element's temperature responds to the sun
-    // (StructuredBuffer<float4>). Binding 24 says what temperature the balance
-    // gave a triangle; this says what to do about the fact that a triangle is
-    // coarser than the shadow crossing it.
-    //
-    // Record 0 is a header -- xyz is the sun direction the solve used, w is 1
-    // when the rest of the buffer is real -- and record 1 + thermalElementBase
-    // + PrimitiveIndex() is the element's (dT/dv, v_element). The header lives
-    // here rather than in LightingParams because the forcing file owns that
-    // sun direction and it need not be [lighting] sun_direction; and at index 0
-    // rather than at the end because that needs no element count. A scene with
-    // no solve binds one zeroed record, which the w = 0 gate turns off.
-    bindings[26].binding = 26;
-    bindings[26].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[26].descriptorCount = 1;
-    bindings[26].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[26].pImmutableSamplers = nullptr;
-
-    // Binding 27: how each element's temperature responds to one material
-    // parameter (StructuredBuffer<float>), and by how much to move it.
-    //
-    // Element 0 is the step: dp, the amount the parameter is being asked
-    // "what if" about, and zero when nothing is. Element 1 + thermalElementBase
-    // + PrimitiveIndex() is dT/dp for that triangle. So the shader adds
-    // tangent[1 + e] * tangent[0] to the temperature. A host that is not
-    // previewing anything binds the inert record, two floats [0, 0]; the
-    // shader reads tangent[1 + e] only when the step is non-zero, so that
-    // record is in bounds for every element. Both hosts must bind it: the
-    // binding has no partially-bound flag, and the offline path once left it
-    // unwritten, so the shader read a descriptor left over from earlier jobs.
-    //
-    // The step lives here rather than in LightingParams because that struct
-    // has no room left -- both its padding floats are spoken for, and growing
-    // it changes the SDK/Studio pairing hash. Which is also why binding 26
-    // carries its own header.
-    bindings[27].binding = 27;
-    bindings[27].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[27].descriptorCount = 1;
-    bindings[27].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[27].pImmutableSamplers = nullptr;
-
-    bindings[28].binding = 28;
-    bindings[28].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[28].descriptorCount = 1;
-    bindings[28].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-    bindings[28].pImmutableSamplers = nullptr;
-
-    bindings[29].binding = 29;
-    bindings[29].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[29].descriptorCount = 1;
-    bindings[29].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-                              VK_SHADER_STAGE_MISS_BIT_KHR;
-    bindings[29].pImmutableSamplers = nullptr;
-
-    // Dynamic-exposure counters (raygen atomics) and per-stratum primary
-    // depth. Camera-measurement mode only; the visibility and observer sets
-    // of this shared layout never bind them, hence PARTIALLY_BOUND below.
-    bindings[30].binding = 30;
-    bindings[30].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[30].descriptorCount = 1;
-    bindings[30].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-    bindings[30].pImmutableSamplers = nullptr;
-
-    bindings[31].binding = 31;
-    bindings[31].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[31].descriptorCount = 1;
-    bindings[31].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-    bindings[31].pImmutableSamplers = nullptr;
-
-    // Enable descriptor indexing flags for texture arrays
-    // This allows runtime indexing and partially bound descriptors
-    bindings[32].binding = 32;
-    bindings[32].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[32].descriptorCount = 1;
-    bindings[32].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-    bindings[33].binding = 33;
-    bindings[33].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[33].descriptorCount = 1;
-    bindings[33].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    bindings[34] = bindings[33];
-    bindings[34].binding = 34;
-    bindings[35] = bindings[33];
-    bindings[35].binding = 35;
-    bindings[35].stageFlags |= VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    bindings[36] = bindings[35];
-    bindings[36].binding = 36;
-    bindings[36].stageFlags |= VK_SHADER_STAGE_MISS_BIT_KHR;
-    bindings[37] = bindings[35];
-    bindings[37].binding = 37;
-    // raygen shades every path vertex itself (P04): the library the closest-hit
-    // and miss stages used to shade with is compiled into raygen, so every
-    // binding either of them read, raygen reads. Their own stage bits stay and
-    // are harmless; no binding became newly used by the pipeline, so what each
-    // host must write is unchanged.
-    for (auto& binding : bindings) {
-        if ((binding.stageFlags &
-             (VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR)) != 0)
-            binding.stageFlags |= VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    // One row per binding in RtBindings.hpp, with the final stage sets; only the
+    // bindless count is per device (1024 with descriptor indexing, 32 otherwise).
+    auto slots = std::to_array(rendercore::kRtBindingTemplate);
+    for (gpu::BindingSlot& slot : slots) {
+        if (slot.count == rendercore::QL_BINDLESS) slot.count = m_maxTextures;
     }
-    for (auto& binding : bindings)
-        binding.stageFlags |= VK_SHADER_STAGE_COMPUTE_BIT;
-    std::vector<VkDescriptorBindingFlags> bindingFlags(38, 0);
-    bindingFlags[33] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
-    bindingFlags[34] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
-    bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
-    bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
-    bindingFlags[30] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT; // Camera dynamic counters
-    bindingFlags[31] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT; // Camera stratum depth
 
-    VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo{};
-    bindingFlagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-    bindingFlagsInfo.bindingCount = static_cast<u32>(bindingFlags.size());
-    bindingFlagsInfo.pBindingFlags = bindingFlags.data();
-
-    VkDescriptorSetLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.pNext = &bindingFlagsInfo;
-    layoutInfo.bindingCount = static_cast<u32>(bindings.size());
-    layoutInfo.pBindings = bindings.data();
-
-    VkResult result = vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_descriptorSetLayout);
-    if (result != VK_SUCCESS) {
+    auto layout = m_gpu->CreateBindingLayout(gpu::BindingLayoutDesc{0, slots});
+    if (!layout.has_value()) {
         throw std::runtime_error("Failed to create descriptor set layout");
     }
+    m_bindingLayout = std::move(layout.value());
 
-    // Create descriptor pool
-    std::vector<VkDescriptorPoolSize> poolSizes(5);
-    poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[0].descriptorCount = 12;
-    poolSizes[1].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    poolSizes[1].descriptorCount = 3;
-    poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    // Bindings 2,3,4,5,8,9,13,14,15,16,17,18,19,20,23,24,25,26. Counted from the
-    // layout rather than from the list below, which had drifted: it omitted the
-    // atmosphere data blob (binding 20) and so asked the pool for one fewer
-    // descriptor than the set declares.
-    poolSizes[2].descriptorCount = 81;
-    poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    poolSizes[3].descriptorCount = 3 * (m_maxTextures + 2);
-    poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
-    poolSizes[4].descriptorCount = 3 * (m_maxTextures + 2);
-
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 3;
-    poolInfo.poolSizeCount = static_cast<u32>(poolSizes.size());
-    poolInfo.pPoolSizes = poolSizes.data();
-
-    result = vkCreateDescriptorPool(device, &poolInfo, nullptr, &m_descriptorPool);
-    if (result != VK_SUCCESS) {
+    // Pool sizes follow from the layout, per descriptor type in order of first
+    // appearance, three sets' worth: storage images 12 (bindings 0, 22, 28, 31),
+    // acceleration structures 3, storage buffers 81 (27 per set), sampled images
+    // and samplers 3 * (m_maxTextures + 2) each.
+    auto pool = m_gpu->CreateBindGroupPool(*m_bindingLayout, 3);
+    if (!pool.has_value()) {
         throw std::runtime_error("Failed to create descriptor pool");
     }
+    m_bindGroupPool = std::move(pool.value());
 
-    // Allocate descriptor set
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = m_descriptorPool;
-    VkDescriptorSetLayout layouts[3] = {m_descriptorSetLayout, m_descriptorSetLayout,
-                                        m_descriptorSetLayout};
-    VkDescriptorSet sets[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
-    allocInfo.descriptorSetCount = 3;
-    allocInfo.pSetLayouts = layouts;
-
-    result = vkAllocateDescriptorSets(device, &allocInfo, sets);
-    if (result != VK_SUCCESS) {
+    auto sets = m_bindGroupPool->Allocate(3);
+    if (!sets.has_value()) {
         throw std::runtime_error("Failed to allocate descriptor set");
     }
-    m_descriptorSet = sets[0];
-    m_cameraDescriptorSet = sets[1];
-    m_observerDescriptorSet = sets[2];
+    m_descriptorSet = sets.value()[0];
+    m_cameraDescriptorSet = sets.value()[1];
+    m_observerDescriptorSet = sets.value()[2];
 
     QL_LOG_INFO("  Descriptor set layout created");
 }
@@ -850,29 +405,21 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
 // ============================================================================
 
 void RayTracingPipeline::CreatePipelineLayout() {
-    VkDevice device = m_context.GetDevice();
-
     // Push constant range for camera data + sampling parameters
     // IMPORTANT: Include all shader stages that access push constants
-    VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
-                                    VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-                                    VK_SHADER_STAGE_MISS_BIT_KHR |
-                                    VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT;
-    pushConstantRange.offset = 0;
-    pushConstantRange.size = sizeof(TracePushConstants);
+    const gpu::BindingLayout* const spaces[] = {m_bindingLayout.get()};
+    gpu::KernelLayoutDesc desc;
+    desc.spaces = spaces;
+    desc.pushConstantBytes = static_cast<u32>(sizeof(TracePushConstants));
+    desc.pushConstantVisibility = gpu::ShaderStages::RayGen | gpu::ShaderStages::ClosestHit |
+                                  gpu::ShaderStages::Miss | gpu::ShaderStages::AnyHit |
+                                  gpu::ShaderStages::Compute;
 
-    VkPipelineLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layoutInfo.setLayoutCount = 1;
-    layoutInfo.pSetLayouts = &m_descriptorSetLayout;
-    layoutInfo.pushConstantRangeCount = 1;
-    layoutInfo.pPushConstantRanges = &pushConstantRange;
-
-    VkResult result = vkCreatePipelineLayout(device, &layoutInfo, nullptr, &m_pipelineLayout);
-    if (result != VK_SUCCESS) {
+    auto layout = m_gpu->CreateKernelLayout(desc);
+    if (!layout.has_value()) {
         throw std::runtime_error("Failed to create pipeline layout");
     }
+    m_kernelLayout = std::move(layout.value());
 
     QL_LOG_INFO("  Pipeline layout created with push constants (camera data)");
 }
@@ -1045,7 +592,7 @@ RayTracingPipeline::PipelineVariant RayTracingPipeline::CreatePipelineVariant(co
     pipelineInfo.groupCount = static_cast<u32>(groups.size());
     pipelineInfo.pGroups = groups.data();
     pipelineInfo.maxPipelineRayRecursionDepth = kMaxPipelineRayRecursionDepth;
-    pipelineInfo.layout = m_pipelineLayout;
+    pipelineInfo.layout = gpu::vulkan::NativeLayout(*m_kernelLayout);
 
     QL_LOG_INFO("  [CreatePipelineVariant] spectralMode={}, debugEnabled={}", spec.spectralMode, spec.debugEnabled);
     Log::Flush();
@@ -1164,75 +711,38 @@ u32 RayTracingPipeline::AlignedSize(const u32 size, const u32 alignment) {
     return (size + alignment - 1) & ~(alignment - 1);
 }
 
+VkPipelineLayout RayTracingPipeline::GetPipelineLayout() const {
+    return gpu::vulkan::NativeLayout(*m_kernelLayout);
+}
+
 // ============================================================================
 // Descriptor Binding
 // ============================================================================
 
-void RayTracingPipeline::UpdateSharedDescriptorSets(VkDevice device, u32 writeCount,
-                                                    const VkWriteDescriptorSet* writes,
-                                                    u32 copyCount,
-                                                    const VkCopyDescriptorSet* copies) const {
-    if (copyCount != 0u) {
-        throw std::logic_error("shared camera descriptors do not support descriptor copies");
+void RayTracingPipeline::UpdateSharedDescriptorSets(std::span<const gpu::BindingWrite> writes) const {
+    for (gpu::BindGroup target : {m_descriptorSet, m_cameraDescriptorSet, m_observerDescriptorSet}) {
+        m_gpu->WriteBindGroup(target, writes);
     }
-    vkUpdateDescriptorSets(device, writeCount, writes, 0, nullptr);
-    std::vector<VkWriteDescriptorSet> mirror(writes, writes + writeCount);
-    for (VkDescriptorSet target : {m_cameraDescriptorSet, m_observerDescriptorSet}) {
-        for (auto& write : mirror)
-            write.dstSet = target;
-        vkUpdateDescriptorSets(device, writeCount, mirror.data(), 0, nullptr);
-    }
-    (void)copies;
 }
 
 void RayTracingPipeline::BindOutputImage(const GpuImage& image) const {
-    VkDevice device = m_context.GetDevice();
-
-    VkDescriptorImageInfo imageInfo{};
-    imageInfo.imageView = image.GetView();
-    imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 0;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    write.descriptorCount = 1;
-    write.pImageInfo = &imageInfo;
-
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    WriteStorageImage(*m_gpu, m_descriptorSet, 0u, image);
 }
 
 void RayTracingPipeline::BindDepthImage(const GpuImage& image) const {
-    VkDevice device = m_context.GetDevice();
-
-    VkDescriptorImageInfo imageInfo{};
-    imageInfo.imageView = image.GetView();
-    imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 22;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    write.descriptorCount = 1;
-    write.pImageInfo = &imageInfo;
-
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    WriteStorageImage(*m_gpu, m_descriptorSet, 22u, image);
 }
 
 void RayTracingPipeline::BindCameraMeasurementImage(const GpuImage& image) const {
-    WriteStorageImage(m_context.GetDevice(), m_cameraDescriptorSet, 28u, image);
+    WriteStorageImage(*m_gpu, m_cameraDescriptorSet, 28u, image);
 }
 
 void RayTracingPipeline::BindCameraResponseBuffer(const GpuBuffer& buffer) const {
-    WriteStorageBuffer(m_context.GetDevice(), m_cameraDescriptorSet, 29u, buffer);
+    WriteStorageBuffer(*m_gpu, m_cameraDescriptorSet, 29u, buffer);
 }
 void RayTracingPipeline::BindCameraLightingBuffer(const GpuBuffer& buffer) const {
-    WriteStorageBuffer(m_context.GetDevice(), m_cameraDescriptorSet, 2u, buffer);
-    WriteStorageBuffer(m_context.GetDevice(), m_observerDescriptorSet, 2u, buffer);
+    WriteStorageBuffer(*m_gpu, m_cameraDescriptorSet, 2u, buffer);
+    WriteStorageBuffer(*m_gpu, m_observerDescriptorSet, 2u, buffer);
 }
 
 void RayTracingPipeline::SetCameraProjection(const camera::CameraProjection* p, u32 set,
@@ -1258,9 +768,9 @@ void RayTracingPipeline::SetCameraProjection(const camera::CameraProjection* p, 
         m_uploadQueue->Enqueue(*m_projectionBuffers[set], 0, values.data(), sizeof(values));
     else
         m_projectionBuffers[set]->Upload(values.data(), sizeof(values));
-    const VkDescriptorSet sets[] = {m_descriptorSet, m_cameraDescriptorSet,
-                                    m_observerDescriptorSet};
-    WriteStorageBuffer(m_context.GetDevice(), sets[set], 32u, *m_projectionBuffers[set]);
+    const gpu::BindGroup sets[] = {m_descriptorSet, m_cameraDescriptorSet,
+                                   m_observerDescriptorSet};
+    WriteStorageBuffer(*m_gpu, sets[set], 32u, *m_projectionBuffers[set]);
 }
 
 void RayTracingPipeline::SetFusionTransport(const Vector<rendercore::FusionTransportGpu>& records) {
@@ -1271,7 +781,7 @@ void RayTracingPipeline::SetFusionTransport(const Vector<rendercore::FusionTrans
     const rendercore::FusionTransportGpu disabled{};
     replacement->Upload(records.empty() ? &disabled : records.data(), size);
     for (auto set : {m_descriptorSet, m_cameraDescriptorSet, m_observerDescriptorSet})
-        WriteStorageBuffer(m_context.GetDevice(), set, 35u, *replacement);
+        WriteStorageBuffer(*m_gpu, set, 35u, *replacement);
     m_fusionTransportBuffer = std::move(replacement);
 }
 
@@ -1311,7 +821,7 @@ void RayTracingPipeline::BeginFusionRecording(u32 width, u32 height, u32 spp, u3
                                                            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                                        VMA_MEMORY_USAGE_GPU_TO_CPU);
         for (auto set : {m_descriptorSet, m_cameraDescriptorSet, m_observerDescriptorSet})
-            WriteStorageBuffer(m_context.GetDevice(), set, 36u, *replacement);
+            WriteStorageBuffer(*m_gpu, set, 36u, *replacement);
         m_fusionRecordBuffer = std::move(replacement);
     }
     m_fusionRecordSize = size;
@@ -1422,7 +932,7 @@ void RayTracingPipeline::SetFusionProbes(const Vector<ProbeRay>& probes) {
     const ProbeRay disabled{};
     buffer->Upload(probes.empty() ? &disabled : probes.data(), size);
     for (auto set : {m_descriptorSet, m_cameraDescriptorSet, m_observerDescriptorSet})
-        WriteStorageBuffer(m_context.GetDevice(), set, 37u, *buffer);
+        WriteStorageBuffer(*m_gpu, set, 37u, *buffer);
     m_fusionProbeBuffer = std::move(buffer);
     // Header word 10 carries the probe count; it lands with the next trace.
     m_fusionHeader[rendercore::kFusionProbeCountWord] = static_cast<u32>(probes.size());
@@ -1445,7 +955,7 @@ RayTracingPipeline::CapturePrimaryGeometry(u32 width, u32 height,
         info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         info.stage.module = module;
         info.stage.pName = "main";
-        info.layout = m_pipelineLayout;
+        info.layout = gpu::vulkan::NativeLayout(*m_kernelLayout);
         const auto result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info, nullptr,
                                                      &m_geometryPipeline);
         vkDestroyShaderModule(device, module, nullptr);
@@ -1461,20 +971,22 @@ RayTracingPipeline::CapturePrimaryGeometry(u32 width, u32 height,
                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                              VMA_MEMORY_USAGE_CPU_TO_GPU);
         pixels->Upload(queryPixels->data(), count * sizeof(glm::vec2));
-        WriteStorageBuffer(device, m_descriptorSet, 34u, *pixels);
+        WriteStorageBuffer(*m_gpu, m_descriptorSet, 34u, *pixels);
     }
     GpuBuffer output(m_context.GetAllocator(), count * sizeof(GeometryHit),
                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
-    WriteStorageBuffer(device, m_descriptorSet, 33u, output);
+    WriteStorageBuffer(*m_gpu, m_descriptorSet, 33u, output);
+    const VkPipelineLayout pipelineLayout = gpu::vulkan::NativeLayout(*m_kernelLayout);
+    const VkDescriptorSet descriptorSet = gpu::vulkan::NativeSet(m_descriptorSet);
     auto pc = m_pushConstants;
     pc.cameraAndSampling.sampleIndex = width;
     pc.cameraAndSampling.totalSamples = height;
     pc.cameraAndSampling.frameIndex = queryPixels ? 1u : 0u;
     CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_geometryPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1,
-                                &m_descriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, m_pipelineLayout,
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1,
+                                &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, pipelineLayout,
                            VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
                                VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                VK_SHADER_STAGE_COMPUTE_BIT,
@@ -1500,196 +1012,73 @@ RayTracingPipeline::CapturePrimaryGeometry(u32 width, u32 height,
 }
 
 void RayTracingPipeline::BindCameraDynamicCounterBuffer(const GpuBuffer& buffer) const {
-    WriteStorageBuffer(m_context.GetDevice(), m_cameraDescriptorSet, 30u, buffer);
+    WriteStorageBuffer(*m_gpu, m_cameraDescriptorSet, 30u, buffer);
 }
 
 void RayTracingPipeline::BindCameraMeasurementDepthImage(const GpuImage& image) const {
-    WriteStorageImage(m_context.GetDevice(), m_cameraDescriptorSet, 31u, image);
+    WriteStorageImage(*m_gpu, m_cameraDescriptorSet, 31u, image);
 }
 
 void RayTracingPipeline::BindCameraDepthImage(const GpuImage& image) const {
-    WriteStorageImage(m_context.GetDevice(), m_cameraDescriptorSet, 22u, image);
+    WriteStorageImage(*m_gpu, m_cameraDescriptorSet, 22u, image);
 }
 
 void RayTracingPipeline::BindCameraObserverOutputImage(const GpuImage& image) const {
-    WriteStorageImage(m_context.GetDevice(), m_observerDescriptorSet, 0u, image);
+    WriteStorageImage(*m_gpu, m_observerDescriptorSet, 0u, image);
 }
 
 void RayTracingPipeline::BindCameraObserverDepthImage(const GpuImage& image) const {
-    WriteStorageImage(m_context.GetDevice(), m_observerDescriptorSet, 22u, image);
+    WriteStorageImage(*m_gpu, m_observerDescriptorSet, 22u, image);
 }
 
 void RayTracingPipeline::BindAccelerationStructure(VkAccelerationStructureKHR tlas) const {
-    VkDevice device = m_context.GetDevice();
-
-    VkWriteDescriptorSetAccelerationStructureKHR asInfo{};
-    asInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
-    asInfo.accelerationStructureCount = 1;
-    asInfo.pAccelerationStructures = &tlas;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.pNext = &asInfo;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 1;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    write.descriptorCount = 1;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {gpu::BindingWrite::Scene(1u, gpu::vulkan::Ref(tlas))};
+    UpdateSharedDescriptorSets(writes);
 }
 
 void RayTracingPipeline::BindLUTBuffer(const GpuBuffer& buffer) const {
-    VkDevice device = m_context.GetDevice();
-
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer.GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 2;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(2u, buffer)};
+    UpdateSharedDescriptorSets(writes);
 }
 
 void RayTracingPipeline::BindGeometryBuffers(const GpuBuffer &vertexBuffer, const GpuBuffer &indexBuffer,
                                              const GpuBuffer *uvBuffer) const {
-    VkDevice device = m_context.GetDevice();
-
-    VkDescriptorBufferInfo vertexInfo{};
-    vertexInfo.buffer = vertexBuffer.GetHandle();
-    vertexInfo.offset = 0;
-    vertexInfo.range = VK_WHOLE_SIZE;
-
-    VkDescriptorBufferInfo indexInfo{};
-    indexInfo.buffer = indexBuffer.GetHandle();
-    indexInfo.offset = 0;
-    indexInfo.range = VK_WHOLE_SIZE;
-
-    VkDescriptorBufferInfo uvInfo{};
-    if (uvBuffer) {
-        uvInfo.buffer = uvBuffer->GetHandle();
-        uvInfo.offset = 0;
-        uvInfo.range = VK_WHOLE_SIZE;
-    }
-
-    std::vector<VkWriteDescriptorSet> writes;
+    std::vector<gpu::BindingWrite> writes;
     writes.reserve(3);
 
-    // Binding 3: Vertex buffer
-    VkWriteDescriptorSet vertexWrite{};
-    vertexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    vertexWrite.dstSet = m_descriptorSet;
-    vertexWrite.dstBinding = 3;
-    vertexWrite.dstArrayElement = 0;
-    vertexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    vertexWrite.descriptorCount = 1;
-    vertexWrite.pBufferInfo = &vertexInfo;
-    writes.push_back(vertexWrite);
-
-    // Binding 4: Index buffer
-    VkWriteDescriptorSet indexWrite{};
-    indexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    indexWrite.dstSet = m_descriptorSet;
-    indexWrite.dstBinding = 4;
-    indexWrite.dstArrayElement = 0;
-    indexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    indexWrite.descriptorCount = 1;
-    indexWrite.pBufferInfo = &indexInfo;
-    writes.push_back(indexWrite);
+    writes.push_back(RtBufferWrite(3u, vertexBuffer));  // Binding 3: Vertex buffer
+    writes.push_back(RtBufferWrite(4u, indexBuffer));   // Binding 4: Index buffer
 
     // Binding 8: UV buffer (optional)
     if (uvBuffer) {
-        VkWriteDescriptorSet uvWrite{};
-        uvWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        uvWrite.dstSet = m_descriptorSet;
-        uvWrite.dstBinding = 8;
-        uvWrite.dstArrayElement = 0;
-        uvWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        uvWrite.descriptorCount = 1;
-        uvWrite.pBufferInfo = &uvInfo;
-        writes.push_back(uvWrite);
+        writes.push_back(RtBufferWrite(8u, *uvBuffer));
         QL_LOG_DEBUG("  [DEBUG] Bound UV buffer to binding 8");
     } else {
         QL_LOG_DEBUG("  [DEBUG] No UV buffer provided, skipping binding 8");
     }
 
-    UpdateSharedDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+    UpdateSharedDescriptorSets(writes);
 }
 
 void RayTracingPipeline::BindMaterialBuffer(const GpuBuffer& buffer) const {
-    VkDevice device = m_context.GetDevice();
-
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer.GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 5;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(5u, buffer)};
+    UpdateSharedDescriptorSets(writes);
 }
 
 void RayTracingPipeline::BindTangentBuffer(const GpuBuffer& buffer) const {
-    VkDevice device = m_context.GetDevice();
-
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer.GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 9;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(9u, buffer)};
+    UpdateSharedDescriptorSets(writes);
     QL_LOG_DEBUG("  [DEBUG] Bound tangent buffer to binding 9");
 }
 
 void RayTracingPipeline::BindNormalBuffer(const GpuBuffer& buffer) const {
-    VkDevice device = m_context.GetDevice();
-
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer.GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 16;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(16u, buffer)};
+    UpdateSharedDescriptorSets(writes);
     QL_LOG_DEBUG("  [DEBUG] Bound normal buffer to binding 16");
 }
 
 void RayTracingPipeline::BindTextures(const std::vector<VkImageView>& imageViews,
                                        const std::vector<VkSampler>& samplers) const {
-    VkDevice device = m_context.GetDevice();
-
     if (imageViews.size() != samplers.size()) {
         QL_LOG_ERROR("Texture binding failed: imageViews.size() ({}) != samplers.size() ({})",
                      imageViews.size(), samplers.size());
@@ -1714,124 +1103,42 @@ void RayTracingPipeline::BindTextures(const std::vector<VkImageView>& imageViews
     m_pushConstants.textureCount = textureCount;
     QL_LOG_INFO("Binding {} textures to descriptor set", textureCount);
 
-    // Build descriptor image info array for textures
-    std::vector<VkDescriptorImageInfo> imageInfos(textureCount);
-    for (u32 i = 0; i < textureCount; ++i) {
-        imageInfos[i].imageView = imageViews[i];
-        imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        imageInfos[i].sampler = VK_NULL_HANDLE;  // Sampler is separate
-    }
+    // Sampled images in SHADER_READ_ONLY_OPTIMAL, samplers separate.
+    std::vector<gpu::TextureRef> textures;
+    textures.reserve(textureCount);
+    for (VkImageView view : imageViews) textures.push_back(gpu::vulkan::SampledRef(view));
+    std::vector<gpu::SamplerRef> samplerRefs;
+    samplerRefs.reserve(textureCount);
+    for (VkSampler sampler : samplers) samplerRefs.push_back(gpu::vulkan::Ref(sampler));
 
-    // Build descriptor image info array for samplers
-    std::vector<VkDescriptorImageInfo> samplerInfos(textureCount);
-    for (u32 i = 0; i < textureCount; ++i) {
-        samplerInfos[i].sampler = samplers[i];
-        samplerInfos[i].imageView = VK_NULL_HANDLE;  // Image view is separate
-        samplerInfos[i].imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;  // Not used for samplers
-    }
-
-    // Update descriptor set
-    std::vector<VkWriteDescriptorSet> writes(2);
-
-    // Binding 6: Texture array (SAMPLED_IMAGE)
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = m_descriptorSet;
-    writes[0].dstBinding = 6;
-    writes[0].dstArrayElement = 0;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    writes[0].descriptorCount = textureCount;
-    writes[0].pImageInfo = imageInfos.data();
-
-    // Binding 7: Sampler array
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = m_descriptorSet;
-    writes[1].dstBinding = 7;
-    writes[1].dstArrayElement = 0;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    writes[1].descriptorCount = textureCount;
-    writes[1].pImageInfo = samplerInfos.data();
-
-    UpdateSharedDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+    // Binding 6: texture array, binding 7: sampler array, from element 0
+    const gpu::BindingWrite writes[] = {gpu::BindingWrite::SampledTextures(6u, textures),
+                                        gpu::BindingWrite::Samplers(7u, samplerRefs)};
+    UpdateSharedDescriptorSets(writes);
 }
 
 void RayTracingPipeline::BindPrefilteredEnvMap(VkImageView imageView, VkSampler sampler) const {
-    VkDevice device = m_context.GetDevice();
-
     QL_LOG_INFO("Binding prefiltered environment map to descriptor set (bindings 10, 21)");
-
-    VkDescriptorImageInfo imageInfo{};
-    imageInfo.imageView = imageView;
-    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    imageInfo.sampler = VK_NULL_HANDLE;  // Sampler is separate (binding 21)
 
     // Its own sampler rather than the one at binding 12: that one clamps maxLod to
     // 0, which pinned every environment lookup to mip 0 and left the prefiltered
     // chain unreachable.
-    VkDescriptorImageInfo samplerInfo{};
-    samplerInfo.sampler = sampler;
-    samplerInfo.imageView = VK_NULL_HANDLE;
-    samplerInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    std::array<VkWriteDescriptorSet, 2> writes{};
-
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = m_descriptorSet;
-    writes[0].dstBinding = 10;  // prefilteredEnvMap (TextureCube)
-    writes[0].dstArrayElement = 0;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    writes[0].descriptorCount = 1;
-    writes[0].pImageInfo = &imageInfo;
-
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = m_descriptorSet;
-    writes[1].dstBinding = 21;  // envSampler
-    writes[1].dstArrayElement = 0;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    writes[1].descriptorCount = 1;
-    writes[1].pImageInfo = &samplerInfo;
-
-    UpdateSharedDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+    const gpu::BindingWrite writes[] = {
+        gpu::BindingWrite::SampledTexture(10u, gpu::vulkan::SampledRef(imageView)),  // prefilteredEnvMap (TextureCube)
+        gpu::BindingWrite::Sampler(21u, gpu::vulkan::Ref(sampler)),                  // envSampler
+    };
+    UpdateSharedDescriptorSets(writes);
 }
 
 void RayTracingPipeline::BindBRDFLut(VkImageView imageView, VkSampler sampler) const {
-    VkDevice device = m_context.GetDevice();
-
     QL_LOG_INFO("Binding BRDF integration LUT to descriptor set (bindings 11, 12)");
 
-    // Build descriptor info for BRDF LUT texture
-    VkDescriptorImageInfo imageInfo{};
-    imageInfo.imageView = imageView;
-    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    imageInfo.sampler = VK_NULL_HANDLE;  // Sampler is separate
-
-    // Build descriptor info for IBL sampler (shared by prefiltered env and BRDF LUT)
-    VkDescriptorImageInfo samplerInfo{};
-    samplerInfo.sampler = sampler;
-    samplerInfo.imageView = VK_NULL_HANDLE;  // Image view is separate
-    samplerInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;  // Not used for samplers
-
-    // Update descriptor set
-    std::vector<VkWriteDescriptorSet> writes(2);
-
-    // Binding 11: BRDF LUT texture (SAMPLED_IMAGE)
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = m_descriptorSet;
-    writes[0].dstBinding = 11;  // Updated from 10 to 11
-    writes[0].dstArrayElement = 0;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    writes[0].descriptorCount = 1;
-    writes[0].pImageInfo = &imageInfo;
-
-    // Binding 12: IBL sampler (shared by prefiltered env and BRDF LUT)
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = m_descriptorSet;
-    writes[1].dstBinding = 12;  // Updated from 11 to 12
-    writes[1].dstArrayElement = 0;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    writes[1].descriptorCount = 1;
-    writes[1].pImageInfo = &samplerInfo;
-
-    UpdateSharedDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+    // Binding 11: BRDF LUT texture; binding 12: IBL sampler (shared by prefiltered env and BRDF LUT)
+    const gpu::BindingWrite writes[] = {
+        gpu::BindingWrite::SampledTexture(11u, gpu::vulkan::SampledRef(imageView)),
+        gpu::BindingWrite::Sampler(12u, gpu::vulkan::Ref(sampler)),
+    };
+    UpdateSharedDescriptorSets(writes);
 }
 
 // ============================================================================
@@ -1839,8 +1146,6 @@ void RayTracingPipeline::BindBRDFLut(VkImageView imageView, VkSampler sampler) c
 // ============================================================================
 
 void RayTracingPipeline::BindSpectralCurvesBuffer(const GpuBuffer* buffer) const {
-    VkDevice device = m_context.GetDevice();
-
     if (buffer == nullptr)
         buffer = m_spectralFallback.get();
 
@@ -1848,21 +1153,8 @@ void RayTracingPipeline::BindSpectralCurvesBuffer(const GpuBuffer* buffer) const
     QL_LOG_INFO("  Buffer size: {} bytes", buffer->GetSize());
     QL_LOG_INFO("  Expected curves: ~{}", buffer->GetSize() / 272);  // 272 bytes per SpectralCurveGPU
 
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer->GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 13;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(13u, *buffer)};
+    UpdateSharedDescriptorSets(writes);
 }
 
 // ============================================================================
@@ -1870,8 +1162,6 @@ void RayTracingPipeline::BindSpectralCurvesBuffer(const GpuBuffer* buffer) const
 // ============================================================================
 
 void RayTracingPipeline::BindComplexRefractiveIndexBuffer(const GpuBuffer* buffer) const {
-    VkDevice device = m_context.GetDevice();
-
     if (buffer == nullptr)
         buffer = m_criFallback.get();
 
@@ -1879,21 +1169,8 @@ void RayTracingPipeline::BindComplexRefractiveIndexBuffer(const GpuBuffer* buffe
     QL_LOG_INFO("  Buffer size: {} bytes", buffer->GetSize());
     QL_LOG_INFO("  Expected entries: ~{}", buffer->GetSize() / 528);  // 528 bytes per ComplexRefractiveIndexGPU
 
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer->GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 14;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(14u, *buffer)};
+    UpdateSharedDescriptorSets(writes);
 }
 
 // ============================================================================
@@ -1901,8 +1178,6 @@ void RayTracingPipeline::BindComplexRefractiveIndexBuffer(const GpuBuffer* buffe
 // ============================================================================
 
 void RayTracingPipeline::BindSolarSpectralLUT(const GpuBuffer* buffer) const {
-    VkDevice device = m_context.GetDevice();
-
     if (buffer == nullptr) {
         QL_LOG_INFO("Solar spectral LUT buffer is null - will use LightingParams RGB fallback");
         // Note: Shader must check if SolarSpectralLUT is valid before use
@@ -1912,21 +1187,8 @@ void RayTracingPipeline::BindSolarSpectralLUT(const GpuBuffer* buffer) const {
     QL_LOG_INFO("Binding solar spectral LUT buffer to descriptor set (binding 15)");
     QL_LOG_INFO("  Buffer size: {} bytes (expected: 544)", buffer->GetSize());
 
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer->GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 15;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(15u, *buffer)};
+    UpdateSharedDescriptorSets(writes);
 }
 
 // ============================================================================
@@ -1937,180 +1199,75 @@ void RayTracingPipeline::BindAtmosphereNN(const GpuBuffer* header,
                                           const GpuBuffer* data) const {
     // The viewport LUT may change while camera and observer traces already
     // recorded in a command buffer still use their own fixed descriptors.
-    WriteStorageBuffer(m_context.GetDevice(), m_descriptorSet, 17u,
+    WriteStorageBuffer(*m_gpu, m_descriptorSet, 17u,
                        header ? *header : *m_cameraFallbackAtmosHeader);
-    WriteStorageBuffer(m_context.GetDevice(), m_descriptorSet, 20u,
+    WriteStorageBuffer(*m_gpu, m_descriptorSet, 20u,
                        data ? *data : *m_cameraFallbackAtmosData);
 }
 
 void RayTracingPipeline::BindCameraAtmosphereNN(const GpuBuffer* header,
                                                 const GpuBuffer* data) const {
-    WriteStorageBuffer(m_context.GetDevice(), m_cameraDescriptorSet, 17u,
+    WriteStorageBuffer(*m_gpu, m_cameraDescriptorSet, 17u,
                        header ? *header : *m_cameraFallbackAtmosHeader);
-    WriteStorageBuffer(m_context.GetDevice(), m_cameraDescriptorSet, 20u,
+    WriteStorageBuffer(*m_gpu, m_cameraDescriptorSet, 20u,
                        data ? *data : *m_cameraFallbackAtmosData);
 }
 
 void RayTracingPipeline::BindCameraObserverAtmosphereNN(const GpuBuffer* header,
                                                         const GpuBuffer* data) const {
-    WriteStorageBuffer(m_context.GetDevice(), m_observerDescriptorSet, 17u,
+    WriteStorageBuffer(*m_gpu, m_observerDescriptorSet, 17u,
                        header ? *header : *m_cameraFallbackAtmosHeader);
-    WriteStorageBuffer(m_context.GetDevice(), m_observerDescriptorSet, 20u,
+    WriteStorageBuffer(*m_gpu, m_observerDescriptorSet, 20u,
                        data ? *data : *m_cameraFallbackAtmosData);
 }
 
 void RayTracingPipeline::BindInstanceGeometryBuffer(const GpuBuffer& buffer) const {
-    VkDevice device = m_context.GetDevice();
-
     QL_LOG_DEBUG("Binding instance geometry buffer to descriptor set (binding 18)");
 
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer.GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 18;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(18u, buffer)};
+    UpdateSharedDescriptorSets(writes);
 }
 
 void RayTracingPipeline::BindEmissiveTriangleBuffer(const GpuBuffer& buffer) const {
-    VkDevice device = m_context.GetDevice();
-
     QL_LOG_DEBUG("Binding emissive triangle buffer to descriptor set (binding 23)");
 
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer.GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 23;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(23u, buffer)};
+    UpdateSharedDescriptorSets(writes);
 }
 
 void RayTracingPipeline::BindThermalSunResponseBuffer(const GpuBuffer& buffer) const {
-    VkDevice device = m_context.GetDevice();
-
     QL_LOG_DEBUG("Binding thermal sun response buffer to descriptor set (binding 26)");
 
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer.GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 26;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(26u, buffer)};
+    UpdateSharedDescriptorSets(writes);
 }
 
 void RayTracingPipeline::BindThermalTangentBuffer(const GpuBuffer& buffer) const {
-    VkDevice device = m_context.GetDevice();
-
     QL_LOG_DEBUG("Binding thermal parameter tangent buffer to descriptor set (binding 27)");
 
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer.GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 27;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(27u, buffer)};
+    UpdateSharedDescriptorSets(writes);
 }
 
 void RayTracingPipeline::BindThermalTemperatureBuffer(const GpuBuffer& buffer) const {
-    VkDevice device = m_context.GetDevice();
-
     QL_LOG_DEBUG("Binding thermal temperature buffer to descriptor set (binding 24)");
 
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer.GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 24;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(24u, buffer)};
+    UpdateSharedDescriptorSets(writes);
 }
 
 void RayTracingPipeline::BindCIE_CMF_LUT(const GpuBuffer& buffer) const {
-    VkDevice device = m_context.GetDevice();
-
     QL_LOG_DEBUG("Binding CIE CMF LUT buffer to descriptor set (binding 19)");
 
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer.GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 19;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(19u, buffer)};
+    UpdateSharedDescriptorSets(writes);
 }
 
 void RayTracingPipeline::BindRgbToSpectrumTable(const GpuBuffer& buffer) const {
-    VkDevice device = m_context.GetDevice();
-
     QL_LOG_DEBUG("Binding RGB->spectrum coefficient table to descriptor set (binding 25)");
 
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer.GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 25;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
-
-    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
+    const gpu::BindingWrite writes[] = {RtBufferWrite(25u, buffer)};
+    UpdateSharedDescriptorSets(writes);
 }
 
 void RayTracingPipeline::UpdateDescriptorSets() {
@@ -2138,14 +1295,15 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u
     // Bind pipeline and descriptor set
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipeline);
 
-    const VkDescriptorSet activeSet = m_activeSpectralMode ==
+    const VkPipelineLayout pipelineLayout = gpu::vulkan::NativeLayout(*m_kernelLayout);
+    const VkDescriptorSet activeSet = gpu::vulkan::NativeSet(m_activeSpectralMode ==
         static_cast<u32>(SpectralMode::CameraMeasurement)
         ? m_cameraDescriptorSet
-        : (m_useObserverDescriptorSet ? m_observerDescriptorSet : m_descriptorSet);
+        : (m_useObserverDescriptorSet ? m_observerDescriptorSet : m_descriptorSet));
     vkCmdBindDescriptorSets(
         cmd,
         VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-        m_pipelineLayout,
+        pipelineLayout,
         0,
         1,
         &activeSet,
@@ -2157,7 +1315,7 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u
     // IMPORTANT: stageFlags must match the pipeline layout push constant range
     vkCmdPushConstants(
         cmd,
-        m_pipelineLayout,
+        pipelineLayout,
         VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
             VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT,
         0,

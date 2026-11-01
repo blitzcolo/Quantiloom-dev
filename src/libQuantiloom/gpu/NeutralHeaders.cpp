@@ -17,6 +17,7 @@
 #include "renderer/GpuClahe.hpp"
 #include "renderer/GpuDisplayRange.hpp"
 #include "renderer/GpuThermalStepper.hpp"
+#include "renderer/RtBindings.hpp"
 
 #if defined(VK_VERSION_1_0)
 #error "a gpu/ or migrated module header pulled in vulkan.h"
