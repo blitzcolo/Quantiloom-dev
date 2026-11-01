@@ -11,14 +11,13 @@
 
 #include <gtest/gtest.h>
 
-#include "gpu/vulkan/CommandHelper.hpp"
+#include "gpu/Device.hpp"
 #include "renderer/ExternalRenderContext.hpp"
-#include "gpu/vulkan/GpuBuffer.hpp"
-#include "gpu/vulkan/GpuImage.hpp"
-#include "gpu/vulkan/VulkanContext.hpp"
+#include "renderer/GpuAlloc.hpp"
 #include "support/GpuInteropTestUtils.hpp"
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
 
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 
@@ -28,16 +27,16 @@ namespace {
 
 constexpr u32 kSize = 64;
 
-class DepthAovTest : public quantiloom::testing::VulkanDeviceTest {
+class DepthAovTest : public quantiloom::testing::GpuDeviceTest {
 protected:
     void SetUp() override {
-        VulkanDeviceTest::SetUp();
+        GpuDeviceTest::SetUp();
         if (::testing::Test::IsSkipped()) return;
 
         testDir = std::filesystem::temp_directory_path() / "quantiloom_depth_aov";
         std::filesystem::create_directories(testDir);
 
-        auto* shared = quantiloom::testing::SharedVulkanDevice();
+        auto* shared = quantiloom::testing::SharedGpuDevice(Backend());
         ASSERT_NE(shared, nullptr);
 
         ExternalRenderContext::InitParams params{};
@@ -56,7 +55,7 @@ protected:
         if (!testDir.empty() && std::filesystem::exists(testDir)) {
             std::filesystem::remove_all(testDir);
         }
-        VulkanDeviceTest::TearDown();
+        GpuDeviceTest::TearDown();
     }
 
     /// Same in-repo cornell box fixture as test_apply_config.cpp, with the
@@ -85,62 +84,58 @@ protected:
     /// Render one frame and pull the whole depth AOV back to the CPU through
     /// the exported BlitDepthTo -- the exact sequence the GUI overlay records.
     std::vector<f32> RenderAndReadDepth() {
-        auto& ctx = Device();
+        auto& device = Gpu();
 
-        GpuImage colorTarget(ctx.GetAllocator(), ctx.GetDevice(), kSize, kSize,
-                             VK_FORMAT_B8G8R8A8_SRGB,
-                             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-        GpuImage depthTarget(ctx.GetAllocator(), ctx.GetDevice(), kSize, kSize,
-                             VK_FORMAT_R32_SFLOAT,
-                             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                                 VK_IMAGE_USAGE_SAMPLED_BIT);
-        GpuBuffer readback(ctx.GetAllocator(), kSize * kSize * sizeof(f32),
-                           VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
+        auto colorTarget = CreateTextureOrThrow(
+            device, gpu::TextureDesc{.width = kSize, .height = kSize, .format = gpu::Format::BGRA8Srgb,
+                                     .usage = gpu::TextureUsage::TransferDst | gpu::TextureUsage::Sampled});
+        auto depthTarget = CreateTextureOrThrow(
+            device, gpu::TextureDesc{.width = kSize, .height = kSize, .format = gpu::Format::R32Float,
+                                     .usage = gpu::TextureUsage::TransferDst | gpu::TextureUsage::TransferSrc |
+                                              gpu::TextureUsage::Sampled});
+        auto readback = CreateBufferOrThrow(
+            device, gpu::BufferDesc{kSize * kSize * sizeof(f32), gpu::BufferUsage::TransferDst,
+                                    gpu::MemoryClass::Readback, 0});
 
-        CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
-            context->RenderFrame(vk::Commands(cmd),
-                                 vk::Target(colorTarget.GetImage(), GpuTargetFormat::Bgra8Srgb, kSize, kSize,
-                                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
-            context->BlitDepthTo(vk::Commands(cmd),
-                             vk::Target(depthTarget.GetImage(), GpuTargetFormat::R32Float, kSize, kSize,
-                                        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+        device.ExecuteImmediate([&](gpu::CommandList& list) {
+            context->RenderFrame(quantiloom::testing::GpuRecording(list),
+                                 quantiloom::testing::GpuTarget(Backend(), colorTarget->Ref(),
+                                                                GpuTargetFormat::Bgra8Srgb,
+                                                                quantiloom::testing::kHostLayoutUndefined,
+                                                                quantiloom::testing::kHostLayoutGeneral));
+            context->BlitDepthTo(quantiloom::testing::GpuRecording(list),
+                             quantiloom::testing::GpuTarget(Backend(), depthTarget->Ref(),
+                                                            GpuTargetFormat::R32Float,
+                                                            quantiloom::testing::kHostLayoutUndefined,
+                                                            gpu::kHostLayoutShaderReadOnly));
 
-            // BlitDepthTo leaves the target SHADER_READ_ONLY; copy it out.
-            // Manual barrier: CommandHelper does not know this transition.
-            VkImageMemoryBarrier toSrc{};
-            toSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            toSrc.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            toSrc.image = depthTarget.GetImage();
-            toSrc.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            toSrc.subresourceRange.levelCount = 1;
-            toSrc.subresourceRange.layerCount = 1;
-            toSrc.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
-                                 0, nullptr, 1, &toSrc);
-            VkBufferImageCopy region{};
-            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.layerCount = 1;
-            region.imageExtent = {kSize, kSize, 1};
-            vkCmdCopyImageToBuffer(cmd, depthTarget.GetImage(),
-                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                   readback.GetHandle(), 1, &region);
+            // BlitDepthTo leaves the target SHADER_READ_ONLY; copy it out. The target
+            // has no storage usage, so its policy is Optimal: a fragment read names
+            // SHADER_READ_ONLY_OPTIMAL and a transfer read TRANSFER_SRC_OPTIMAL.
+            const gpu::TextureRef depth = depthTarget->Ref().WithLayout(gpu::TextureLayoutPolicy::Optimal);
+            gpu::TextureBarrier toSrc;
+            toSrc.texture = depth;
+            toSrc.from = gpu::Access::FragmentRead;
+            toSrc.to = gpu::Access::TransferRead;
+            toSrc.layerCount = 1;
+            list.Barrier(toSrc);
+            gpu::BufferTextureCopy region;
+            region.width = kSize;
+            region.height = kSize;
+            list.CopyTextureToBuffer(depth, readback->Ref(), region);
         });
 
         std::vector<f32> depths(kSize * kSize);
-        void* mapped = readback.Map();
+        void* mapped = readback->Map();
         std::memcpy(depths.data(), mapped, depths.size() * sizeof(f32));
-        readback.Unmap();
+        readback->Unmap();
         return depths;
     }
 
     std::filesystem::path testDir;
     std::unique_ptr<ExternalRenderContext> context;
 };
+QL_INSTANTIATE_GPU_SUITE(DepthAovTest);
 
 /// The scene the fixture names has to exist for any of this to mean anything.
 bool CornellBoxAvailable() {
@@ -150,7 +145,7 @@ bool CornellBoxAvailable() {
 
 }  // namespace
 
-TEST_F(DepthAovTest, HitPixelsCarryAPlausibleDistance) {
+TEST_P(DepthAovTest, HitPixelsCarryAPlausibleDistance) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     // The classic cornell view. The box is in its original units -- roughly
@@ -164,7 +159,7 @@ TEST_F(DepthAovTest, HitPixelsCarryAPlausibleDistance) {
     EXPECT_LT(center, 5000.0f);
 }
 
-TEST_F(DepthAovTest, MissPixelsCarryTheSentinel) {
+TEST_P(DepthAovTest, MissPixelsCarryTheSentinel) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     // Aim horizontally from far above the box (top is at y ~ 549): with a

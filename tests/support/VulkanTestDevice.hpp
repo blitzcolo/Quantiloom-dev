@@ -26,6 +26,7 @@ class VulkanContext;
 namespace quantiloom::gpu {
 class CommandList;
 class Device;
+class Texture;
 }  // namespace quantiloom::gpu
 
 namespace quantiloom::testing {
@@ -39,6 +40,10 @@ const std::string& VulkanDeviceUnavailableReason();
 /// GpuHandles and GpuRecording (GpuInteropTestUtils.hpp) for a Vulkan device or list.
 GpuDeviceHandles VulkanHostHandles(gpu::Device& device);
 GpuCommandRecording VulkanHostRecording(gpu::CommandList& list);
+
+/// TextureMipLevels and PackedInstanceTranslationX (GpuTestHelpers.hpp) on Vulkan.
+u32 VulkanTextureMipLevels(const gpu::Texture& texture);
+f32 VulkanPackedInstanceTranslationX(const void* packed, u32 index);
 
 /**
  * @brief Base for the Vulkan-only tests
@@ -57,9 +62,6 @@ protected:
 
     /// Valid for the body of any case that reached it -- SetUp skipped otherwise.
     [[nodiscard]] VulkanContext& Device() const;
-
-    /// The compute RHI view of the same context.
-    [[nodiscard]] gpu::Device& GpuDevice() const;
 };
 
 } // namespace quantiloom::testing

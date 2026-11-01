@@ -12,12 +12,12 @@
 #include <gtest/gtest.h>
 
 #include "renderer/ExternalRenderContext.hpp"
-#include "gpu/vulkan/CommandHelper.hpp"
-#include "gpu/vulkan/GpuImage.hpp"
-#include "gpu/vulkan/VulkanContext.hpp"
+#include "gpu/Device.hpp"
+#include "renderer/GpuAlloc.hpp"
 #include "support/GpuInteropTestUtils.hpp"
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
 #include "support/LogCapture.hpp"
+#include "support/vulkan/QueueBlocker.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <array>
 #include <chrono>
@@ -33,16 +33,16 @@ namespace {
 
 constexpr u32 kSize = 64;
 
-class PickTest : public quantiloom::testing::VulkanDeviceTest {
+class PickTest : public quantiloom::testing::GpuDeviceTest {
 protected:
     void SetUp() override {
-        VulkanDeviceTest::SetUp();
+        GpuDeviceTest::SetUp();
         if (::testing::Test::IsSkipped()) return;
 
         testDir = std::filesystem::temp_directory_path() / "quantiloom_pick";
         std::filesystem::create_directories(testDir);
 
-        auto* shared = quantiloom::testing::SharedVulkanDevice();
+        auto* shared = quantiloom::testing::SharedGpuDevice(Backend());
         ASSERT_NE(shared, nullptr);
 
         ExternalRenderContext::InitParams params{};
@@ -61,7 +61,7 @@ protected:
         if (!testDir.empty() && std::filesystem::exists(testDir)) {
             std::filesystem::remove_all(testDir);
         }
-        VulkanDeviceTest::TearDown();
+        GpuDeviceTest::TearDown();
     }
 
     /// Same cornell fixture as test_depth_aov.cpp: the box spans roughly
@@ -119,60 +119,52 @@ protected:
         ASSERT_TRUE(loaded.has_value()) << loaded.error();
     }
 
+    std::unique_ptr<gpu::Texture> MakeTarget(gpu::TextureUsage usage) {
+        return CreateTextureOrThrow(
+            Gpu(), gpu::TextureDesc{.width = kSize, .height = kSize, .format = gpu::Format::BGRA8Srgb,
+                                    .usage = usage});
+    }
+
+    GpuImageTarget FrameTarget(const gpu::Texture& target) {
+        return quantiloom::testing::GpuTarget(Backend(), target.Ref(), GpuTargetFormat::Bgra8Srgb,
+                                              quantiloom::testing::kHostLayoutUndefined,
+                                              quantiloom::testing::kHostLayoutGeneral);
+    }
+
+    /// A frame held in the queue behind a gate the host has not released: Block() opens
+    /// the gated command buffer, the frame is recorded into it, and it is submitted.
+    std::unique_ptr<quantiloom::testing::QueueBlocker> SubmitGatedFrame(const gpu::Texture& target) {
+        auto created = quantiloom::testing::QueueBlocker::Create(Gpu());
+        EXPECT_TRUE(created.has_value()) << (created.has_value() ? "" : created.error());
+        if (!created.has_value()) return nullptr;
+        auto blocker = std::move(created.value());
+        const auto recording = blocker->Block();
+        EXPECT_TRUE(recording.has_value()) << (recording.has_value() ? "" : recording.error());
+        if (!recording.has_value()) return nullptr;
+        context->RenderFrame(recording.value(), FrameTarget(target));
+        const auto submitted = blocker->Submit();
+        EXPECT_TRUE(submitted.has_value()) << (submitted.has_value() ? "" : submitted.error());
+        if (!submitted.has_value()) return nullptr;
+        return blocker;
+    }
+
     void ExpectUploadCompletesPriorReader(const std::function<void()>& upload) {
-        const VkDevice device = Device().GetDevice();
-        GpuImage target(Device().GetAllocator(), device, kSize, kSize,
-                        VK_FORMAT_B8G8R8A8_SRGB, VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-        struct Resources {
-            VkDevice device;
-            VkEvent event = VK_NULL_HANDLE;
-            VkFence fence = VK_NULL_HANDLE;
-            VkCommandPool pool = VK_NULL_HANDLE;
-            bool submitted = false;
-            ~Resources() {
-                if (submitted) vkQueueWaitIdle(queue);
-                if (event) vkDestroyEvent(device, event, nullptr);
-                if (fence) vkDestroyFence(device, fence, nullptr);
-                if (pool) vkDestroyCommandPool(device, pool, nullptr);
-            }
-            VkQueue queue;
-        } resources{device};
-        resources.queue = Device().GetGraphicsQueue();
-        VkEventCreateInfo eventInfo{VK_STRUCTURE_TYPE_EVENT_CREATE_INFO};
-        ASSERT_EQ(vkCreateEvent(device, &eventInfo, nullptr, &resources.event), VK_SUCCESS);
-        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        ASSERT_EQ(vkCreateFence(device, &fenceInfo, nullptr, &resources.fence), VK_SUCCESS);
-        VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-        poolInfo.queueFamilyIndex = Device().GetGraphicsQueueFamily();
-        ASSERT_EQ(vkCreateCommandPool(device, &poolInfo, nullptr, &resources.pool), VK_SUCCESS);
-        VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-        allocation.commandPool = resources.pool;
-        allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocation.commandBufferCount = 1;
-        VkCommandBuffer cmd = VK_NULL_HANDLE;
-        ASSERT_EQ(vkAllocateCommandBuffers(device, &allocation, &cmd), VK_SUCCESS);
-        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        ASSERT_EQ(vkBeginCommandBuffer(cmd, &begin), VK_SUCCESS);
+        if (!quantiloom::testing::QueueBlocker::IsSupported(Backend())) {
+            GTEST_SKIP() << "no queue blocker on this backend";
+        }
+        const auto target = MakeTarget(gpu::TextureUsage::TransferDst);
         // Hold a real old trace in the queue. This deterministically exposes
         // a setter that writes shared bytes while that reader is still pending.
-        vkCmdWaitEvents(cmd, 1, &resources.event, VK_PIPELINE_STAGE_HOST_BIT,
-                        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, nullptr,
-                        0, nullptr, 0, nullptr);
-        context->RenderFrame(vk::Commands(cmd),
-                                 vk::Target(target.GetImage(), GpuTargetFormat::Bgra8Srgb, kSize, kSize,
-                                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
-        ASSERT_EQ(vkEndCommandBuffer(cmd), VK_SUCCESS);
-        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &cmd;
-        ASSERT_EQ(vkQueueSubmit(resources.queue, 1, &submit, resources.fence), VK_SUCCESS);
-        resources.submitted = true;
-        std::jthread release([device, event = resources.event] {
+        const auto blocker = SubmitGatedFrame(*target);
+        ASSERT_NE(blocker, nullptr);
+        std::jthread release([&blocker] {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            vkSetEvent(device, event);
+            blocker->Release();
         });
         upload();
-        EXPECT_EQ(vkGetFenceStatus(device, resources.fence), VK_SUCCESS);
+        const auto status = blocker->Status();
+        EXPECT_TRUE(status.has_value() && status.value() == gpu::FenceStatus::Signaled)
+            << (status.has_value() ? "the gated frame had not completed" : status.error());
     }
 
     // The deferred-upload contract: an in-place write to a shared buffer is
@@ -183,85 +175,44 @@ protected:
     // setter return with the fence already signaled, which the assertion then
     // catches as a failure instead of a hang.
     void ExpectUploadDoesNotWaitForPriorReader(const std::function<void()>& upload) {
-        const VkDevice device = Device().GetDevice();
-        GpuImage target(Device().GetAllocator(), device, kSize, kSize,
-            VK_FORMAT_B8G8R8A8_SRGB, VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-        struct Resources {
-            VkDevice device;
-            VkEvent event = VK_NULL_HANDLE;
-            VkFence fence = VK_NULL_HANDLE;
-            VkCommandPool pool = VK_NULL_HANDLE;
-            bool submitted = false;
-            ~Resources() {
-                if (submitted) vkQueueWaitIdle(queue);
-                if (event) vkDestroyEvent(device, event, nullptr);
-                if (fence) vkDestroyFence(device, fence, nullptr);
-                if (pool) vkDestroyCommandPool(device, pool, nullptr);
-            }
-            VkQueue queue;
-        } resources{device};
-        resources.queue = Device().GetGraphicsQueue();
-        VkEventCreateInfo eventInfo{VK_STRUCTURE_TYPE_EVENT_CREATE_INFO};
-        ASSERT_EQ(vkCreateEvent(device, &eventInfo, nullptr, &resources.event), VK_SUCCESS);
-        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        ASSERT_EQ(vkCreateFence(device, &fenceInfo, nullptr, &resources.fence), VK_SUCCESS);
-        VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-        poolInfo.queueFamilyIndex = Device().GetGraphicsQueueFamily();
-        ASSERT_EQ(vkCreateCommandPool(device, &poolInfo, nullptr, &resources.pool), VK_SUCCESS);
-        VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-        allocation.commandPool = resources.pool;
-        allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocation.commandBufferCount = 1;
-        VkCommandBuffer cmd = VK_NULL_HANDLE;
-        ASSERT_EQ(vkAllocateCommandBuffers(device, &allocation, &cmd), VK_SUCCESS);
-        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        ASSERT_EQ(vkBeginCommandBuffer(cmd, &begin), VK_SUCCESS);
+        if (!quantiloom::testing::QueueBlocker::IsSupported(Backend())) {
+            GTEST_SKIP() << "no queue blocker on this backend";
+        }
+        const auto target = MakeTarget(gpu::TextureUsage::TransferDst);
         // Hold a real old trace in the queue, exactly as the waiting variant
         // does: the gated reader is what used to force the host wait.
-        vkCmdWaitEvents(cmd, 1, &resources.event, VK_PIPELINE_STAGE_HOST_BIT,
-                        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, nullptr,
-                        0, nullptr, 0, nullptr);
-        context->RenderFrame(vk::Commands(cmd),
-                                 vk::Target(target.GetImage(), GpuTargetFormat::Bgra8Srgb, kSize, kSize,
-                                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
-        ASSERT_EQ(vkEndCommandBuffer(cmd), VK_SUCCESS);
-        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &cmd;
-        ASSERT_EQ(vkQueueSubmit(resources.queue, 1, &submit, resources.fence), VK_SUCCESS);
-        resources.submitted = true;
-        std::jthread watchdog([device, event = resources.event] {
+        const auto blocker = SubmitGatedFrame(*target);
+        ASSERT_NE(blocker, nullptr);
+        std::jthread watchdog([&blocker] {
             std::this_thread::sleep_for(std::chrono::seconds(10));
-            vkSetEvent(device, event);
+            blocker->Release();
         });
         upload();
         // The setter must have returned without draining the queue: the
         // gated frame has not been released yet (10 s watchdog), so its fence
         // is still unsignaled unless the setter waited.
-        EXPECT_EQ(vkGetFenceStatus(device, resources.fence), VK_NOT_READY)
+        const auto status = blocker->Status();
+        EXPECT_TRUE(status.has_value() && status.value() == gpu::FenceStatus::NotReady)
             << "the setter waited on submitted readers -- the deferred queue "
                "exists precisely to avoid that wait";
-        vkSetEvent(device, resources.event);
-        ASSERT_EQ(vkWaitForFences(device, 1, &resources.fence, VK_TRUE,
-                                 10ull * 1000 * 1000 * 1000), VK_SUCCESS);
+        blocker->Release();
+        ASSERT_TRUE(blocker->Wait(10ull * 1000 * 1000 * 1000).has_value());
         // The deferred write lands with the next recorded frame.
         RenderRawFrame();
         EXPECT_GE(context->GetAccumulatedSamples(), 1u);
     }
 
     void RenderRawFrame() {
-        GpuImage target(Device().GetAllocator(), Device().GetDevice(), kSize, kSize,
-            VK_FORMAT_B8G8R8A8_SRGB, VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-        CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-            context->RenderFrame(vk::Commands(cmd),
-                                 vk::Target(target.GetImage(), GpuTargetFormat::Bgra8Srgb, kSize, kSize,
-                                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
+        const auto target = MakeTarget(gpu::TextureUsage::TransferDst);
+        Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
+            context->RenderFrame(quantiloom::testing::GpuRecording(list), FrameTarget(*target));
         });
     }
 
     std::filesystem::path testDir;
     std::unique_ptr<ExternalRenderContext> context;
 };
+QL_INSTANTIATE_GPU_SUITE(PickTest);
 
 bool CornellBoxAvailable() {
     const std::filesystem::path root(QUANTILOOM_SOURCE_ROOT);
@@ -270,7 +221,7 @@ bool CornellBoxAvailable() {
 
 }  // namespace
 
-TEST_F(PickTest, CenterPixelHitsAValidNode) {
+TEST_P(PickTest, CenterPixelHitsAValidNode) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     ApplyScene("position = [278.0, 274.0, -800.0]\nlook_at = [278.0, 274.0, 0.0]\n");
@@ -294,7 +245,7 @@ TEST_F(PickTest, CenterPixelHitsAValidNode) {
                 result.value().hitT, 0.5f);
 }
 
-TEST_F(PickTest, SkyPixelMisses) {
+TEST_P(PickTest, SkyPixelMisses) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     // High above the box aimed horizontally: nothing in the frustum
@@ -305,7 +256,7 @@ TEST_F(PickTest, SkyPixelMisses) {
     EXPECT_FALSE(result.value().hit);
 }
 
-TEST_F(PickTest, OutOfBoundsIsAnError) {
+TEST_P(PickTest, OutOfBoundsIsAnError) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     ApplyScene("position = [278.0, 274.0, -800.0]\nlook_at = [278.0, 274.0, 0.0]\n");
@@ -313,7 +264,7 @@ TEST_F(PickTest, OutOfBoundsIsAnError) {
     EXPECT_FALSE(context->Pick(0, kSize).has_value());
 }
 
-TEST_F(PickTest, AsynchronousPixelMatchesSynchronousReadingAndCarriesItsCoordinates) {
+TEST_P(PickTest, AsynchronousPixelMatchesSynchronousReadingAndCarriesItsCoordinates) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf unavailable";
     ApplyScene("position = [278.0, 274.0, -800.0]\nlook_at = [278.0, 274.0, 0.0]\n");
     context->SetRenderScale(0.5f);
@@ -325,7 +276,7 @@ TEST_F(PickTest, AsynchronousPixelMatchesSynchronousReadingAndCarriesItsCoordina
     ASSERT_TRUE(requested.has_value()) << requested.error();
     ASSERT_TRUE(requested.value());
     // Waiting belongs to this deterministic test, never to Request/Poll.
-    ASSERT_EQ(vkQueueWaitIdle(Device().GetGraphicsQueue()), VK_SUCCESS);
+    ASSERT_TRUE(Gpu().WaitQueueIdle().has_value());
     const auto completed = context->PollPixelValue();
     ASSERT_TRUE(completed.has_value()) << completed.error();
     ASSERT_TRUE(completed.value().has_value());
@@ -338,7 +289,7 @@ TEST_F(PickTest, AsynchronousPixelMatchesSynchronousReadingAndCarriesItsCoordina
     EXPECT_FALSE(context->PollPixelValue().value().has_value());
 }
 
-TEST_F(PickTest, AsynchronousPixelRingCoalescesCompletedCopiesAndReusesSlots) {
+TEST_P(PickTest, AsynchronousPixelRingCoalescesCompletedCopiesAndReusesSlots) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf unavailable";
     ApplyScene("position = [278.0, 274.0, -800.0]\nlook_at = [278.0, 274.0, 0.0]\n");
     RenderRawFrame();
@@ -350,7 +301,7 @@ TEST_F(PickTest, AsynchronousPixelRingCoalescesCompletedCopiesAndReusesSlots) {
     const auto busy = context->RequestPixelValue(10, 11, 103);
     ASSERT_TRUE(busy.has_value());
     EXPECT_FALSE(busy.value());
-    ASSERT_EQ(vkQueueWaitIdle(Device().GetGraphicsQueue()), VK_SUCCESS);
+    ASSERT_TRUE(Gpu().WaitQueueIdle().has_value());
     const auto completed = context->PollPixelValue();
     ASSERT_TRUE(completed.has_value());
     ASSERT_TRUE(completed.value().has_value());
@@ -362,21 +313,21 @@ TEST_F(PickTest, AsynchronousPixelRingCoalescesCompletedCopiesAndReusesSlots) {
     EXPECT_TRUE(reused.value());
 }
 
-TEST_F(PickTest, AsynchronousPixelDropsResultsWhenTheAccumulationChanges) {
+TEST_P(PickTest, AsynchronousPixelDropsResultsWhenTheAccumulationChanges) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf unavailable";
     ApplyScene("position = [278.0, 274.0, -800.0]\nlook_at = [278.0, 274.0, 0.0]\n");
     EXPECT_FALSE(context->RequestPixelValue(0, 0, 1).has_value());
     RenderRawFrame();
     ASSERT_TRUE(context->RequestPixelValue(0, 0, 1).value());
     context->ResetAccumulation();
-    ASSERT_EQ(vkQueueWaitIdle(Device().GetGraphicsQueue()), VK_SUCCESS);
+    ASSERT_TRUE(Gpu().WaitQueueIdle().has_value());
     const auto stale = context->PollPixelValue();
     ASSERT_TRUE(stale.has_value());
     EXPECT_FALSE(stale.value().has_value());
     EXPECT_FALSE(context->RequestPixelValue(0, 0, 2).has_value());
     RenderRawFrame();
     ASSERT_TRUE(context->RequestPixelValue(0, 0, 2).value());
-    ASSERT_EQ(vkQueueWaitIdle(Device().GetGraphicsQueue()), VK_SUCCESS);
+    ASSERT_TRUE(Gpu().WaitQueueIdle().has_value());
     const auto fresh = context->PollPixelValue();
     ASSERT_TRUE(fresh.has_value());
     ASSERT_TRUE(fresh.value().has_value());
@@ -384,7 +335,7 @@ TEST_F(PickTest, AsynchronousPixelDropsResultsWhenTheAccumulationChanges) {
     EXPECT_FALSE(context->RequestPixelValue(kSize, 0, 3).has_value());
 }
 
-TEST_F(PickTest, OrdinaryTransformsDoNotRebuildSampledEmission) {
+TEST_P(PickTest, OrdinaryTransformsDoNotRebuildSampledEmission) {
     LoadEmitterScene();
     const auto* scene = context->GetScene();
     ASSERT_NE(scene, nullptr);
@@ -414,14 +365,14 @@ TEST_F(PickTest, OrdinaryTransformsDoNotRebuildSampledEmission) {
     }
 }
 
-TEST_F(PickTest, WavelengthChangesPreserveSampledEmitterGeometry) {
+TEST_P(PickTest, WavelengthChangesPreserveSampledEmitterGeometry) {
     LoadEmitterScene();
     quantiloom::support::ScopedLogCapture capture;
     context->SetWavelength(612.0f);
     EXPECT_EQ(capture.Count(Log::Level::Info, "Emissive geometry:"), 0) << capture.Dump();
 }
 
-TEST_F(PickTest, MaterialEmissionEditsRefreshTheSamplingDistribution) {
+TEST_P(PickTest, MaterialEmissionEditsRefreshTheSamplingDistribution) {
     LoadEmitterScene();
     const auto* scene = context->GetScene();
     ASSERT_NE(scene, nullptr);
@@ -447,7 +398,7 @@ TEST_F(PickTest, MaterialEmissionEditsRefreshTheSamplingDistribution) {
 }
 
 
-TEST_F(PickTest, DeferredRefitsUseTheLatestPoseInTheRecordedFrameAndExactPick) {
+TEST_P(PickTest, DeferredRefitsUseTheLatestPoseInTheRecordedFrameAndExactPick) {
     LoadEmitterScene();
     const auto* scene = context->GetScene();
     ASSERT_NE(scene, nullptr);
@@ -497,7 +448,7 @@ TEST_F(PickTest, DeferredRefitsUseTheLatestPoseInTheRecordedFrameAndExactPick) {
 }
 
 
-TEST_F(PickTest, ViewportSampleBatchesPreserveTheRawSeededAccumulation) {
+TEST_P(PickTest, ViewportSampleBatchesPreserveTheRawSeededAccumulation) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf unavailable";
     ApplyScene("position = [278.0, 274.0, -800.0]\nlook_at = [278.0, 274.0, 0.0]\n");
     constexpr u32 samples = 35;
@@ -523,7 +474,7 @@ TEST_F(PickTest, ViewportSampleBatchesPreserveTheRawSeededAccumulation) {
     EXPECT_EQ(actual.value().data, expected.value().data);
 }
 
-TEST_F(PickTest, ViewportSampleBatchLimitsDoNotResetTheSequence) {
+TEST_P(PickTest, ViewportSampleBatchLimitsDoNotResetTheSequence) {
     LoadEmitterScene();
     context->SetViewportSampleBatch(0);
     RenderRawFrame();
@@ -534,14 +485,14 @@ TEST_F(PickTest, ViewportSampleBatchLimitsDoNotResetTheSequence) {
 }
 
 
-TEST_F(PickTest, OrdinaryMaterialUploadsDeferAroundSubmittedReaders) {
+TEST_P(PickTest, OrdinaryMaterialUploadsDeferAroundSubmittedReaders) {
     LoadEmitterScene();
     auto edited = context->GetScene()->materials[1];
     edited.roughnessFactor = 0.3f;
     ExpectUploadDoesNotWaitForPriorReader([&] { context->UpdateMaterial(1, edited); });
 }
 
-TEST_F(PickTest, CachedThermalUploadsWaitEvenWithoutAPendingRefit) {
+TEST_P(PickTest, CachedThermalUploadsWaitEvenWithoutAPendingRefit) {
     LoadEmitterScene();
     ThermalMaterialParams material;
     material.conductivity_W_mK = 80.0f;
@@ -562,7 +513,7 @@ TEST_F(PickTest, CachedThermalUploadsWaitEvenWithoutAPendingRefit) {
 }
 
 
-TEST_F(PickTest, LightingUploadsDeferAroundSubmittedReaders) {
+TEST_P(PickTest, LightingUploadsDeferAroundSubmittedReaders) {
     LoadEmitterScene();
     auto lighting = context->GetLightingParams();
     lighting.skyRadiance_rgb *= 0.5f;
@@ -574,7 +525,7 @@ TEST_F(PickTest, LightingUploadsDeferAroundSubmittedReaders) {
 // sees unchanged data and the setter need not wait for it. Growing past the
 // capacity replaces the buffer, and that path still drains the queue and the
 // device before the old allocation goes (see the next test).
-TEST_F(PickTest, AppendingSpectralTablesIntoSpareCapacityDoesNotWaitForReaders) {
+TEST_P(PickTest, AppendingSpectralTablesIntoSpareCapacityDoesNotWaitForReaders) {
     LoadEmitterScene();
     SpectralCurve curve;
     curve.samples = {{400.0f, 0.25f}, {780.0f, 0.5f}};
@@ -594,7 +545,7 @@ TEST_F(PickTest, AppendingSpectralTablesIntoSpareCapacityDoesNotWaitForReaders) 
     ExpectUploadDoesNotWaitForPriorReader([&] { EXPECT_GE(context->AddComplexRefractiveIndex(cri), 0); });
 }
 
-TEST_F(PickTest, GrowingSpectralTablesWaitsForSubmittedReaders) {
+TEST_P(PickTest, GrowingSpectralTablesWaitsForSubmittedReaders) {
     LoadEmitterScene();
     SpectralCurve curve;
     curve.samples = {{400.0f, 0.25f}, {780.0f, 0.5f}};
@@ -611,7 +562,7 @@ TEST_F(PickTest, GrowingSpectralTablesWaitsForSubmittedReaders) {
     EXPECT_TRUE(bound.has_value());
 }
 
-TEST_F(PickTest, ApplyingConfigWaitsBeforeReplacingLiveSpectralTables) {
+TEST_P(PickTest, ApplyingConfigWaitsBeforeReplacingLiveSpectralTables) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf unavailable";
     const std::string cameraKeys = "position = [278.0, 273.0, -800.0]\n"
                                    "look_at = [278.0, 273.0, 0.0]\n";
@@ -627,7 +578,7 @@ TEST_F(PickTest, ApplyingConfigWaitsBeforeReplacingLiveSpectralTables) {
     });
 }
 
-TEST_F(PickTest, InvalidSdkMaterialReferencesUseLoggedFallbacks) {
+TEST_P(PickTest, InvalidSdkMaterialReferencesUseLoggedFallbacks) {
     LoadEmitterScene();
     auto material = context->GetScene()->materials[0];
     material.baseColorTextureIndex = 1000000;

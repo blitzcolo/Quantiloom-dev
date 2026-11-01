@@ -16,15 +16,12 @@
 
 #include <gtest/gtest.h>
 
-#include "gpu/vulkan/CommandHelper.hpp"
 #include "gpu/Device.hpp"
-#include "gpu/vulkan/VulkanCommandList.hpp"
-#include "gpu/vulkan/VulkanResources.hpp"
-#include "gpu/vulkan/GpuBuffer.hpp"
+#include "renderer/GpuAlloc.hpp"
 #include "renderer/GpuClahe.hpp"
-#include "gpu/vulkan/GpuImage.hpp"
-#include "gpu/vulkan/VulkanContext.hpp"
-#include "support/VulkanTestDevice.hpp"
+#include "renderer/TextureTransitions.hpp"
+#include "support/GpuTestDevice.hpp"
+#include "support/GpuTestHelpers.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -33,34 +30,23 @@
 
 using namespace quantiloom;
 using namespace quantiloom::rendercore;
-using quantiloom::testing::VulkanDeviceTest;
+using quantiloom::testing::GpuDeviceTest;
 
 namespace {
 
-class GpuClaheTest : public VulkanDeviceTest {};
+class GpuClaheTest : public GpuDeviceTest {};
+QL_INSTANTIATE_GPU_SUITE(GpuClaheTest);
 
-std::unique_ptr<GpuImage> UploadRgba32f(VulkanContext& context, u32 width, u32 height,
-                                        const std::vector<f32>& rgba) {
-    auto image = std::make_unique<GpuImage>(
-        context.GetAllocator(), context.GetDevice(), width, height, VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY);
-    if (!image->IsValid()) return {};
-    GpuBuffer staging(context.GetAllocator(), rgba.size() * sizeof(f32), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                      VMA_MEMORY_USAGE_CPU_TO_GPU);
-    staging.Upload(rgba.data(), rgba.size() * sizeof(f32));
-    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        CommandHelper::TransitionImageLayout(cmd, image->GetImage(), VK_FORMAT_R32G32B32A32_SFLOAT,
-                                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        VkBufferImageCopy copy{};
-        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy.imageSubresource.layerCount = 1;
-        copy.imageExtent = {width, height, 1};
-        vkCmdCopyBufferToImage(cmd, staging.GetHandle(), image->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                               &copy);
-        CommandHelper::TransitionImageLayout(cmd, image->GetImage(), VK_FORMAT_R32G32B32A32_SFLOAT,
-                                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
-    });
+// The upload ends in CommandHelper's fallback transition (TRANSFER_DST -> GENERAL with no
+// access named, all commands against all commands), which is what it always recorded.
+std::unique_ptr<gpu::Texture> UploadRgba32f(gpu::Device& device, u32 width, u32 height,
+                                            const std::vector<f32>& rgba) {
+    auto image = CreateTextureOrThrow(
+        device, gpu::TextureDesc{.width = width, .height = height, .format = gpu::Format::RGBA32Float,
+                                 .usage = gpu::TextureUsage::Storage | gpu::TextureUsage::TransferDst |
+                                          gpu::TextureUsage::TransferSrc});
+    quantiloom::testing::UploadTexture(device, image->Ref(), rgba.data(), rgba.size() * sizeof(f32),
+                                       quantiloom::testing::UploadHandoff::AllCommands);
     return image;
 }
 
@@ -96,26 +82,26 @@ std::pair<f32, f32> FiniteRgbRange(const std::vector<f32>& rgba) {
 }
 
 struct ClaheFixture {
-    VulkanContext& context;
-    std::unique_ptr<GpuImage> input;
-    std::unique_ptr<GpuImage> output;
+    gpu::Device& device;
+    std::unique_ptr<gpu::Texture> input;
+    std::unique_ptr<gpu::Texture> output;
     std::unique_ptr<GpuClahe> clahe;
     f32 inputMin = 0.0f;
     f32 inputMax = 1.0f;
 };
 
-ClaheFixture MakeClahe(gpu::Device& device, VulkanContext& context, u32 width, u32 height,
+ClaheFixture MakeClahe(gpu::Device& device, u32 width, u32 height,
                        const std::vector<f32>& rgba) {
-    ClaheFixture fixture{context, nullptr, nullptr, nullptr, 0.0f, 1.0f};
-    fixture.input = UploadRgba32f(context, width, height, rgba);
-    fixture.output = std::make_unique<GpuImage>(
-        context.GetAllocator(), context.GetDevice(), width, height, VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-    if (!fixture.input || !fixture.output->IsValid()) return fixture;
+    ClaheFixture fixture{device, nullptr, nullptr, nullptr, 0.0f, 1.0f};
+    fixture.input = UploadRgba32f(device, width, height, rgba);
+    fixture.output = CreateTextureOrThrow(
+        device, gpu::TextureDesc{.width = width, .height = height, .format = gpu::Format::RGBA32Float,
+                                 .usage = gpu::TextureUsage::Storage | gpu::TextureUsage::TransferSrc});
+    if (!fixture.input || !fixture.output) return fixture;
     auto created = GpuClahe::Create(device);
     if (created) {
         fixture.clahe = std::move(created.value());
-        fixture.clahe->BindAll(gpu::vulkan::Ref(*fixture.input), gpu::vulkan::Ref(*fixture.output));
+        fixture.clahe->BindAll(fixture.input->Ref(), fixture.output->Ref());
         const auto range = FiniteRgbRange(rgba);
         fixture.inputMin = range.first;
         fixture.inputMax = range.second;
@@ -132,12 +118,10 @@ std::vector<f32> RunClahe(ClaheFixture& fixture, u32 width, u32 height,
     run.inputMin = fixture.inputMin;
     run.inputMax = fixture.inputMax;
     run.inputProducer = gpu::Access::ComputeWrite;
-    CommandHelper::ExecuteImmediate(fixture.context, [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
-        fixture.clahe->Record(list, gpu::vulkan::Ref(*fixture.input), run);
+    fixture.device.ExecuteImmediate([&](gpu::CommandList& list) {
+        fixture.clahe->Record(list, fixture.input->Ref(), run);
     });
-    return CommandHelper::ReadbackImage(fixture.context, fixture.output->GetImage(),
-                                        VK_FORMAT_R32G32B32A32_SFLOAT, width, height);
+    return rendercore::ReadbackTexture(fixture.device, fixture.output->Ref(), width, height);
 }
 
 // Pixels of one channel sorted by source value. A group of equal sources must show one
@@ -181,11 +165,11 @@ size_t CountBrokenGroups(const std::vector<f32>& source, const std::vector<f32>&
 
 }  // namespace
 
-TEST_F(GpuClaheTest, PerChannelTonesNeverInvertTheirOwnChannel) {
+TEST_P(GpuClaheTest, PerChannelTonesNeverInvertTheirOwnChannel) {
     constexpr u32 kWidth = 37;
     constexpr u32 kHeight = 23;
     const std::vector<f32> rgba = MakeInput(kWidth, kHeight);
-    auto fixture = MakeClahe(GpuDevice(), Device(), kWidth, kHeight, rgba);
+    auto fixture = MakeClahe(Gpu(), kWidth, kHeight, rgba);
     if (!fixture.clahe) GTEST_SKIP() << "clahe shaders unavailable";
 
     for (const auto tone : {DisplayToneMode::Linear, DisplayToneMode::Equalize}) {
@@ -203,11 +187,11 @@ TEST_F(GpuClaheTest, PerChannelTonesNeverInvertTheirOwnChannel) {
     }
 }
 
-TEST_F(GpuClaheTest, ClaheStaysFiniteAndInRange) {
+TEST_P(GpuClaheTest, ClaheStaysFiniteAndInRange) {
     constexpr u32 kWidth = 37;
     constexpr u32 kHeight = 23;
     const std::vector<f32> rgba = MakeInput(kWidth, kHeight);
-    auto fixture = MakeClahe(GpuDevice(), Device(), kWidth, kHeight, rgba);
+    auto fixture = MakeClahe(Gpu(), kWidth, kHeight, rgba);
     if (!fixture.clahe) GTEST_SKIP() << "clahe shaders unavailable";
 
     DisplayEnhancementParams params;

@@ -20,7 +20,7 @@
 #
 # 3 is not 1 on purpose. This repo already decided that a missing ray tracing
 # device makes a GPU check skip with a reason rather than fail (see
-# tests/support/VulkanTestDevice.hpp); a build machine without an RTX card
+# tests/support/GpuTestDevice.hpp); a build machine without an RTX card
 # should not be told its physics is broken when the truth is that nobody looked.
 
 $ErrorActionPreference = "Stop"

@@ -133,8 +133,8 @@ public:
     virtual void Trace(const TraceKernel& kernel, u32 width, u32 height, u32 depth) = 0;
     /// One build or refit with one geometry and one range (vkCmdBuildAccelerationStructuresKHR).
     /// Vulkan: throws std::runtime_error when the list has no device functions to call (a
-    /// vulkan::Wrap list, or a device without acceleration structures); every list a
-    /// gpu::Device hands out has them. Metal: an acceleration structure encoder's build or refit.
+    /// device without acceleration structures). Metal: an acceleration structure encoder's
+    /// build or refit.
     virtual void BuildRtAccelerationStructure(const RtBuild& build) = 0;
 
     virtual void Barrier(const BarrierBatch& batch) = 0;

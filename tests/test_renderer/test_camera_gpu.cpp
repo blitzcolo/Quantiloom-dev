@@ -1,17 +1,14 @@
 #include <gtest/gtest.h>
 
 #include "gpu/Device.hpp"
-#include "gpu/vulkan/VulkanCommandList.hpp"
-#include "gpu/vulkan/VulkanResources.hpp"
 #include "postprocess/CpuCameraPipeline.hpp"
-#include "gpu/vulkan/CommandHelper.hpp"
 #include "renderer/ExternalRenderContext.hpp"
-#include "gpu/vulkan/GpuBuffer.hpp"
+#include "renderer/GpuAlloc.hpp"
 #include "renderer/GpuCameraPipeline.hpp"
-#include "gpu/vulkan/GpuImage.hpp"
-#include "gpu/vulkan/VulkanContext.hpp"
+#include "renderer/TextureTransitions.hpp"
 #include "support/GpuInteropTestUtils.hpp"
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
+#include "support/GpuTestHelpers.hpp"
 
 #include <algorithm>
 #include <array>
@@ -125,159 +122,62 @@ void FillBayerMeasurement(u32 width, u32 height, std::vector<f32>& rgba,
         }
 }
 
-std::unique_ptr<GpuImage> UploadMeasurement(
-    VulkanContext& context, u32 width, u32 height,
+std::unique_ptr<gpu::Texture> UploadMeasurement(
+    gpu::Device& device, u32 width, u32 height,
     const std::vector<f32>& rgba) {
-    const VkFormat format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    auto image = std::make_unique<GpuImage>(
-        context.GetAllocator(), context.GetDevice(), width, height, format,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-            VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-    if (!image->IsValid() || rgba.size() != static_cast<size_t>(width) * height * 4)
+    auto image = CreateTextureOrThrow(
+        device, gpu::TextureDesc{.width = width, .height = height,
+                                 .format = gpu::Format::RGBA32Float,
+                                 .usage = gpu::TextureUsage::Storage | gpu::TextureUsage::Sampled |
+                                          gpu::TextureUsage::TransferDst |
+                                          gpu::TextureUsage::TransferSrc});
+    if (rgba.size() != static_cast<size_t>(width) * height * 4)
         return {};
-    const VkDeviceSize bytes = rgba.size() * sizeof(f32);
-    GpuBuffer staging(context.GetAllocator(), bytes,
-                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                      VMA_MEMORY_USAGE_CPU_TO_GPU);
-    if (!staging.IsValid()) return {};
-    staging.Upload(rgba.data(), bytes);
-    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        CommandHelper::TransitionImageLayout(
-            cmd, image->GetImage(), format, VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        VkBufferImageCopy region{};
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent = {width, height, 1};
-        vkCmdCopyBufferToImage(cmd, staging.GetHandle(), image->GetImage(),
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-        VkImageMemoryBarrier ready{};
-        ready.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        ready.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        ready.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        ready.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.image = image->GetImage();
-        ready.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        ready.subresourceRange.levelCount = 1;
-        ready.subresourceRange.layerCount = 1;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                             0, nullptr, 0, nullptr, 1, &ready);
-    });
+    quantiloom::testing::UploadTexture(device, image->Ref(), rgba.data(),
+                                       rgba.size() * sizeof(f32));
     return image;
 }
 
-bool UpdateMeasurement(VulkanContext& context, GpuImage& image,
+bool UpdateMeasurement(gpu::Device& device, gpu::Texture& image,
                        u32 width, u32 height,
                        const std::vector<f32>& rgba) {
-    if (!image.IsValid() || image.GetExtent().width != width ||
-        image.GetExtent().height != height ||
+    const gpu::TextureRef ref = image.Ref();
+    if (!ref.IsValid() || ref.width != width ||
+        ref.height != height ||
         rgba.size() != static_cast<size_t>(width) * height * 4)
         return false;
-    const VkDeviceSize bytes = rgba.size() * sizeof(f32);
-    GpuBuffer staging(context.GetAllocator(), bytes,
-                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                      VMA_MEMORY_USAGE_CPU_TO_GPU);
-    if (!staging.IsValid()) return false;
-    staging.Upload(rgba.data(), bytes);
-    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        VkImageMemoryBarrier toDst{};
-        toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        toDst.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        toDst.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toDst.image = image.GetImage();
-        toDst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        toDst.subresourceRange.levelCount = 1;
-        toDst.subresourceRange.layerCount = 1;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                             0, nullptr, 0, nullptr, 1, &toDst);
-        VkBufferImageCopy region{};
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent = {width, height, 1};
-        vkCmdCopyBufferToImage(cmd, staging.GetHandle(), image.GetImage(),
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-        VkImageMemoryBarrier ready{};
-        ready.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        ready.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        ready.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        ready.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.image = image.GetImage();
-        ready.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        ready.subresourceRange.levelCount = 1;
-        ready.subresourceRange.layerCount = 1;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                             0, nullptr, 0, nullptr, 1, &ready);
-    });
+    quantiloom::testing::ReuploadTexture(device, ref, rgba.data(),
+                                         rgba.size() * sizeof(f32));
     return true;
 }
 
-Result<void, String> RecordCamera(VulkanContext& context,
+Result<void, String> RecordCamera(gpu::Device& device,
                                   GpuCameraPipeline& pipeline,
-                                  const GpuImage& measurement,
+                                  const gpu::Texture& measurement,
                                   u64 acquisitionIndex,
                                   f64 timeSeconds) {
     Result<void, String> status = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    device.ExecuteImmediate([&](gpu::CommandList& list) {
         status = pipeline.RecordMeasurement(
-            list, gpu::vulkan::Ref(measurement), acquisitionIndex, timeSeconds);
+            list, measurement.Ref(), acquisitionIndex, timeSeconds);
     });
     return status;
 }
 
-std::vector<f32> ReadFloat(VulkanContext& context, gpu::TextureRef image,
+std::vector<f32> ReadFloat(gpu::Device& device, gpu::TextureRef image,
                            u32 width, u32 height) {
     if (!image.IsValid()) return {};
-    return CommandHelper::ReadbackImage(
-        context, gpu::vulkan::NativeImage(image),
-        gpu::vulkan::ToVk(image.format), width, height);
+    return rendercore::ReadbackTexture(device, image, width, height);
 }
 
-std::vector<u32> ReadUint(VulkanContext& context, gpu::TextureRef image,
+std::vector<u32> ReadUint(gpu::Device& device, gpu::TextureRef image,
                           u32 width, u32 height) {
     if (!image.IsValid() || image.format != gpu::Format::RGBA32Uint) return {};
-    const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 4 * sizeof(u32);
-    GpuBuffer staging(context.GetAllocator(), bytes,
-                      VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
-    if (!staging.IsValid()) return {};
-    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        CommandHelper::TransitionImageLayout(
-            cmd, gpu::vulkan::NativeImage(image), gpu::vulkan::ToVk(image.format),
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        VkBufferImageCopy region{};
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent = {width, height, 1};
-        vkCmdCopyImageToBuffer(cmd, gpu::vulkan::NativeImage(image),
-                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                               staging.GetHandle(), 1, &region);
-        CommandHelper::TransitionImageLayout(
-            cmd, gpu::vulkan::NativeImage(image), gpu::vulkan::ToVk(image.format),
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
-    });
-    std::vector<u32> out(static_cast<size_t>(width) * height * 4);
-    const void* data = staging.Map();
-    if (!data) return {};
-    std::memcpy(out.data(), data, bytes);
-    staging.Unmap();
-    return out;
+    return quantiloom::testing::ReadTextureWords(device, image, width, height);
 }
 
-class CameraGpuTest : public quantiloom::testing::VulkanDeviceTest {};
+class CameraGpuTest : public quantiloom::testing::GpuDeviceTest {};
+QL_INSTANTIATE_GPU_SUITE(CameraGpuTest);
 
 std::pair<double, double> RedMeanVariance(const std::vector<f32>& rgba) {
     const size_t pixels = rgba.size() / 4;
@@ -292,26 +192,26 @@ std::pair<double, double> RedMeanVariance(const std::vector<f32>& rgba) {
 
 } // namespace
 
-TEST_F(CameraGpuTest, NoiseFreePhotonOperatorMatchesCpuBeforeAndAfterAdc) {
+TEST_P(CameraGpuTest, NoiseFreePhotonOperatorMatchesCpuBeforeAndAfterAdc) {
     const auto config = CameraConfigFor(6, 1);
     Image cpuRate(6, 1, 1);
     cpuRate.data = {0.0f, 49.999f, 50.001f, 1000.0f, 12345.0f, 1e7f};
     std::vector<f32> rgba(6 * 4, 0.0f);
     for (u32 i = 0; i < 6; ++i) rgba[i * 4] = cpuRate.data[i];
-    auto input = UploadMeasurement(Device(), 6, 1, rgba);
+    auto input = UploadMeasurement(Gpu(), 6, 1, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), 6, 1);
+    auto created = GpuCameraPipeline::Create(Gpu(), 6, 1);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     const auto configured = pipeline->Configure(config);
     ASSERT_TRUE(configured.has_value());
-    const auto recorded = RecordCamera(Device(), *pipeline, *input, 0, 0.0);
+    const auto recorded = RecordCamera(Gpu(), *pipeline, *input, 0, 0.0);
     ASSERT_TRUE(recorded.has_value());
     const auto outputs = pipeline->GetOutputs();
-    const auto gpuExpected = ReadFloat(Device(), outputs.expectedElectrons, 6, 1);
-    const auto gpuPreAdc = ReadFloat(Device(), outputs.preAdcElectrons, 6, 1);
-    const auto gpuRaw = ReadFloat(Device(), outputs.rawDn, 6, 1);
-    const auto gpuCorrected = ReadFloat(Device(), outputs.corrected, 6, 1);
+    const auto gpuExpected = ReadFloat(Gpu(), outputs.expectedElectrons, 6, 1);
+    const auto gpuPreAdc = ReadFloat(Gpu(), outputs.preAdcElectrons, 6, 1);
+    const auto gpuRaw = ReadFloat(Gpu(), outputs.rawDn, 6, 1);
+    const auto gpuCorrected = ReadFloat(Gpu(), outputs.corrected, 6, 1);
     ASSERT_EQ(gpuExpected.size(), 24u);
     ASSERT_EQ(gpuPreAdc.size(), 24u);
     ASSERT_EQ(gpuRaw.size(), 24u);
@@ -338,18 +238,18 @@ TEST_F(CameraGpuTest, NoiseFreePhotonOperatorMatchesCpuBeforeAndAfterAdc) {
                     cpu.value().correctedDeviceSignal->image.data[pixel], 1.0)
             << "pixel " << pixel;
     }
-    auto replacementView = UploadMeasurement(Device(), 6, 1, rgba);
+    auto replacementView = UploadMeasurement(Gpu(), 6, 1, rgba);
     ASSERT_NE(replacementView, nullptr);
     const auto rejected = RecordCamera(
-        Device(), *pipeline, *replacementView, 1, 0.1);
+        Gpu(), *pipeline, *replacementView, 1, 0.1);
     ASSERT_FALSE(rejected.has_value());
     EXPECT_NE(rejected.error().find("changed"), String::npos);
     // The rejected bind must leave the capture counter and thermal history
     // untouched, so the original image can still serve acquisition 1.
-    EXPECT_TRUE(RecordCamera(Device(), *pipeline, *input, 1, 0.1).has_value());
+    EXPECT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 1, 0.1).has_value());
 }
 
-TEST_F(CameraGpuTest, FastRgbApproximationUsesSharedReadoutAndAbsoluteScale) {
+TEST_P(CameraGpuTest, FastRgbApproximationUsesSharedReadoutAndAbsoluteScale) {
     auto config = CameraConfigFor(2, 1);
     config.inputKind = CameraInputKind::FastRgbApproximation;
     config.fastRgbRadianceScale = 2e-4;
@@ -359,21 +259,20 @@ TEST_F(CameraGpuTest, FastRgbApproximationUsesSharedReadoutAndAbsoluteScale) {
                               0.0, 0.0, 1.0};
     std::vector<f32> rgba = {0.2f, 0.4f, 0.1f, 1.0f,
                              0.8f, 0.1f, 0.3f, 1.0f};
-    auto input = UploadMeasurement(Device(), 2, 1, rgba);
+    auto input = UploadMeasurement(Gpu(), 2, 1, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), 2, 1);
+    auto created = GpuCameraPipeline::Create(Gpu(), 2, 1);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
     Result<void, String> recorded = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
-        recorded = pipeline->RecordFastRgbMeasurement(list, gpu::vulkan::Ref(*input), 0, 0.0);
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
+        recorded = pipeline->RecordFastRgbMeasurement(list, input->Ref(), 0, 0.0);
     });
     ASSERT_TRUE(recorded.has_value()) << recorded.error();
     const auto gpuExpected = ReadFloat(
-        Device(), pipeline->GetOutputs().expectedElectrons, 2, 1);
-    const auto gpuRaw = ReadFloat(Device(), pipeline->GetOutputs().rawDn, 2, 1);
+        Gpu(), pipeline->GetOutputs().expectedElectrons, 2, 1);
+    const auto gpuRaw = ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, 2, 1);
     ASSERT_EQ(gpuExpected.size(), 8u);
     ASSERT_EQ(gpuRaw.size(), 8u);
 
@@ -398,20 +297,19 @@ TEST_F(CameraGpuTest, FastRgbApproximationUsesSharedReadoutAndAbsoluteScale) {
     }
 }
 
-TEST_F(CameraGpuTest, IntegerCounterVectorsMatchIndependentGoldens) {
-    auto created = GpuCameraPipeline::Create(GpuDevice(), 64, 64);
+TEST_P(CameraGpuTest, IntegerCounterVectorsMatchIndependentGoldens) {
+    auto created = GpuCameraPipeline::Create(Gpu(), 64, 64);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     const auto configured = pipeline->Configure(CameraConfigFor(64, 64));
     ASSERT_TRUE(configured.has_value());
     Result<void, String> status = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
         status = pipeline->RecordRandomVectors(
             list, 0x548cu, 7u, NoiseClass::PhotonShot, 0u);
     });
     ASSERT_TRUE(status.has_value());
-    const auto first = ReadUint(Device(), pipeline->GetRandomVectors(), 64, 64);
+    const auto first = ReadUint(Gpu(), pipeline->GetRandomVectors(), 64, 64);
     ASSERT_EQ(first.size(), 64u * 64u * 4u);
     const size_t base = 1234u * 4u;
     EXPECT_EQ(first[base + 0], 0xf3472877u);
@@ -419,37 +317,34 @@ TEST_F(CameraGpuTest, IntegerCounterVectorsMatchIndependentGoldens) {
     EXPECT_EQ(first[base + 2], 0x349a82a3u);
     EXPECT_EQ(first[base + 3], 0xe0588ed0u);
 
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
         status = pipeline->RecordRandomVectors(
             list, 0x548cu, 0x100000007ull, NoiseClass::PhotonShot, 0u);
     });
     ASSERT_TRUE(status.has_value());
-    const auto highCapture = ReadUint(Device(), pipeline->GetRandomVectors(), 64, 64);
+    const auto highCapture = ReadUint(Gpu(), pipeline->GetRandomVectors(), 64, 64);
     ASSERT_EQ(highCapture.size(), first.size());
     EXPECT_EQ(highCapture[base], 0x0877f273u);
 
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
         status = pipeline->RecordRandomVectors(
             list, 0x548cu, 7u, NoiseClass::FixedPrnu, 0u);
     });
     ASSERT_TRUE(status.has_value());
-    const auto fixedFirst = ReadUint(Device(), pipeline->GetRandomVectors(), 64, 64);
+    const auto fixedFirst = ReadUint(Gpu(), pipeline->GetRandomVectors(), 64, 64);
     ASSERT_EQ(fixedFirst.size(), first.size());
     EXPECT_EQ(fixedFirst[base], 0x3c64784eu);
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
         status = pipeline->RecordRandomVectors(
             list, 0x548cu, 0x1000003e7ull, NoiseClass::FixedPrnu, 0u);
     });
     ASSERT_TRUE(status.has_value());
-    const auto fixedLater = ReadUint(Device(), pipeline->GetRandomVectors(), 64, 64);
+    const auto fixedLater = ReadUint(Gpu(), pipeline->GetRandomVectors(), 64, 64);
     ASSERT_EQ(fixedLater.size(), first.size());
     EXPECT_EQ(fixedLater[base], fixedFirst[base]);
 }
 
-TEST_F(CameraGpuTest, BayerMeasuredRateProducesOneRawNumberPerPixel) {
+TEST_P(CameraGpuTest, BayerMeasuredRateProducesOneRawNumberPerPixel) {
     auto config = CameraConfigFor(2, 2);
     config.device.cfa = CfaPattern::RGGB;
     const auto baseChannel = config.device.channels.front();
@@ -468,14 +363,14 @@ TEST_F(CameraGpuTest, BayerMeasuredRateProducesOneRawNumberPerPixel) {
             rgba[i * 4 + channel] = cpuRate.data[i];
         rgba[i * 4 + 3] = cfa[i];
     }
-    auto input = UploadMeasurement(Device(), 2, 2, rgba);
+    auto input = UploadMeasurement(Gpu(), 2, 2, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), 2, 2);
+    auto created = GpuCameraPipeline::Create(Gpu(), 2, 2);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 0, 0.0).has_value());
-    const auto gpuRaw = ReadFloat(Device(), pipeline->GetOutputs().rawDn, 2, 2);
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
+    const auto gpuRaw = ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, 2, 2);
     ASSERT_EQ(gpuRaw.size(), 16u);
     CaptureState state;
     const auto cpu = CpuCameraPipeline(config).CaptureMeasured(state, 0.0, cpuRate);
@@ -487,7 +382,7 @@ TEST_F(CameraGpuTest, BayerMeasuredRateProducesOneRawNumberPerPixel) {
             << "Bayer pixel " << i;
 }
 
-TEST_F(CameraGpuTest, BayerBlursEachLatentChannelBeforeChoosingItsCfaFilter) {
+TEST_P(CameraGpuTest, BayerBlursEachLatentChannelBeforeChoosingItsCfaFilter) {
     auto bayer = CameraConfigFor(5, 5);
     bayer.device.cfa = CfaPattern::RGGB;
     const auto baseChannel = bayer.device.channels.front();
@@ -509,15 +404,15 @@ TEST_F(CameraGpuTest, BayerBlursEachLatentChannelBeforeChoosingItsCfaFilter) {
     // green and blue physical pixels.
     for (u32 channel = 0; channel < 3; ++channel)
         bayerRgba[(2 * 5 + 2) * 4 + channel] = 100000.0f;
-    auto bayerInput = UploadMeasurement(Device(), 5, 5, bayerRgba);
+    auto bayerInput = UploadMeasurement(Gpu(), 5, 5, bayerRgba);
     ASSERT_NE(bayerInput, nullptr);
-    auto bayerCreated = GpuCameraPipeline::Create(GpuDevice(), 5, 5);
+    auto bayerCreated = GpuCameraPipeline::Create(Gpu(), 5, 5);
     ASSERT_TRUE(bayerCreated.has_value());
     auto bayerGpu = std::move(bayerCreated.value());
     ASSERT_TRUE(bayerGpu->Configure(bayer).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *bayerGpu, *bayerInput, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *bayerGpu, *bayerInput, 0, 0.0).has_value());
     const auto bayerExpected =
-        ReadFloat(Device(), bayerGpu->GetOutputs().expectedElectrons, 5, 5);
+        ReadFloat(Gpu(), bayerGpu->GetOutputs().expectedElectrons, 5, 5);
     ASSERT_EQ(bayerExpected.size(), 5u * 5u * 4u);
     EXPECT_GT(bayerExpected[(2 * 5 + 3) * 4], 1.0f); // G neighbor.
     EXPECT_GT(bayerExpected[(3 * 5 + 3) * 4], 1.0f); // B diagonal.
@@ -527,15 +422,15 @@ TEST_F(CameraGpuTest, BayerBlursEachLatentChannelBeforeChoosingItsCfaFilter) {
     mono.optics.psfSigmaPixelsOverride = 1.0;
     std::vector<f32> monoRgba(5 * 5 * 4, 0.0f);
     monoRgba[(2 * 5 + 2) * 4] = 100000.0f;
-    auto monoInput = UploadMeasurement(Device(), 5, 5, monoRgba);
+    auto monoInput = UploadMeasurement(Gpu(), 5, 5, monoRgba);
     ASSERT_NE(monoInput, nullptr);
-    auto monoCreated = GpuCameraPipeline::Create(GpuDevice(), 5, 5);
+    auto monoCreated = GpuCameraPipeline::Create(Gpu(), 5, 5);
     ASSERT_TRUE(monoCreated.has_value());
     auto monoGpu = std::move(monoCreated.value());
     ASSERT_TRUE(monoGpu->Configure(mono).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *monoGpu, *monoInput, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *monoGpu, *monoInput, 0, 0.0).has_value());
     const auto monoExpected =
-        ReadFloat(Device(), monoGpu->GetOutputs().expectedElectrons, 5, 5);
+        ReadFloat(Gpu(), monoGpu->GetOutputs().expectedElectrons, 5, 5);
     ASSERT_EQ(monoExpected.size(), bayerExpected.size());
     for (size_t pixel = 0; pixel < 25; ++pixel)
         EXPECT_NEAR(bayerExpected[pixel * 4], monoExpected[pixel * 4],
@@ -543,7 +438,7 @@ TEST_F(CameraGpuTest, BayerBlursEachLatentChannelBeforeChoosingItsCfaFilter) {
             << "pixel " << pixel;
 }
 
-TEST_F(CameraGpuTest, ThreeDeviceChannelsHaveIndependentRawComponents) {
+TEST_P(CameraGpuTest, ThreeDeviceChannelsHaveIndependentRawComponents) {
     auto config = CameraConfigFor(2, 1);
     config.device.cfa = CfaPattern::MultiChannel;
     const auto baseChannel = config.device.channels.front();
@@ -556,16 +451,16 @@ TEST_F(CameraGpuTest, ThreeDeviceChannelsHaveIndependentRawComponents) {
                     5000.0f, 7000.0f, 11000.0f};
     std::vector<f32> rgba = {1000.0f, 2000.0f, 3000.0f, 0.0f,
                              5000.0f, 7000.0f, 11000.0f, 0.0f};
-    auto input = UploadMeasurement(Device(), 2, 1, rgba);
+    auto input = UploadMeasurement(Gpu(), 2, 1, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), 2, 1);
+    auto created = GpuCameraPipeline::Create(Gpu(), 2, 1);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 0, 0.0).has_value());
-    const auto gpuRaw = ReadFloat(Device(), pipeline->GetOutputs().rawDn, 2, 1);
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
+    const auto gpuRaw = ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, 2, 1);
     const auto gpuExpected =
-        ReadFloat(Device(), pipeline->GetOutputs().expectedElectrons, 2, 1);
+        ReadFloat(Gpu(), pipeline->GetOutputs().expectedElectrons, 2, 1);
     ASSERT_EQ(gpuRaw.size(), 8u);
     ASSERT_EQ(gpuExpected.size(), 8u);
     CaptureState state;
@@ -584,7 +479,7 @@ TEST_F(CameraGpuTest, ThreeDeviceChannelsHaveIndependentRawComponents) {
         }
 }
 
-TEST_F(CameraGpuTest, MultiChannelNoiseKeysSeparateChannelsAndFixPatternOverTime) {
+TEST_P(CameraGpuTest, MultiChannelNoiseKeysSeparateChannelsAndFixPatternOverTime) {
     auto config = CameraConfigFor(64, 64);
     config.device.cfa = CfaPattern::MultiChannel;
     const auto baseChannel = config.device.channels.front();
@@ -597,14 +492,14 @@ TEST_F(CameraGpuTest, MultiChannelNoiseKeysSeparateChannelsAndFixPatternOverTime
     for (size_t pixel = 0; pixel < 64u * 64u; ++pixel)
         for (u32 channel = 0; channel < 3; ++channel)
             rgba[pixel * 4 + channel] = 10000.0f; // 100 e- each.
-    auto input = UploadMeasurement(Device(), 64, 64, rgba);
+    auto input = UploadMeasurement(Gpu(), 64, 64, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), 64, 64);
+    auto created = GpuCameraPipeline::Create(Gpu(), 64, 64);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 0, 0.0).has_value());
-    const auto shot = ReadFloat(Device(), pipeline->GetOutputs().rawDn, 64, 64);
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
+    const auto shot = ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, 64, 64);
     ASSERT_EQ(shot.size(), 64u * 64u * 4u);
     size_t sameShot = 0;
     for (size_t pixel = 0; pixel < 64u * 64u; ++pixel)
@@ -620,17 +515,17 @@ TEST_F(CameraGpuTest, MultiChannelNoiseKeysSeparateChannelsAndFixPatternOverTime
     for (size_t pixel = 0; pixel < 64u * 64u; ++pixel)
         for (u32 channel = 0; channel < 3; ++channel)
             brightRgba[pixel * 4 + channel] = 100000.0f; // 1000 e-.
-    auto brightInput = UploadMeasurement(Device(), 64, 64, brightRgba);
+    auto brightInput = UploadMeasurement(Gpu(), 64, 64, brightRgba);
     ASSERT_NE(brightInput, nullptr);
-    auto fixedCreated = GpuCameraPipeline::Create(GpuDevice(), 64, 64);
+    auto fixedCreated = GpuCameraPipeline::Create(Gpu(), 64, 64);
     ASSERT_TRUE(fixedCreated.has_value());
     auto fixed = std::move(fixedCreated.value());
     ASSERT_TRUE(fixed->Configure(config).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *fixed, *brightInput, 0, 0.0).has_value());
-    const auto first = ReadFloat(Device(), fixed->GetOutputs().rawDn, 64, 64);
+    ASSERT_TRUE(RecordCamera(Gpu(), *fixed, *brightInput, 0, 0.0).has_value());
+    const auto first = ReadFloat(Gpu(), fixed->GetOutputs().rawDn, 64, 64);
     ASSERT_EQ(first.size(), shot.size());
-    ASSERT_TRUE(RecordCamera(Device(), *fixed, *brightInput, 1, 0.1).has_value());
-    const auto second = ReadFloat(Device(), fixed->GetOutputs().rawDn, 64, 64);
+    ASSERT_TRUE(RecordCamera(Gpu(), *fixed, *brightInput, 1, 0.1).has_value());
+    const auto second = ReadFloat(Gpu(), fixed->GetOutputs().rawDn, 64, 64);
     ASSERT_EQ(second.size(), first.size());
     size_t differentChannels = 0;
     for (size_t pixel = 0; pixel < 64u * 64u; ++pixel) {
@@ -643,15 +538,15 @@ TEST_F(CameraGpuTest, MultiChannelNoiseKeysSeparateChannelsAndFixPatternOverTime
     EXPECT_GT(differentChannels, 3u * 64u * 64u / 4u);
 }
 
-TEST_F(CameraGpuTest, GpuShotNoiseHasExpectedMeanVarianceAndLowCountZeroMass) {
+TEST_P(CameraGpuTest, GpuShotNoiseHasExpectedMeanVarianceAndLowCountZeroMass) {
     auto config = CameraConfigFor(64, 64);
     config.quality.noiseFree = false;
     const auto run = [&](f32 rate, u64 capture) {
         std::vector<f32> rgba(64 * 64 * 4, 0.0f);
         for (size_t i = 0; i < 64u * 64u; ++i) rgba[i * 4] = rate;
-        auto input = UploadMeasurement(Device(), 64, 64, rgba);
+        auto input = UploadMeasurement(Gpu(), 64, 64, rgba);
         EXPECT_NE(input, nullptr);
-        auto created = GpuCameraPipeline::Create(GpuDevice(), 64, 64);
+        auto created = GpuCameraPipeline::Create(Gpu(), 64, 64);
         EXPECT_TRUE(created.has_value());
         if (!input || !created) return std::vector<f32>{};
         auto pipeline = std::move(created.value());
@@ -659,10 +554,10 @@ TEST_F(CameraGpuTest, GpuShotNoiseHasExpectedMeanVarianceAndLowCountZeroMass) {
         EXPECT_TRUE(configured.has_value());
         if (!configured) return std::vector<f32>{};
         const auto recorded = RecordCamera(
-            Device(), *pipeline, *input, capture, 0.0);
+            Gpu(), *pipeline, *input, capture, 0.0);
         EXPECT_TRUE(recorded.has_value());
         if (!recorded) return std::vector<f32>{};
-        return ReadFloat(Device(), pipeline->GetOutputs().rawDn, 64, 64);
+        return ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, 64, 64);
     };
     const auto bright = run(10000.0f, 0);
     ASSERT_EQ(bright.size(), 64u * 64u * 4u);
@@ -678,16 +573,16 @@ TEST_F(CameraGpuTest, GpuShotNoiseHasExpectedMeanVarianceAndLowCountZeroMass) {
                 std::exp(-1.0), 0.03);
 }
 
-TEST_F(CameraGpuTest, PoissonHandlesNearlyZeroMeanAndItsExactNormalBoundary) {
+TEST_P(CameraGpuTest, PoissonHandlesNearlyZeroMeanAndItsExactNormalBoundary) {
     auto config = CameraConfigFor(64, 64);
     config.quality.noiseFree = false;
     const auto run = [&](f32 rate, u64 capture) {
         std::vector<f32> rgba(64u * 64u * 4u, 0.0f);
         for (size_t pixel = 0; pixel < 64u * 64u; ++pixel)
             rgba[pixel * 4] = rate;
-        auto input = UploadMeasurement(Device(), 64, 64, rgba);
+        auto input = UploadMeasurement(Gpu(), 64, 64, rgba);
         EXPECT_NE(input, nullptr);
-        auto created = GpuCameraPipeline::Create(GpuDevice(), 64, 64);
+        auto created = GpuCameraPipeline::Create(Gpu(), 64, 64);
         EXPECT_TRUE(created.has_value());
         if (!input || !created) return std::vector<f32>{};
         auto pipeline = std::move(created.value());
@@ -695,10 +590,10 @@ TEST_F(CameraGpuTest, PoissonHandlesNearlyZeroMeanAndItsExactNormalBoundary) {
         EXPECT_TRUE(configured.has_value());
         if (!configured) return std::vector<f32>{};
         const auto recorded = RecordCamera(
-            Device(), *pipeline, *input, capture, 0.0);
+            Gpu(), *pipeline, *input, capture, 0.0);
         EXPECT_TRUE(recorded.has_value());
         if (!recorded) return std::vector<f32>{};
-        return ReadFloat(Device(), pipeline->GetOutputs().rawDn, 64, 64);
+        return ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, 64, 64);
     };
     const auto dark = run(0.0f, 0);
     const auto nearlyDark = run(1e-8f, 1); // mu = 1e-10 e-.
@@ -720,27 +615,27 @@ TEST_F(CameraGpuTest, PoissonHandlesNearlyZeroMeanAndItsExactNormalBoundary) {
     }
 }
 
-TEST_F(CameraGpuTest, HighCountNormalApproximationMatchesPoissonMoments) {
+TEST_P(CameraGpuTest, HighCountNormalApproximationMatchesPoissonMoments) {
     auto config = CameraConfigFor(256, 256);
     config.quality.noiseFree = false;
     std::vector<f32> rgba(256u * 256u * 4u, 0.0f);
     for (size_t pixel = 0; pixel < 256u * 256u; ++pixel)
         rgba[pixel * 4] = 1e6f; // exposure 0.01 s -> 10000 expected e-.
-    auto input = UploadMeasurement(Device(), 256, 256, rgba);
+    auto input = UploadMeasurement(Gpu(), 256, 256, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), 256, 256);
+    auto created = GpuCameraPipeline::Create(Gpu(), 256, 256);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 0, 0.0).has_value());
-    const auto raw = ReadFloat(Device(), pipeline->GetOutputs().rawDn, 256, 256);
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
+    const auto raw = ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, 256, 256);
     ASSERT_EQ(raw.size(), 256u * 256u * 4u);
     const auto [mean, variance] = RedMeanVariance(raw);
     EXPECT_NEAR(mean, 10000.0, 3.0);
     EXPECT_NEAR(variance, 10000.0, 250.0);
 }
 
-TEST_F(CameraGpuTest, FixedPatternIsStableAndIndependentCalibrationActsOnCorrected) {
+TEST_P(CameraGpuTest, FixedPatternIsStableAndIndependentCalibrationActsOnCorrected) {
     auto config = CameraConfigFor(64, 64);
     config.quality.noiseFree = false;
     config.photon.enableShotNoise = false;
@@ -750,17 +645,17 @@ TEST_F(CameraGpuTest, FixedPatternIsStableAndIndependentCalibrationActsOnCorrect
     config.photon.prnuSigma = 0.05;
     std::vector<f32> rgba(64 * 64 * 4, 0.0f);
     for (size_t i = 0; i < 64u * 64u; ++i) rgba[i * 4] = 100000.0f;
-    auto input = UploadMeasurement(Device(), 64, 64, rgba);
+    auto input = UploadMeasurement(Gpu(), 64, 64, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), 64, 64);
+    auto created = GpuCameraPipeline::Create(Gpu(), 64, 64);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 0, 0.0).has_value());
-    const auto first = ReadFloat(Device(), pipeline->GetOutputs().rawDn, 64, 64);
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
+    const auto first = ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, 64, 64);
     ASSERT_EQ(first.size(), 64u * 64u * 4u);
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 1, 0.1).has_value());
-    const auto second = ReadFloat(Device(), pipeline->GetOutputs().rawDn, 64, 64);
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 1, 0.1).has_value());
+    const auto second = ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, 64, 64);
     ASSERT_EQ(second.size(), first.size());
     for (size_t pixel = 0; pixel < 64u * 64u; ++pixel)
         EXPECT_FLOAT_EQ(first[pixel * 4], second[pixel * 4]);
@@ -772,17 +667,17 @@ TEST_F(CameraGpuTest, FixedPatternIsStableAndIndependentCalibrationActsOnCorrect
     calibrated.photon.nucOffsetElectronsMap = {0.0, 10.0};
     std::vector<f32> calibratedRgba = {10000.0f, 0.0f, 0.0f, 0.0f,
                                         10000.0f, 0.0f, 0.0f, 0.0f};
-    auto calibratedInput = UploadMeasurement(Device(), 2, 1, calibratedRgba);
+    auto calibratedInput = UploadMeasurement(Gpu(), 2, 1, calibratedRgba);
     ASSERT_NE(calibratedInput, nullptr);
-    auto calibratedCreated = GpuCameraPipeline::Create(GpuDevice(), 2, 1);
+    auto calibratedCreated = GpuCameraPipeline::Create(Gpu(), 2, 1);
     ASSERT_TRUE(calibratedCreated.has_value());
     auto calibratedGpu = std::move(calibratedCreated.value());
     ASSERT_TRUE(calibratedGpu->Configure(calibrated).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *calibratedGpu,
+    ASSERT_TRUE(RecordCamera(Gpu(), *calibratedGpu,
                              *calibratedInput, 0, 0.0).has_value());
-    const auto gpuRaw = ReadFloat(Device(), calibratedGpu->GetOutputs().rawDn, 2, 1);
+    const auto gpuRaw = ReadFloat(Gpu(), calibratedGpu->GetOutputs().rawDn, 2, 1);
     const auto gpuCorrected = ReadFloat(
-        Device(), calibratedGpu->GetOutputs().corrected, 2, 1);
+        Gpu(), calibratedGpu->GetOutputs().corrected, 2, 1);
     ASSERT_EQ(gpuRaw.size(), 8u);
     ASSERT_EQ(gpuCorrected.size(), 8u);
     Image cpuRate(2, 1, 1);
@@ -801,21 +696,21 @@ TEST_F(CameraGpuTest, FixedPatternIsStableAndIndependentCalibrationActsOnCorrect
     EXPECT_NEAR(gpuCorrected[4], 60.0, 1.0);
 }
 
-TEST_F(CameraGpuTest, ThermalHistoryAndNetdBandwidthMatchCpuAndStatistics) {
+TEST_P(CameraGpuTest, ThermalHistoryAndNetdBandwidthMatchCpuAndStatistics) {
     auto config = ThermalConfigFor(1, 1);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), 1, 1);
+    auto created = GpuCameraPipeline::Create(Gpu(), 1, 1);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
-    auto input = UploadMeasurement(Device(), 1, 1,
+    auto input = UploadMeasurement(Gpu(), 1, 1,
                                    {0.0f, 0.0f, 0.0f, 0.0f});
     const f32 power = 1.0e-9f;
     ASSERT_NE(input, nullptr);
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 0, 0.0).has_value());
-    ASSERT_TRUE(UpdateMeasurement(Device(), *input, 1, 1,
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
+    ASSERT_TRUE(UpdateMeasurement(Gpu(), *input, 1, 1,
                                   {power, 0.0f, 0.0f, 0.0f}));
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 1, 0.008).has_value());
-    const auto gpuRaw = ReadFloat(Device(), pipeline->GetOutputs().rawDn, 1, 1);
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 1, 0.008).has_value());
+    const auto gpuRaw = ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, 1, 1);
     ASSERT_EQ(gpuRaw.size(), 4u);
     Image darkRate(1, 1, 1);
     Image warmRate(1, 1, 1);
@@ -842,19 +737,19 @@ TEST_F(CameraGpuTest, ThermalHistoryAndNetdBandwidthMatchCpuAndStatistics) {
         std::vector<f32> rgba(64u * 64u * 4u, 0.0f);
         for (size_t i = 0; i < 64u * 64u; ++i)
             rgba[i * 4] = 1.0151679938e-9f; // 300 K blackbody through 8-14 um.
-        auto input = UploadMeasurement(Device(), 64, 64, rgba);
+        auto input = UploadMeasurement(Gpu(), 64, 64, rgba);
         EXPECT_NE(input, nullptr);
-        auto gpuCreated = GpuCameraPipeline::Create(GpuDevice(), 64, 64);
+        auto gpuCreated = GpuCameraPipeline::Create(Gpu(), 64, 64);
         EXPECT_TRUE(gpuCreated.has_value());
         if (!input || !gpuCreated) return std::vector<f32>{};
         auto gpu = std::move(gpuCreated.value());
         const auto configured = gpu->Configure(settings);
         EXPECT_TRUE(configured.has_value());
         if (!configured) return std::vector<f32>{};
-        const auto recorded = RecordCamera(Device(), *gpu, *input, 0, 0.0);
+        const auto recorded = RecordCamera(Gpu(), *gpu, *input, 0, 0.0);
         EXPECT_TRUE(recorded.has_value());
         if (!recorded) return std::vector<f32>{};
-        return ReadFloat(Device(), gpu->GetOutputs().rawDn, 64, 64);
+        return ReadFloat(Gpu(), gpu->GetOutputs().rawDn, 64, 64);
     };
     const auto reference = run(noisy);
     ASSERT_EQ(reference.size(), 64u * 64u * 4u);
@@ -868,38 +763,37 @@ TEST_F(CameraGpuTest, ThermalHistoryAndNetdBandwidthMatchCpuAndStatistics) {
                 0.25, 0.08);
 }
 
-TEST_F(CameraGpuTest, SameAcquisitionRecomputesThermalStateFromItsPreCaptureHistory) {
+TEST_P(CameraGpuTest, SameAcquisitionRecomputesThermalStateFromItsPreCaptureHistory) {
     const auto config = ThermalConfigFor(1, 1);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), 1, 1);
+    auto created = GpuCameraPipeline::Create(Gpu(), 1, 1);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
-    auto input = UploadMeasurement(Device(), 1, 1,
+    auto input = UploadMeasurement(Gpu(), 1, 1,
                                    {0.0f, 0.0f, 0.0f, 0.0f});
     ASSERT_NE(input, nullptr);
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 0, 0.0).has_value());
-    ASSERT_TRUE(UpdateMeasurement(Device(), *input, 1, 1,
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
+    ASSERT_TRUE(UpdateMeasurement(Gpu(), *input, 1, 1,
                                   {1e-9f, 0.0f, 0.0f, 0.0f}));
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 1, 0.008).has_value());
-    ASSERT_TRUE(UpdateMeasurement(Device(), *input, 1, 1,
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 1, 0.008).has_value());
+    ASSERT_TRUE(UpdateMeasurement(Gpu(), *input, 1, 1,
                                   {2e-9f, 0.0f, 0.0f, 0.0f}));
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 1, 0.008).has_value());
-    const auto reprocessed = ReadFloat(Device(), pipeline->GetOutputs().rawDn, 1, 1);
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 1, 0.008).has_value());
+    const auto reprocessed = ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, 1, 1);
     ASSERT_EQ(reprocessed.size(), 4u);
     Result<void, String> readoutReplay = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
         readoutReplay = pipeline->RecordReadoutReprocess(list, config);
     });
     ASSERT_TRUE(readoutReplay.has_value()) << readoutReplay.error();
-    EXPECT_EQ(ReadFloat(Device(), pipeline->GetOutputs().rawDn, 1, 1), reprocessed);
+    EXPECT_EQ(ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, 1, 1), reprocessed);
     const double firstStep = 2e-9 * (1.0 - std::exp(-1.0));
     EXPECT_NEAR(reprocessed[0], firstStep * 1e13, 1.0);
 
-    ASSERT_TRUE(UpdateMeasurement(Device(), *input, 1, 1,
+    ASSERT_TRUE(UpdateMeasurement(Gpu(), *input, 1, 1,
                                   {1e-9f, 0.0f, 0.0f, 0.0f}));
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 2, 0.016).has_value());
-    const auto later = ReadFloat(Device(), pipeline->GetOutputs().rawDn, 1, 1);
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 2, 0.016).has_value());
+    const auto later = ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, 1, 1);
     ASSERT_EQ(later.size(), 4u);
     Image zero(1, 1, 1);
     Image high(1, 1, 1);
@@ -915,40 +809,39 @@ TEST_F(CameraGpuTest, SameAcquisitionRecomputesThermalStateFromItsPreCaptureHist
     EXPECT_NEAR(later[0], cpuLater.value().rawDn->image.data[0], 1.0);
 }
 
-TEST_F(CameraGpuTest, ReadoutReprocessMatchesFreshReadoutOnSameMeasurement) {
+TEST_P(CameraGpuTest, ReadoutReprocessMatchesFreshReadoutOnSameMeasurement) {
     auto original = CameraConfigFor(4, 4);
     std::vector<f32> rgba(4u * 4u * 4u, 0.0f);
     for (u32 pixel = 0; pixel < 16; ++pixel)
         rgba[pixel * 4] = 10000.0f + static_cast<f32>(pixel) * 200.0f;
-    auto input = UploadMeasurement(Device(), 4, 4, rgba);
+    auto input = UploadMeasurement(Gpu(), 4, 4, rgba);
     ASSERT_NE(input, nullptr);
 
-    auto first = GpuCameraPipeline::Create(GpuDevice(), 4, 4);
+    auto first = GpuCameraPipeline::Create(Gpu(), 4, 4);
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(first.value()->Configure(original).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *first.value(), *input, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *first.value(), *input, 0, 0.0).has_value());
 
     auto edited = original;
     edited.readout.blackLevelDn += 128.0;
     Result<void, String> reapplied = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
         reapplied = first.value()->RecordReadoutReprocess(list, edited);
     });
     ASSERT_TRUE(reapplied.has_value()) << reapplied.error();
-    const auto replayRaw = ReadFloat(Device(), first.value()->GetOutputs().rawDn, 4, 4);
-    const auto replayDisplay = ReadFloat(Device(), first.value()->GetOutputs().display, 4, 4);
+    const auto replayRaw = ReadFloat(Gpu(), first.value()->GetOutputs().rawDn, 4, 4);
+    const auto replayDisplay = ReadFloat(Gpu(), first.value()->GetOutputs().display, 4, 4);
 
-    auto fresh = GpuCameraPipeline::Create(GpuDevice(), 4, 4);
+    auto fresh = GpuCameraPipeline::Create(Gpu(), 4, 4);
     ASSERT_TRUE(fresh.has_value());
     ASSERT_TRUE(fresh.value()->Configure(edited).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *fresh.value(), *input, 0, 0.0).has_value());
-    EXPECT_EQ(replayRaw, ReadFloat(Device(), fresh.value()->GetOutputs().rawDn, 4, 4));
+    ASSERT_TRUE(RecordCamera(Gpu(), *fresh.value(), *input, 0, 0.0).has_value());
+    EXPECT_EQ(replayRaw, ReadFloat(Gpu(), fresh.value()->GetOutputs().rawDn, 4, 4));
     EXPECT_EQ(replayDisplay,
-              ReadFloat(Device(), fresh.value()->GetOutputs().display, 4, 4));
+              ReadFloat(Gpu(), fresh.value()->GetOutputs().display, 4, 4));
 }
 
-TEST_F(CameraGpuTest, PreviewPixelCentersChoosePhysicalNucPixel) {
+TEST_P(CameraGpuTest, PreviewPixelCentersChoosePhysicalNucPixel) {
     auto config = CameraConfigFor(2, 1); // Physical array remains 2x1.
     config.quality.backend = ProcessingBackend::GpuPreview;
     config.photon.applyNuc = true;
@@ -956,16 +849,16 @@ TEST_F(CameraGpuTest, PreviewPixelCentersChoosePhysicalNucPixel) {
     std::vector<f32> rgba = {10000.0f, 0.0f, 0.0f, 0.0f,
                              10000.0f, 0.0f, 0.0f, 0.0f,
                              10000.0f, 0.0f, 0.0f, 0.0f};
-    auto input = UploadMeasurement(Device(), 3, 1, rgba);
+    auto input = UploadMeasurement(Gpu(), 3, 1, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), 3, 1);
+    auto created = GpuCameraPipeline::Create(Gpu(), 3, 1);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 0, 0.0).has_value());
-    const auto raw = ReadFloat(Device(), pipeline->GetOutputs().rawDn, 3, 1);
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
+    const auto raw = ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, 3, 1);
     const auto corrected =
-        ReadFloat(Device(), pipeline->GetOutputs().corrected, 3, 1);
+        ReadFloat(Gpu(), pipeline->GetOutputs().corrected, 3, 1);
     ASSERT_EQ(raw.size(), 12u);
     ASSERT_EQ(corrected.size(), 12u);
     // Centers x=(0.5,1.5,2.5) in a 3-column preview map to physical
@@ -998,16 +891,16 @@ constexpr u32 kSensorSize = 16;
 // acquisition per period, so the clock steps in these tests are multiples of it.
 constexpr f64 kFixtureFramePeriod = 0.1;
 
-class CameraSchedulerGpuTest : public quantiloom::testing::VulkanDeviceTest {
+class CameraSchedulerGpuTest : public quantiloom::testing::GpuDeviceTest {
 protected:
     void SetUp() override {
-        VulkanDeviceTest::SetUp();
+        GpuDeviceTest::SetUp();
         if (::testing::Test::IsSkipped()) return;
 
         testDir = std::filesystem::temp_directory_path() / "quantiloom_camera_scheduler";
         std::filesystem::create_directories(testDir);
 
-        auto* shared = quantiloom::testing::SharedVulkanDevice();
+        auto* shared = quantiloom::testing::SharedGpuDevice(Backend());
         ASSERT_NE(shared, nullptr);
 
         ExternalRenderContext::InitParams params{};
@@ -1020,10 +913,11 @@ protected:
         ASSERT_TRUE(created.has_value()) << created.error();
         context = std::move(created.value());
 
-        target = std::make_unique<GpuImage>(
-            shared->GetAllocator(), shared->GetDevice(), kViewportSize, kViewportSize,
-            VK_FORMAT_B8G8R8A8_SRGB,
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        target = CreateTextureOrThrow(
+            *shared, gpu::TextureDesc{.width = kViewportSize, .height = kViewportSize,
+                                      .format = gpu::Format::BGRA8Srgb,
+                                      .usage = gpu::TextureUsage::TransferDst |
+                                               gpu::TextureUsage::Sampled});
     }
 
     void TearDown() override {
@@ -1031,7 +925,7 @@ protected:
         context.reset();
         std::error_code ignored;
         std::filesystem::remove_all(testDir, ignored);
-        VulkanDeviceTest::TearDown();
+        GpuDeviceTest::TearDown();
     }
 
     void ApplyScene(const std::array<f64, 3>& albedo = {0.8, 0.8, 0.8}) {
@@ -1140,17 +1034,19 @@ protected:
     }
 
     void DrawFrame() {
-        CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-            context->RenderFrame(vk::Commands(cmd),
-                                 vk::Target(target->GetImage(), GpuTargetFormat::Bgra8Srgb, kViewportSize, kViewportSize,
-                                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
+        Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
+            context->RenderFrame(quantiloom::testing::GpuRecording(list),
+                                 quantiloom::testing::GpuTarget(Backend(), target->Ref(), GpuTargetFormat::Bgra8Srgb,
+                                                                quantiloom::testing::kHostLayoutUndefined,
+                                                                quantiloom::testing::kHostLayoutGeneral));
         });
     }
 
     std::filesystem::path testDir;
     std::unique_ptr<ExternalRenderContext> context;
-    std::unique_ptr<GpuImage> target;
+    std::unique_ptr<gpu::Texture> target;
 };
+QL_INSTANTIATE_GPU_SUITE(CameraSchedulerGpuTest);
 
 bool CornellBoxAvailable() {
     const std::filesystem::path root(QUANTILOOM_SOURCE_ROOT);
@@ -1160,7 +1056,7 @@ bool CornellBoxAvailable() {
 
 } // namespace
 
-TEST_F(CameraSchedulerGpuTest, ScheduledFramesAdvanceAcquisitionIndex) {
+TEST_P(CameraSchedulerGpuTest, ScheduledFramesAdvanceAcquisitionIndex) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     const auto enabled = EnableCamera();
@@ -1197,7 +1093,7 @@ TEST_F(CameraSchedulerGpuTest, ScheduledFramesAdvanceAcquisitionIndex) {
         EXPECT_TRUE(std::isfinite(value));
 }
 
-TEST_F(CameraSchedulerGpuTest, AcquisitionsFollowTheConfiguredFramePeriod) {
+TEST_P(CameraSchedulerGpuTest, AcquisitionsFollowTheConfiguredFramePeriod) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     auto config = CameraConfigFor(kSensorSize, kSensorSize);
@@ -1234,7 +1130,7 @@ TEST_F(CameraSchedulerGpuTest, AcquisitionsFollowTheConfiguredFramePeriod) {
     EXPECT_DOUBLE_EQ(status.frameTimeSeconds, 1.0);
 }
 
-TEST_F(CameraSchedulerGpuTest, RedrawWithoutClockAdvanceDoesNotAdvanceAcquisition) {
+TEST_P(CameraSchedulerGpuTest, RedrawWithoutClockAdvanceDoesNotAdvanceAcquisition) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     const auto enabled = EnableCamera();
@@ -1263,7 +1159,7 @@ TEST_F(CameraSchedulerGpuTest, RedrawWithoutClockAdvanceDoesNotAdvanceAcquisitio
 // preset's manual exposure stayed on screen however wrong it was. On a still
 // clock the viewport now commits a fresh acquisition per frame until the loop
 // settles, then converges the last one; the settling frames are not samples.
-TEST_F(CameraSchedulerGpuTest, AutoExposureSettlesOnAStillClock) {
+TEST_P(CameraSchedulerGpuTest, AutoExposureSettlesOnAStillClock) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     auto config = CameraConfigFor(kSensorSize, kSensorSize);
@@ -1304,7 +1200,7 @@ TEST_F(CameraSchedulerGpuTest, AutoExposureSettlesOnAStillClock) {
     EXPECT_EQ(context->GetAccumulatedSamples(), samplesAtFirst + 3u);
 }
 
-TEST_F(CameraSchedulerGpuTest, HistoryEpochResetsOnScrubBackAndHostReset) {
+TEST_P(CameraSchedulerGpuTest, HistoryEpochResetsOnScrubBackAndHostReset) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     const auto enabled = EnableCamera();
@@ -1356,7 +1252,7 @@ TEST_F(CameraSchedulerGpuTest, HistoryEpochResetsOnScrubBackAndHostReset) {
 // single-tick advances on the same frame grid as the offline CPU reference.
 // ---------------------------------------------------------------------------
 
-TEST_F(CameraGpuTest, CheckpointRestoreReplaysThermalHistoryBitIdentically) {
+TEST_P(CameraGpuTest, CheckpointRestoreReplaysThermalHistoryBitIdentically) {
     constexpr u32 kSize = 16;
     auto config = ThermalConfigFor(kSize, kSize);
     // Exercise the acquisition-keyed noise streams, not only the
@@ -1368,54 +1264,52 @@ TEST_F(CameraGpuTest, CheckpointRestoreReplaysThermalHistoryBitIdentically) {
     std::vector<f32> rgba(static_cast<size_t>(kSize) * kSize * 4, 0.0f);
     for (u32 pixel = 0; pixel < kSize * kSize; ++pixel)
         rgba[pixel * 4] = 2.5e-11f;
-    auto input = UploadMeasurement(Device(), kSize, kSize, rgba);
+    auto input = UploadMeasurement(Gpu(), kSize, kSize, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
+    auto created = GpuCameraPipeline::Create(Gpu(), kSize, kSize);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
 
     const auto readProducts = [&]() {
         return std::make_pair(
-            ReadFloat(Device(), pipeline->GetOutputs().rawDn, kSize, kSize),
-            ReadFloat(Device(), pipeline->GetOutputs().display, kSize, kSize));
+            ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, kSize, kSize),
+            ReadFloat(Gpu(), pipeline->GetOutputs().display, kSize, kSize));
     };
     const auto checkpointNow = [&]() {
         Result<GpuCameraPipeline::GpuCheckpoint, String> result =
             Result<GpuCameraPipeline::GpuCheckpoint, String>::Err(
             "checkpoint was not recorded");
-        CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-            auto list = gpu::vulkan::Wrap(cmd);
+        Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
             result = pipeline->RecordStateCheckpoint(list);
         });
         return result;
     };
 
     // Ticks 0 and 1, then the checkpoint at acquisition 1's exit.
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 0, 0.0).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 1, 0.1).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 1, 0.1).has_value());
     auto checkpoint = checkpointNow();
     ASSERT_TRUE(checkpoint.has_value()) << checkpoint.error();
     EXPECT_EQ(checkpoint.value().acquisitionIndex, 1u);
     EXPECT_TRUE(checkpoint.value().hasCapture);
 
     // The uninterrupted continuation: ticks 2 and 3.
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 2, 0.2).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 3, 0.3).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 2, 0.2).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 3, 0.3).has_value());
     const auto continuous = readProducts();
 
     // Restore rewinds to acquisition 1's exit; replaying 2 and 3 -- with a
     // same-tick re-record of 2 in between, the redraw/convergence case --
     // must reproduce the uninterrupted products exactly.
     Result<void, String> restored = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
         restored = pipeline->RestoreStateCheckpoint(checkpoint.value(), list);
     });
     ASSERT_TRUE(restored.has_value()) << restored.error();
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 2, 0.2).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 2, 0.2).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 3, 0.3).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 2, 0.2).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 2, 0.2).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 3, 0.3).has_value());
     const auto replayed = readProducts();
 
     ASSERT_EQ(replayed.first.size(), continuous.first.size());
@@ -1426,36 +1320,34 @@ TEST_F(CameraGpuTest, CheckpointRestoreReplaysThermalHistoryBitIdentically) {
                            continuous.second.begin()));
 
     // The restored state accepts the next tick like the uninterrupted run.
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 4, 0.4).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 4, 0.4).has_value());
     const auto after = readProducts();
     ASSERT_EQ(after.first.size(), continuous.first.size());
 
     // A checkpoint taken before any capture round-trips as the initial
     // condition: restore accepts acquisition 0 as the first capture again.
-    auto fresh = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
+    auto fresh = GpuCameraPipeline::Create(Gpu(), kSize, kSize);
     ASSERT_TRUE(fresh.has_value());
     ASSERT_TRUE(fresh.value()->Configure(config).has_value());
     Result<GpuCameraPipeline::GpuCheckpoint, String> freshCheckpoint =
         Result<GpuCameraPipeline::GpuCheckpoint, String>::Err(
         "checkpoint was not recorded");
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
         freshCheckpoint = fresh.value()->RecordStateCheckpoint(list);
     });
     ASSERT_TRUE(freshCheckpoint.has_value());
     EXPECT_FALSE(freshCheckpoint.value().hasCapture);
-    ASSERT_TRUE(RecordCamera(Device(), *fresh.value(), *input, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *fresh.value(), *input, 0, 0.0).has_value());
     Result<void, String> freshRestored = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
         freshRestored = fresh.value()->RestoreStateCheckpoint(*freshCheckpoint, list);
     });
     ASSERT_TRUE(freshRestored.has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *fresh.value(), *input, 0, 0.0).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *fresh.value(), *input, 1, 0.1).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *fresh.value(), *input, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *fresh.value(), *input, 1, 0.1).has_value());
 }
 
-TEST_F(CameraSchedulerGpuTest, CheckpointRestoreRewindsEpochAndReplaysIdentically) {
+TEST_P(CameraSchedulerGpuTest, CheckpointRestoreRewindsEpochAndReplaysIdentically) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     auto config = CameraConfigFor(kSensorSize, kSensorSize);
@@ -1506,7 +1398,7 @@ TEST_F(CameraSchedulerGpuTest, CheckpointRestoreRewindsEpochAndReplaysIdenticall
     ASSERT_FALSE(again.has_value());
 }
 
-TEST_F(CameraSchedulerGpuTest, WarmupAndAdvanceRunSyntheticAcquisitionsOnTheFrameGrid) {
+TEST_P(CameraSchedulerGpuTest, WarmupAndAdvanceRunSyntheticAcquisitionsOnTheFrameGrid) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     const auto enabled = EnableCamera();
@@ -1670,58 +1562,22 @@ void DynamicRasterizeLayer(const DynamicCameraFrame& camera,
     }
 }
 
-std::unique_ptr<GpuImage> UploadStrataImage(
-    VulkanContext& context, u32 width, u32 height, u32 layers, VkFormat format,
+std::unique_ptr<gpu::Texture> UploadStrataImage(
+    gpu::Device& device, u32 width, u32 height, u32 layers, gpu::Format format,
     const std::vector<f32>& texelData, u32 componentsPerTexel) {
-    auto image = std::make_unique<GpuImage>(
-        context.GetAllocator(), context.GetDevice(), width, height, format,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-            VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY, 1u, layers, 0, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
-    if (!image->IsValid() ||
-        texelData.size() != static_cast<size_t>(width) * height * layers *
+    auto image = CreateTextureOrThrow(
+        device, gpu::TextureDesc{.width = width, .height = height, .layers = layers,
+                                 .format = format,
+                                 .usage = gpu::TextureUsage::Storage |
+                                          gpu::TextureUsage::TransferDst |
+                                          gpu::TextureUsage::TransferSrc,
+                                 .dimension = gpu::TextureDimension::Tex2DArray});
+    if (texelData.size() != static_cast<size_t>(width) * height * layers *
                                 componentsPerTexel)
         return {};
-    const VkDeviceSize bytes = texelData.size() * sizeof(f32);
-    GpuBuffer staging(context.GetAllocator(), bytes,
-                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                      VMA_MEMORY_USAGE_CPU_TO_GPU);
-    if (!staging.IsValid()) return {};
-    staging.Upload(texelData.data(), bytes);
-    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        CommandHelper::TransitionImageLayout(
-            cmd, image->GetImage(), format, VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, layers);
-        for (u32 layer = 0; layer < layers; ++layer) {
-            VkBufferImageCopy region{};
-            region.bufferOffset = static_cast<VkDeviceSize>(layer) * width *
-                                  height * componentsPerTexel * sizeof(f32);
-            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.mipLevel = 0;
-            region.imageSubresource.baseArrayLayer = layer;
-            region.imageSubresource.layerCount = 1;
-            region.imageExtent = {width, height, 1};
-            vkCmdCopyBufferToImage(cmd, staging.GetHandle(), image->GetImage(),
-                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                                   &region);
-        }
-        VkImageMemoryBarrier ready{};
-        ready.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        ready.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                              VK_ACCESS_SHADER_WRITE_BIT;
-        ready.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        ready.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.image = image->GetImage();
-        ready.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        ready.subresourceRange.levelCount = 1;
-        ready.subresourceRange.layerCount = layers;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                             0, nullptr, 0, nullptr, 1, &ready);
-    });
+    quantiloom::testing::UploadTexture(device, image->Ref(), texelData.data(),
+                                       texelData.size() * sizeof(f32),
+                                       quantiloom::testing::UploadHandoff::ComputeReadWrite);
     return image;
 }
 
@@ -1863,10 +1719,10 @@ void WriteDynamicArtifacts(const std::filesystem::path& dir,
 }
 
 Result<void, String> RecordDynamicMeasurement(
-    VulkanContext& context, GpuCameraPipeline& pipeline,
-    const GpuImage& strataRate, const GpuImage& strataDepth,
+    gpu::Device& device, GpuCameraPipeline& pipeline,
+    const gpu::Texture& strataRate, const gpu::Texture& strataDepth,
     const DynamicSceneSpec& spec, u64 acquisitionIndex,
-    VkQueryPool timingPool) {
+    const gpu::TimestampPool* timingPool) {
     std::array<DynamicLayerCamera, kCameraTimeStrataMax> frames{};
     const u32 count = std::min<u32>(kDynamicStrata, kCameraTimeStrataMax);
     for (u32 k = 0; k < count; ++k) {
@@ -1882,8 +1738,8 @@ Result<void, String> RecordDynamicMeasurement(
                             static_cast<f32>(camera.timeSeconds), 0.0f};
     }
     DynamicExposureInput dynamic;
-    dynamic.strataRate = gpu::vulkan::Ref(strataRate);
-    dynamic.strataDepth = gpu::vulkan::Ref(strataDepth);
+    dynamic.strataRate = strataRate.Ref();
+    dynamic.strataDepth = strataDepth.Ref();
     dynamic.layerCameras = frames.data();
     dynamic.strataCount = count;
     dynamic.strataLayers = kDynamicStrata;
@@ -1892,11 +1748,13 @@ Result<void, String> RecordDynamicMeasurement(
     dynamic.rowDelaySeconds = spec.rowDelaySeconds;
     Result<void, String> status = Result<void, String>::Ok();
     GpuCameraPipeline::TimingQueries timing{
-        gpu::vulkan::Ref(timingPool, GpuCameraPipeline::kTimingQueryCount), 0u};
-    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+        timingPool != nullptr
+            ? timingPool->Ref()
+            : gpu::TimestampPoolRef{0, GpuCameraPipeline::kTimingQueryCount},
+        0u};
+    device.ExecuteImmediate([&](gpu::CommandList& list) {
         status = pipeline.RecordMeasurement(
-            list, gpu::vulkan::Ref(strataRate), acquisitionIndex,
+            list, strataRate.Ref(), acquisitionIndex,
             spec.t0, timing, dynamic);
     });
     return status;
@@ -1904,18 +1762,18 @@ Result<void, String> RecordDynamicMeasurement(
 
 } // namespace
 
-TEST_F(CameraGpuTest, StratifiedCompositorRejectsCountAboveImageLayers) {
+TEST_P(CameraGpuTest, StratifiedCompositorRejectsCountAboveImageLayers) {
     const auto spec = MakeDynamicSceneSpec();
     std::vector<f32> rateRgba, depth;
     RasterizeSpec(spec, rateRgba, depth);
-    auto strataRate = UploadStrataImage(Device(), kDynamicWidth, kDynamicHeight,
+    auto strataRate = UploadStrataImage(Gpu(), kDynamicWidth, kDynamicHeight,
                                         kDynamicStrata,
-                                        VK_FORMAT_R32G32B32A32_SFLOAT, rateRgba,
+                                        gpu::Format::RGBA32Float, rateRgba,
                                         4u);
-    auto strataDepth = UploadStrataImage(Device(), kDynamicWidth,
+    auto strataDepth = UploadStrataImage(Gpu(), kDynamicWidth,
                                          kDynamicHeight, kDynamicStrata,
-                                         VK_FORMAT_R32_SFLOAT, depth, 1u);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), kDynamicWidth,
+                                         gpu::Format::R32Float, depth, 1u);
+    auto created = GpuCameraPipeline::Create(Gpu(), kDynamicWidth,
                                              kDynamicHeight);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
@@ -1924,8 +1782,8 @@ TEST_F(CameraGpuTest, StratifiedCompositorRejectsCountAboveImageLayers) {
                     .has_value());
     std::array<DynamicLayerCamera, kCameraTimeStrataMax> frames{};
     DynamicExposureInput dynamic;
-    dynamic.strataRate = gpu::vulkan::Ref(*strataRate);
-    dynamic.strataDepth = gpu::vulkan::Ref(*strataDepth);
+    dynamic.strataRate = strataRate->Ref();
+    dynamic.strataDepth = strataDepth->Ref();
     dynamic.layerCameras = frames.data();
     dynamic.strataCount = kDynamicStrata;
     // The images carry kDynamicStrata layers; declaring one fewer must be
@@ -1933,29 +1791,28 @@ TEST_F(CameraGpuTest, StratifiedCompositorRejectsCountAboveImageLayers) {
     dynamic.strataLayers = kDynamicStrata - 1u;
     Result<void, String> status = Result<void, String>::Ok();
     GpuCameraPipeline::TimingQueries timing{};
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
-        status = pipeline->RecordMeasurement(list, gpu::vulkan::Ref(*strataRate), 0, spec.t0,
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
+        status = pipeline->RecordMeasurement(list, strataRate->Ref(), 0, spec.t0,
                                              timing, dynamic);
     });
     EXPECT_FALSE(status.has_value());
     EXPECT_NE(status.error().find("layer count"), std::string::npos);
 }
 
-TEST_F(CameraGpuTest, StratifiedCompositorMatchesAnchorsAndCountsDisocclusion) {
+TEST_P(CameraGpuTest, StratifiedCompositorMatchesAnchorsAndCountsDisocclusion) {
     const auto spec = MakeDynamicSceneSpec();
     std::vector<f32> rateRgba, depth;
     RasterizeSpec(spec, rateRgba, depth);
-    auto strataRate = UploadStrataImage(Device(), kDynamicWidth, kDynamicHeight,
+    auto strataRate = UploadStrataImage(Gpu(), kDynamicWidth, kDynamicHeight,
                                         kDynamicStrata,
-                                        VK_FORMAT_R32G32B32A32_SFLOAT, rateRgba,
+                                        gpu::Format::RGBA32Float, rateRgba,
                                         4u);
-    auto strataDepth = UploadStrataImage(Device(), kDynamicWidth,
+    auto strataDepth = UploadStrataImage(Gpu(), kDynamicWidth,
                                          kDynamicHeight, kDynamicStrata,
-                                         VK_FORMAT_R32_SFLOAT, depth, 1u);
+                                         gpu::Format::R32Float, depth, 1u);
     ASSERT_NE(strataRate, nullptr);
     ASSERT_NE(strataDepth, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), kDynamicWidth,
+    auto created = GpuCameraPipeline::Create(Gpu(), kDynamicWidth,
                                              kDynamicHeight);
     ASSERT_TRUE(created.has_value()) << created.error();
     auto pipeline = std::move(created.value());
@@ -1963,17 +1820,15 @@ TEST_F(CameraGpuTest, StratifiedCompositorMatchesAnchorsAndCountsDisocclusion) {
                                                           kDynamicHeight));
     ASSERT_TRUE(configured.has_value()) << configured.error();
 
-    VkQueryPool timingPool = VK_NULL_HANDLE;
-    VkQueryPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-    poolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-    poolInfo.queryCount = GpuCameraPipeline::kTimingQueryCount;
-    ASSERT_EQ(vkCreateQueryPool(Device().GetDevice(), &poolInfo, nullptr,
-                                &timingPool),
-              VK_SUCCESS);
+    auto createdPool =
+        Gpu().CreateTimestampPool(GpuCameraPipeline::kTimingQueryCount);
+    ASSERT_TRUE(createdPool.has_value()) << createdPool.error();
+    const std::unique_ptr<gpu::TimestampPool> timingPool =
+        std::move(createdPool.value());
 
     // One stratified acquisition over the synthetic scene.
     const auto recorded = RecordDynamicMeasurement(
-        Device(), *pipeline, *strataRate, *strataDepth, spec, 0u, timingPool);
+        Gpu(), *pipeline, *strataRate, *strataDepth, spec, 0u, timingPool.get());
     ASSERT_TRUE(recorded.has_value()) << recorded.error();
     const auto outputs = pipeline->GetOutputs();
     ASSERT_TRUE(outputs.compositedRate.IsValid());
@@ -1987,19 +1842,19 @@ TEST_F(CameraGpuTest, StratifiedCompositorMatchesAnchorsAndCountsDisocclusion) {
 
     // Timestamp stamps resolve after the synchronous record and stay ordered.
     std::array<u64, 14> stamps{};
-    EXPECT_EQ(vkGetQueryPoolResults(
-                  Device().GetDevice(), timingPool, 0,
-                  GpuCameraPipeline::kTimingQueryCount,
-                  stamps.size() * sizeof(u64), stamps.data(), 2 * sizeof(u64),
-                  VK_QUERY_RESULT_64_BIT |
-                      VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
-              VK_SUCCESS);
+    const auto resolved = timingPool->Resolve(
+        0, GpuCameraPipeline::kTimingQueryCount,
+        gpu::TimestampResolve::WithAvailability, stamps);
+    EXPECT_TRUE(resolved.has_value() &&
+                resolved.value() == gpu::ResolveStatus::Ready)
+        << (resolved.has_value() ? "timestamps not yet available"
+                                 : resolved.error());
     for (u32 i = 0; i < 7; ++i) {
         ASSERT_NE(stamps[2 * i + 1], 0u) << "stamp " << i;
         if (i > 0) EXPECT_GE(stamps[2 * i], stamps[2 * i - 2]);
     }
 
-    const auto globalComposite = ReadFloat(Device(), outputs.compositedRate,
+    const auto globalComposite = ReadFloat(Gpu(), outputs.compositedRate,
                                            kDynamicWidth, kDynamicHeight);
     ASSERT_EQ(globalComposite.size(),
               static_cast<size_t>(kDynamicWidth) * kDynamicHeight * 4u);
@@ -2010,12 +1865,12 @@ TEST_F(CameraGpuTest, StratifiedCompositorMatchesAnchorsAndCountsDisocclusion) {
     rollingSpec.rowDelaySeconds =
         spec.exposureSeconds / kDynamicHeight;
     const auto rollingRecorded = RecordDynamicMeasurement(
-        Device(), *pipeline, *strataRate, *strataDepth, rollingSpec, 1u,
-        timingPool);
+        Gpu(), *pipeline, *strataRate, *strataDepth, rollingSpec, 1u,
+        timingPool.get());
     ASSERT_TRUE(rollingRecorded.has_value()) << rollingRecorded.error();
     const auto rollingOutputs = pipeline->GetOutputs();
     const auto rollingComposite = ReadFloat(
-        Device(), rollingOutputs.compositedRate, kDynamicWidth,
+        Gpu(), rollingOutputs.compositedRate, kDynamicWidth,
         kDynamicHeight);
     double difference = 0.0;
     for (size_t i = 0; i < globalComposite.size(); ++i)
@@ -2030,12 +1885,12 @@ TEST_F(CameraGpuTest, StratifiedCompositorMatchesAnchorsAndCountsDisocclusion) {
     singleSpec.cameras.resize(1);
     singleSpec.cameras[0].timeSeconds = spec.t0;
     const auto singleRecorded = RecordDynamicMeasurement(
-        Device(), *pipeline, *strataRate, *strataDepth, singleSpec, 2u,
-        VK_NULL_HANDLE);
+        Gpu(), *pipeline, *strataRate, *strataDepth, singleSpec, 2u,
+        nullptr);
     ASSERT_TRUE(singleRecorded.has_value()) << singleRecorded.error();
     const auto singleOutputs = pipeline->GetOutputs();
     const auto singleComposite = ReadFloat(
-        Device(), singleOutputs.compositedRate, kDynamicWidth,
+        Gpu(), singleOutputs.compositedRate, kDynamicWidth,
         kDynamicHeight);
     // The anchor layer content, from the synthetic rasterization itself.
     const auto anchorBegin = rateRgba.begin();
@@ -2051,8 +1906,8 @@ TEST_F(CameraGpuTest, StratifiedCompositorMatchesAnchorsAndCountsDisocclusion) {
     // Same-tick re-record keeps converging: the same acquisition index at the
     // same frame time is legal and must not disturb the detector state.
     const auto reRecorded = RecordDynamicMeasurement(
-        Device(), *pipeline, *strataRate, *strataDepth, spec, 2u,
-        VK_NULL_HANDLE);
+        Gpu(), *pipeline, *strataRate, *strataDepth, spec, 2u,
+        nullptr);
     ASSERT_TRUE(reRecorded.has_value()) << reRecorded.error();
 
     // Artifacts for scripts/render-tests/check_camera_dynamic.py: the strata,
@@ -2062,11 +1917,9 @@ TEST_F(CameraGpuTest, StratifiedCompositorMatchesAnchorsAndCountsDisocclusion) {
         WriteDynamicArtifacts(dir, spec, rateRgba, depth, globalComposite,
                               *counters);
     }
-
-    vkDestroyQueryPool(Device().GetDevice(), timingPool, nullptr);
 }
 
-TEST_F(CameraSchedulerGpuTest, StratifiedAcquisitionReportsDynamicExposure) {
+TEST_P(CameraSchedulerGpuTest, StratifiedAcquisitionReportsDynamicExposure) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     auto config = CameraConfigFor(kSensorSize, kSensorSize);
@@ -2127,7 +1980,7 @@ TEST_F(CameraSchedulerGpuTest, StratifiedAcquisitionReportsDynamicExposure) {
 // into does not agree with the anchor's depth -- which requires each stratum
 // to have traced its own pose, not whatever pose the TLAS held when the
 // recorded commands finally ran.
-TEST_F(CameraSchedulerGpuTest, StrataTraceTheirOwnTimelinePose) {
+TEST_P(CameraSchedulerGpuTest, StrataTraceTheirOwnTimelinePose) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyMovingScene(WriteMoverGltf());
     auto config = CameraConfigFor(kSensorSize, kSensorSize);
@@ -2159,7 +2012,7 @@ TEST_F(CameraSchedulerGpuTest, StrataTraceTheirOwnTimelinePose) {
     EXPECT_LE(report.disoccludedFraction, 1.0);
 }
 
-TEST_F(CameraSchedulerGpuTest, StaticSceneDegeneratesToSingleStratum) {
+TEST_P(CameraSchedulerGpuTest, StaticSceneDegeneratesToSingleStratum) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     const auto enabled = EnableCamera();
@@ -2198,18 +2051,18 @@ namespace {
 // Record the same acquisition twice: the first pass leaves the persistent
 // statistics buffer (and hence the next Linear-AGC window) describing the
 // image, the second pass renders through that window.
-Result<void, String> RecordTwice(VulkanContext& context,
+Result<void, String> RecordTwice(gpu::Device& device,
                                  GpuCameraPipeline& pipeline,
-                                 const GpuImage& measurement, u64 index,
+                                 const gpu::Texture& measurement, u64 index,
                                  f64 timeSeconds) {
-    auto first = RecordCamera(context, pipeline, measurement, index, timeSeconds);
+    auto first = RecordCamera(device, pipeline, measurement, index, timeSeconds);
     if (!first) return first;
-    return RecordCamera(context, pipeline, measurement, index, timeSeconds);
+    return RecordCamera(device, pipeline, measurement, index, timeSeconds);
 }
 
 } // namespace
 
-TEST_F(CameraGpuTest, IspDisplayMatchesCpuMonoChain) {
+TEST_P(CameraGpuTest, IspDisplayMatchesCpuMonoChain) {
     auto config = CameraConfigFor(16, 16);
     config.isp.whiteBalance = {1.1, 1.0, 0.9};
     config.isp.deviceToLinearSrgb = {0.90, 0.10, 0.00,
@@ -2232,16 +2085,16 @@ TEST_F(CameraGpuTest, IspDisplayMatchesCpuMonoChain) {
             cpuRate.data[i] = rate;
             rgba[i * 4] = rate;
         }
-    auto input = UploadMeasurement(Device(), 16, 16, rgba);
+    auto input = UploadMeasurement(Gpu(), 16, 16, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), 16, 16);
+    auto created = GpuCameraPipeline::Create(Gpu(), 16, 16);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
 
     const auto gpuDisplay =
-        ReadFloat(Device(), pipeline->GetOutputs().display, 16, 16);
+        ReadFloat(Gpu(), pipeline->GetOutputs().display, 16, 16);
     ASSERT_EQ(gpuDisplay.size(), 16u * 16u * 4u);
     CaptureState state;
     const auto cpu = CpuCameraPipeline(config).CaptureMeasured(state, 0.0, cpuRate);
@@ -2259,7 +2112,7 @@ TEST_F(CameraGpuTest, IspDisplayMatchesCpuMonoChain) {
         }
 }
 
-TEST_F(CameraGpuTest, IspBayerDemosaicAndDefectRepairMatchCpu) {
+TEST_P(CameraGpuTest, IspBayerDemosaicAndDefectRepairMatchCpu) {
     auto config = CameraConfigFor(8, 8);
     config.device.cfa = CfaPattern::RGGB;
     const auto baseChannel = config.device.channels.front();
@@ -2283,16 +2136,16 @@ TEST_F(CameraGpuTest, IspBayerDemosaicAndDefectRepairMatchCpu) {
                 (y % 2 == 0) ? (x % 2 == 0 ? 0u : 1u)
                              : (x % 2 == 0 ? 1u : 2u));
         }
-    auto input = UploadMeasurement(Device(), 8, 8, rgba);
+    auto input = UploadMeasurement(Gpu(), 8, 8, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), 8, 8);
+    auto created = GpuCameraPipeline::Create(Gpu(), 8, 8);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
 
     const auto gpuDisplay =
-        ReadFloat(Device(), pipeline->GetOutputs().display, 8, 8);
+        ReadFloat(Gpu(), pipeline->GetOutputs().display, 8, 8);
     ASSERT_EQ(gpuDisplay.size(), 8u * 8u * 4u);
     CaptureState state;
     const auto cpu = CpuCameraPipeline(config).CaptureMeasured(state, 0.0, cpuRate);
@@ -2309,7 +2162,7 @@ TEST_F(CameraGpuTest, IspBayerDemosaicAndDefectRepairMatchCpu) {
         }
 }
 
-TEST_F(CameraGpuTest, IspInfraredLinearAgcMatchesCpuAndRawIsPaletteInvariant) {
+TEST_P(CameraGpuTest, IspInfraredLinearAgcMatchesCpuAndRawIsPaletteInvariant) {
     constexpr u32 kSize = 8;
     auto makeRate = [](u32 saturatedFrom = 0xffffffffu) {
         Image rate(kSize, kSize, 1);
@@ -2329,24 +2182,24 @@ TEST_F(CameraGpuTest, IspInfraredLinearAgcMatchesCpuAndRawIsPaletteInvariant) {
     const auto cpuRate = makeRate();
     std::vector<f32> rgba(kSize * kSize * 4, 0.0f);
     for (u32 i = 0; i < kSize * kSize; ++i) rgba[i * 4] = cpuRate.data[i];
-    auto input = UploadMeasurement(Device(), kSize, kSize, rgba);
+    auto input = UploadMeasurement(Gpu(), kSize, kSize, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
+    auto created = GpuCameraPipeline::Create(Gpu(), kSize, kSize);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
 
     // Pass 1: ironbow palette over the Linear AGC window.
     const auto ironbow = configFor(DisplayPalette::Ironbow);
     ASSERT_TRUE(pipeline->Configure(ironbow).has_value());
-    ASSERT_TRUE(RecordTwice(Device(), *pipeline, *input, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordTwice(Gpu(), *pipeline, *input, 0, 0.0).has_value());
     const auto firstRaw =
-        ReadFloat(Device(), pipeline->GetOutputs().rawDn, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, kSize, kSize);
     const auto firstCorrected =
-        ReadFloat(Device(), pipeline->GetOutputs().corrected, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().corrected, kSize, kSize);
     const auto firstAgc =
-        ReadFloat(Device(), pipeline->GetOutputs().agcSource, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().agcSource, kSize, kSize);
     const auto firstDisplay =
-        ReadFloat(Device(), pipeline->GetOutputs().display, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().display, kSize, kSize);
     ASSERT_EQ(firstDisplay.size(), kSize * kSize * 4u);
 
     // The AGC source is the pre-AGC scalar: exactly the corrected DN.
@@ -2372,13 +2225,13 @@ TEST_F(CameraGpuTest, IspInfraredLinearAgcMatchesCpuAndRawIsPaletteInvariant) {
     // RAW or corrected products.
     const auto inverted = configFor(DisplayPalette::GreyInverted);
     ASSERT_TRUE(pipeline->Configure(inverted).has_value());
-    ASSERT_TRUE(RecordTwice(Device(), *pipeline, *input, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordTwice(Gpu(), *pipeline, *input, 0, 0.0).has_value());
     const auto secondRaw =
-        ReadFloat(Device(), pipeline->GetOutputs().rawDn, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, kSize, kSize);
     const auto secondCorrected =
-        ReadFloat(Device(), pipeline->GetOutputs().corrected, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().corrected, kSize, kSize);
     const auto secondDisplay =
-        ReadFloat(Device(), pipeline->GetOutputs().display, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().display, kSize, kSize);
     ASSERT_EQ(secondRaw.size(), firstRaw.size());
     ASSERT_EQ(secondDisplay.size(), firstDisplay.size());
     for (size_t i = 0; i < firstRaw.size(); ++i) {
@@ -2392,7 +2245,7 @@ TEST_F(CameraGpuTest, IspInfraredLinearAgcMatchesCpuAndRawIsPaletteInvariant) {
     EXPECT_GT(changed, firstDisplay.size() / 2u);
 }
 
-TEST_F(CameraGpuTest, IspInfraredEqualizeMatchesCpu) {
+TEST_P(CameraGpuTest, IspInfraredEqualizeMatchesCpu) {
     constexpr u32 kSize = 8;
     auto config = ThermalConfigFor(kSize, kSize);
     config.isp.infraredTone = DisplayToneMode::Equalize;
@@ -2404,18 +2257,18 @@ TEST_F(CameraGpuTest, IspInfraredEqualizeMatchesCpu) {
         cpuRate.data[i] = static_cast<f32>(i + 1) * 1e-10f;
         rgba[i * 4] = cpuRate.data[i];
     }
-    auto input = UploadMeasurement(Device(), kSize, kSize, rgba);
+    auto input = UploadMeasurement(Gpu(), kSize, kSize, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
+    auto created = GpuCameraPipeline::Create(Gpu(), kSize, kSize);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
     // Equalize consumes this frame's own statistics; one pass suffices, the
     // second keeps the same-tick convergence contract honest.
-    ASSERT_TRUE(RecordTwice(Device(), *pipeline, *input, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordTwice(Gpu(), *pipeline, *input, 0, 0.0).has_value());
 
     const auto gpuDisplay =
-        ReadFloat(Device(), pipeline->GetOutputs().display, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().display, kSize, kSize);
     ASSERT_EQ(gpuDisplay.size(), kSize * kSize * 4u);
     CaptureState state;
     const auto cpu = CpuCameraPipeline(config).CaptureMeasured(state, 0.0, cpuRate);
@@ -2431,7 +2284,7 @@ TEST_F(CameraGpuTest, IspInfraredEqualizeMatchesCpu) {
         }
 }
 
-TEST_F(CameraGpuTest, IspStatsCountSaturationAndHistogram) {
+TEST_P(CameraGpuTest, IspStatsCountSaturationAndHistogram) {
     constexpr u32 kSize = 8;
     auto config = ThermalConfigFor(kSize, kSize);
     constexpr u32 kSaturatedFrom = 56; // last 8 pixels deliberately hot
@@ -2442,13 +2295,13 @@ TEST_F(CameraGpuTest, IspStatsCountSaturationAndHistogram) {
                                               : static_cast<f32>(i + 1) * 1e-10f;
         rgba[i * 4] = cpuRate.data[i];
     }
-    auto input = UploadMeasurement(Device(), kSize, kSize, rgba);
+    auto input = UploadMeasurement(Gpu(), kSize, kSize, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
+    auto created = GpuCameraPipeline::Create(Gpu(), kSize, kSize);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
 
     const auto stats = pipeline->ReadIspStats();
     ASSERT_TRUE(stats.has_value()) << stats.error();
@@ -2480,7 +2333,7 @@ TEST_F(CameraGpuTest, IspStatsCountSaturationAndHistogram) {
                 (expectedMax - expectedMin) * 0.05 + 1.0);
 }
 
-TEST_F(CameraGpuTest, IspClahePersistentTonePassesAgcScalarThrough) {
+TEST_P(CameraGpuTest, IspClahePersistentTonePassesAgcScalarThrough) {
     constexpr u32 kSize = 8;
     auto config = ThermalConfigFor(kSize, kSize);
     config.isp.infraredTone = DisplayToneMode::Clahe;
@@ -2492,23 +2345,23 @@ TEST_F(CameraGpuTest, IspClahePersistentTonePassesAgcScalarThrough) {
         cpuRate.data[i] = static_cast<f32>(i + 1) * 1e-10f;
         rgba[i * 4] = cpuRate.data[i];
     }
-    auto input = UploadMeasurement(Device(), kSize, kSize, rgba);
+    auto input = UploadMeasurement(Gpu(), kSize, kSize, rgba);
     ASSERT_NE(input, nullptr);
-    auto created = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
+    auto created = GpuCameraPipeline::Create(Gpu(), kSize, kSize);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
 
     // Persistent CLAHE mode: no tone or palette in the camera chain; the
     // display and agcSource both carry the raw scalar for the host's CLAHE
     // pipeline to consume.
     const auto display =
-        ReadFloat(Device(), pipeline->GetOutputs().display, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().display, kSize, kSize);
     const auto agc =
-        ReadFloat(Device(), pipeline->GetOutputs().agcSource, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().agcSource, kSize, kSize);
     const auto corrected =
-        ReadFloat(Device(), pipeline->GetOutputs().corrected, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().corrected, kSize, kSize);
     ASSERT_EQ(display.size(), kSize * kSize * 4u);
     for (u32 pixel = 0; pixel < kSize * kSize; ++pixel) {
         EXPECT_FLOAT_EQ(display[pixel * 4], corrected[pixel * 4]);
@@ -2516,7 +2369,7 @@ TEST_F(CameraGpuTest, IspClahePersistentTonePassesAgcScalarThrough) {
     }
 }
 
-TEST_F(CameraSchedulerGpuTest, PersistentClaheToneDrivesTheViewportDisplay) {
+TEST_P(CameraSchedulerGpuTest, PersistentClaheToneDrivesTheViewportDisplay) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     auto config = ThermalConfigFor(kSensorSize, kSensorSize);
@@ -2551,14 +2404,14 @@ TEST_F(CameraSchedulerGpuTest, PersistentClaheToneDrivesTheViewportDisplay) {
 // stage: they are compared bitwise.
 // ---------------------------------------------------------------------------
 
-TEST_F(CameraGpuTest, HsvDefaultsAreIdentityAndGradingChangesDisplayOnly) {
+TEST_P(CameraGpuTest, HsvDefaultsAreIdentityAndGradingChangesDisplayOnly) {
     constexpr u32 kSize = 16;
     std::vector<f32> rgba;
     FillBayerMeasurement(kSize, kSize, rgba);
     Image cpuRate(kSize, kSize, 1);
     for (u32 i = 0; i < kSize * kSize; ++i)
         cpuRate.data[i] = rgba[i * 4];
-    auto input = UploadMeasurement(Device(), kSize, kSize, rgba);
+    auto input = UploadMeasurement(Gpu(), kSize, kSize, rgba);
     ASSERT_NE(input, nullptr);
 
     auto makeConfig = [] {
@@ -2572,22 +2425,22 @@ TEST_F(CameraGpuTest, HsvDefaultsAreIdentityAndGradingChangesDisplayOnly) {
     auto hueConfig = makeConfig();
     hueConfig.isp.hsv.hueOffsetDegrees = 40.0;
 
-    auto defaultPipeline = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
+    auto defaultPipeline = GpuCameraPipeline::Create(Gpu(), kSize, kSize);
     ASSERT_TRUE(defaultPipeline.has_value());
     ASSERT_TRUE(defaultPipeline.value()->Configure(defaultConfig).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *defaultPipeline.value(), *input, 0, 0.0)
+    ASSERT_TRUE(RecordCamera(Gpu(), *defaultPipeline.value(), *input, 0, 0.0)
                     .has_value());
 
-    auto huePipeline = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
+    auto huePipeline = GpuCameraPipeline::Create(Gpu(), kSize, kSize);
     ASSERT_TRUE(huePipeline.has_value());
     ASSERT_TRUE(huePipeline.value()->Configure(hueConfig).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *huePipeline.value(), *input, 0, 0.0)
+    ASSERT_TRUE(RecordCamera(Gpu(), *huePipeline.value(), *input, 0, 0.0)
                     .has_value());
 
     const auto gpuDefault =
-        ReadFloat(Device(), defaultPipeline.value()->GetOutputs().display,
+        ReadFloat(Gpu(), defaultPipeline.value()->GetOutputs().display,
                   kSize, kSize);
-    const auto gpuHue = ReadFloat(Device(), huePipeline.value()->GetOutputs().display,
+    const auto gpuHue = ReadFloat(Gpu(), huePipeline.value()->GetOutputs().display,
                                   kSize, kSize);
     ASSERT_EQ(gpuDefault.size(), kSize * kSize * 4u);
     ASSERT_EQ(gpuHue.size(), kSize * kSize * 4u);
@@ -2635,51 +2488,51 @@ TEST_F(CameraGpuTest, HsvDefaultsAreIdentityAndGradingChangesDisplayOnly) {
     for (const gpu::TextureRef product :
          {defaultPipeline.value()->GetOutputs().rawDn,
           defaultPipeline.value()->GetOutputs().corrected}) {
-        const auto a = ReadFloat(Device(), product, kSize, kSize);
+        const auto a = ReadFloat(Gpu(), product, kSize, kSize);
         const gpu::TextureRef graded =
             product.Identity() == defaultPipeline.value()->GetOutputs().rawDn.Identity()
                 ? huePipeline.value()->GetOutputs().rawDn
                 : huePipeline.value()->GetOutputs().corrected;
-        const auto b = ReadFloat(Device(), graded, kSize, kSize);
+        const auto b = ReadFloat(Gpu(), graded, kSize, kSize);
         ASSERT_EQ(a.size(), b.size());
         for (u32 i = 0; i < a.size(); ++i)
             EXPECT_FLOAT_EQ(a[i], b[i]) << "element " << i;
     }
 }
 
-TEST_F(CameraGpuTest, HsvNoiseIsDeterministicPerAcquisitionAndKeysOnIndex) {
+TEST_P(CameraGpuTest, HsvNoiseIsDeterministicPerAcquisitionAndKeysOnIndex) {
     constexpr u32 kSize = 16;
     std::vector<f32> rgba;
     FillBayerMeasurement(kSize, kSize, rgba);
-    auto input = UploadMeasurement(Device(), kSize, kSize, rgba);
+    auto input = UploadMeasurement(Gpu(), kSize, kSize, rgba);
     ASSERT_NE(input, nullptr);
 
     auto config = BayerColorConfigFor(kSize, kSize);
     config.isp.hsv.empiricalNoise = true;
     config.isp.hsv.temporalDrift = true;
-    auto created = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
+    auto created = GpuCameraPipeline::Create(Gpu(), kSize, kSize);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
 
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 5, 0.0).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 5, 0.0).has_value());
     const auto first =
-        ReadFloat(Device(), pipeline->GetOutputs().display, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().display, kSize, kSize);
     const auto rawFirst =
-        ReadFloat(Device(), pipeline->GetOutputs().rawDn, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, kSize, kSize);
     // Same acquisition index, same tick: a same-tick reprocess must be
     // bit-identical.
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 5, 0.0).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 5, 0.0).has_value());
     const auto repeated =
-        ReadFloat(Device(), pipeline->GetOutputs().display, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().display, kSize, kSize);
     ASSERT_EQ(first.size(), repeated.size());
     for (u32 i = 0; i < first.size(); ++i)
         EXPECT_FLOAT_EQ(first[i], repeated[i]) << "element " << i;
 
     // The next acquisition draws a different pattern from both streams.
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 6, 0.1).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 6, 0.1).has_value());
     const auto next =
-        ReadFloat(Device(), pipeline->GetOutputs().display, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().display, kSize, kSize);
     u32 changedPixels = 0;
     for (u32 i = 0; i < first.size(); ++i)
         if (std::abs(next[i] - first[i]) > 1e-4f) ++changedPixels;
@@ -2689,37 +2542,36 @@ TEST_F(CameraGpuTest, HsvNoiseIsDeterministicPerAcquisitionAndKeysOnIndex) {
     // chain the RAW product is the same quantized readout no matter which
     // acquisition drew the display noise.
     const auto rawNext =
-        ReadFloat(Device(), pipeline->GetOutputs().rawDn, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, kSize, kSize);
     ASSERT_EQ(rawFirst.size(), rawNext.size());
     for (u32 i = 0; i < rawFirst.size(); ++i)
         EXPECT_FLOAT_EQ(rawFirst[i], rawNext[i]) << "element " << i;
 }
 
-TEST_F(CameraGpuTest, DisplayReprocessIsStatelessAndAppliesNewDisplayParams) {
+TEST_P(CameraGpuTest, DisplayReprocessIsStatelessAndAppliesNewDisplayParams) {
     constexpr u32 kSize = 16;
     std::vector<f32> rgba;
     FillBayerMeasurement(kSize, kSize, rgba);
-    auto input = UploadMeasurement(Device(), kSize, kSize, rgba);
+    auto input = UploadMeasurement(Gpu(), kSize, kSize, rgba);
     ASSERT_NE(input, nullptr);
     auto config = BayerColorConfigFor(kSize, kSize);
     config.isp.whiteBalance = {1.2, 1.0, 0.8};
-    auto created = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
+    auto created = GpuCameraPipeline::Create(Gpu(), kSize, kSize);
     ASSERT_TRUE(created.has_value());
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
-    ASSERT_TRUE(RecordTwice(Device(), *pipeline, *input, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordTwice(Gpu(), *pipeline, *input, 0, 0.0).has_value());
 
     const auto display =
-        ReadFloat(Device(), pipeline->GetOutputs().display, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().display, kSize, kSize);
     const auto raw =
-        ReadFloat(Device(), pipeline->GetOutputs().rawDn, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, kSize, kSize);
     const auto statsBefore = pipeline->ReadIspStats();
     ASSERT_TRUE(statsBefore.has_value());
 
     const auto reprocess = [&](const CameraConfig& with) {
         Result<void, String> status = Result<void, String>::Ok();
-        CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-            auto list = gpu::vulkan::Wrap(cmd);
+        Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
             status = pipeline->RecordDisplayReprocess(list, with);
         });
         return status;
@@ -2729,7 +2581,7 @@ TEST_F(CameraGpuTest, DisplayReprocessIsStatelessAndAppliesNewDisplayParams) {
     // statistics buffer (the cached AGC window) is untouched.
     ASSERT_TRUE(reprocess(config).has_value());
     const auto displayAgain =
-        ReadFloat(Device(), pipeline->GetOutputs().display, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().display, kSize, kSize);
     ASSERT_EQ(display.size(), displayAgain.size());
     for (u32 i = 0; i < display.size(); ++i)
         EXPECT_FLOAT_EQ(display[i], displayAgain[i]) << "element " << i;
@@ -2746,14 +2598,14 @@ TEST_F(CameraGpuTest, DisplayReprocessIsStatelessAndAppliesNewDisplayParams) {
     rebalanced.isp.whiteBalance = {0.7, 1.0, 1.4};
     ASSERT_TRUE(reprocess(rebalanced).has_value());
     const auto displayRebalanced =
-        ReadFloat(Device(), pipeline->GetOutputs().display, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().display, kSize, kSize);
     u32 changedPixels = 0;
     for (u32 i = 0; i < display.size(); ++i)
         if (std::abs(displayRebalanced[i] - display[i]) > 1e-4f)
             ++changedPixels;
     EXPECT_GT(changedPixels, kSize) << "rebalanced display is unchanged";
     const auto rawAfter =
-        ReadFloat(Device(), pipeline->GetOutputs().rawDn, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, kSize, kSize);
     ASSERT_EQ(raw.size(), rawAfter.size());
     for (u32 i = 0; i < raw.size(); ++i)
         EXPECT_FLOAT_EQ(raw[i], rawAfter[i]) << "element " << i;
@@ -2763,14 +2615,14 @@ TEST_F(CameraGpuTest, DisplayReprocessIsStatelessAndAppliesNewDisplayParams) {
     graded.isp.hsv.hueOffsetDegrees = 30.0;
     ASSERT_TRUE(reprocess(graded).has_value());
     const auto displayGraded =
-        ReadFloat(Device(), pipeline->GetOutputs().display, kSize, kSize);
+        ReadFloat(Gpu(), pipeline->GetOutputs().display, kSize, kSize);
     changedPixels = 0;
     for (u32 i = 0; i < display.size(); ++i)
         if (std::abs(displayGraded[i] - display[i]) > 1e-4f) ++changedPixels;
     EXPECT_GT(changedPixels, kSize) << "graded display is unchanged";
 }
 
-TEST_F(CameraSchedulerGpuTest, AutoExposureConvergesAcrossCommittedTicks) {
+TEST_P(CameraSchedulerGpuTest, AutoExposureConvergesAcrossCommittedTicks) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     auto config = CameraConfigFor(kSensorSize, kSensorSize);
@@ -2813,8 +2665,8 @@ TEST_F(CameraSchedulerGpuTest, AutoExposureConvergesAcrossCommittedTicks) {
                                         status.frameTimeSeconds);
     ASSERT_TRUE(queued.has_value()) << queued.error();
     Result<void, String> recorded = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        recorded = context->RecordQueuedCameraAcquisition(vk::Commands(cmd));
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
+        recorded = context->RecordQueuedCameraAcquisition(quantiloom::testing::GpuRecording(list));
     });
     ASSERT_TRUE(recorded.has_value()) << recorded.error();
     ASSERT_TRUE(context->CompleteQueuedCameraAcquisition().has_value());
@@ -2822,7 +2674,7 @@ TEST_F(CameraSchedulerGpuTest, AutoExposureConvergesAcrossCommittedTicks) {
                      nextExposure.back());
 }
 
-TEST_F(CameraSchedulerGpuTest, AutoWhiteBalanceConvergesOnTintedScene) {
+TEST_P(CameraSchedulerGpuTest, AutoWhiteBalanceConvergesOnTintedScene) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     // A Bayer camera whose three CFA responses are flat over the same span
@@ -2872,7 +2724,7 @@ TEST_F(CameraSchedulerGpuTest, AutoWhiteBalanceConvergesOnTintedScene) {
     EXPECT_GT(whiteBalance[2], whiteBalance[0]);
 }
 
-TEST_F(CameraSchedulerGpuTest, CameraGpuTimingsReportAllFiveStages) {
+TEST_P(CameraSchedulerGpuTest, CameraGpuTimingsReportAllFiveStages) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     auto config = CameraConfigFor(kSensorSize, kSensorSize);
@@ -2899,7 +2751,7 @@ TEST_F(CameraSchedulerGpuTest, CameraGpuTimingsReportAllFiveStages) {
         << timings.postMs;
 }
 
-TEST_F(CameraSchedulerGpuTest, ReprocessCameraDisplayRefreshesWithoutAdvancing) {
+TEST_P(CameraSchedulerGpuTest, ReprocessCameraDisplayRefreshesWithoutAdvancing) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     auto config = CameraConfigFor(kSensorSize, kSensorSize);
@@ -2955,16 +2807,17 @@ TEST_F(CameraSchedulerGpuTest, ReprocessCameraDisplayRefreshesWithoutAdvancing) 
     // The same reprocess also runs inside ReprocessAccumulated's camera
     // branch, which must stay a valid present.
     bool presented = false;
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
         presented = context->ReprocessAccumulated(
-            vk::Commands(cmd),
-            vk::Target(target->GetImage(), GpuTargetFormat::Bgra8Srgb, kViewportSize, kViewportSize,
-                       VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
+            quantiloom::testing::GpuRecording(list),
+            quantiloom::testing::GpuTarget(Backend(), target->Ref(), GpuTargetFormat::Bgra8Srgb,
+                                           quantiloom::testing::kHostLayoutUndefined,
+                                           quantiloom::testing::kHostLayoutGeneral));
     });
     EXPECT_TRUE(presented);
 }
 
-TEST_F(CameraSchedulerGpuTest, ReadoutEditRerecordsSameTickWithoutHistoryReset) {
+TEST_P(CameraSchedulerGpuTest, ReadoutEditRerecordsSameTickWithoutHistoryReset) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
     auto config = CameraConfigFor(kSensorSize, kSensorSize);
@@ -3000,7 +2853,7 @@ TEST_F(CameraSchedulerGpuTest, ReadoutEditRerecordsSameTickWithoutHistoryReset) 
 }
 
 
-TEST_F(CameraSchedulerGpuTest, ViewportBatchDoesNotMultiplyPhysicalAcquisitions) {
+TEST_P(CameraSchedulerGpuTest, ViewportBatchDoesNotMultiplyPhysicalAcquisitions) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf unavailable";
     ApplyScene();
     ASSERT_TRUE(EnableCamera().has_value());

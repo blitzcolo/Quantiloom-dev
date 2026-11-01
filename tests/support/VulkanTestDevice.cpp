@@ -3,6 +3,7 @@
 #include "gpu/vulkan/VulkanCommandList.hpp"
 #include "gpu/vulkan/VulkanContext.hpp"
 #include "gpu/vulkan/VulkanDevice.hpp"
+#include "gpu/vulkan/VulkanResources.hpp"
 #include "renderer/interop/VulkanInterop.hpp"
 #include "support/GpuInteropTestUtils.hpp"
 #include "support/GpuTestDevice.hpp"
@@ -11,6 +12,7 @@ namespace quantiloom::testing {
 
 static_assert(kHostLayoutUndefined == static_cast<u32>(VK_IMAGE_LAYOUT_UNDEFINED));
 static_assert(kHostLayoutGeneral == static_cast<u32>(VK_IMAGE_LAYOUT_GENERAL));
+static_assert(kHostLayoutTransferDst == static_cast<u32>(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL));
 
 VulkanContext* SharedVulkanDevice() {
     gpu::Device* device = SharedGpuDevice(gpu::Backend::Vulkan);
@@ -39,6 +41,14 @@ GpuCommandRecording VulkanHostRecording(gpu::CommandList& list) {
     return vk::Commands(static_cast<gpu::vulkan::VulkanCommandList&>(list).Native());
 }
 
+u32 VulkanTextureMipLevels(const gpu::Texture& texture) {
+    return gpu::vulkan::AsGpuImage(texture).GetMipLevels();
+}
+
+f32 VulkanPackedInstanceTranslationX(const void* packed, u32 index) {
+    return static_cast<const VkAccelerationStructureInstanceKHR*>(packed)[index].transform.matrix[0][3];
+}
+
 void VulkanDeviceTest::SetUp() {
     if (SharedVulkanDevice() == nullptr) {
         GTEST_SKIP() << VulkanDeviceUnavailableReason();
@@ -47,10 +57,6 @@ void VulkanDeviceTest::SetUp() {
 
 VulkanContext& VulkanDeviceTest::Device() const {
     return *SharedVulkanDevice();
-}
-
-gpu::Device& VulkanDeviceTest::GpuDevice() const {
-    return *SharedGpuDevice(gpu::Backend::Vulkan);
 }
 
 } // namespace quantiloom::testing

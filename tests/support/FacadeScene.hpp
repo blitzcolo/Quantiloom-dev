@@ -9,10 +9,9 @@
 
 #pragma once
 
-#include "gpu/vulkan/CommandHelper.hpp"
+#include "gpu/Device.hpp"
 #include "renderer/ExternalRenderContext.hpp"
-#include "gpu/vulkan/GpuImage.hpp"
-#include "gpu/vulkan/VulkanContext.hpp"
+#include "renderer/GpuAlloc.hpp"
 #include "support/GpuInteropTestUtils.hpp"
 
 #include <array>
@@ -31,7 +30,7 @@ class FacadeScene {
 public:
     static constexpr u32 kViewportSize = 64;
 
-    explicit FacadeScene(VulkanContext& device) : device_(device) {
+    explicit FacadeScene(gpu::Device& device) : device_(device) {
         static int counter = 0;
         testDir_ = std::filesystem::temp_directory_path() /
                    ("quantiloom_facade_scene_" + std::to_string(counter++));
@@ -48,9 +47,10 @@ public:
             return;
         }
         context_ = std::move(created.value());
-        target_ = std::make_unique<GpuImage>(
-            device_.GetAllocator(), device_.GetDevice(), kViewportSize, kViewportSize,
-            VK_FORMAT_B8G8R8A8_SRGB, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        target_ = CreateTextureOrThrow(
+            device_, gpu::TextureDesc{.width = kViewportSize, .height = kViewportSize,
+                                      .format = gpu::Format::BGRA8Srgb,
+                                      .usage = gpu::TextureUsage::TransferDst | gpu::TextureUsage::Sampled});
     }
 
     ~FacadeScene() {
@@ -102,18 +102,18 @@ public:
     }
 
     void DrawFrame() {
-        CommandHelper::ExecuteImmediate(device_, [&](VkCommandBuffer cmd) {
-            context_->RenderFrame(vk::Commands(cmd),
-                                  vk::Target(target_->GetImage(), GpuTargetFormat::Bgra8Srgb, kViewportSize,
-                                             kViewportSize, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
+        device_.ExecuteImmediate([&](gpu::CommandList& list) {
+            context_->RenderFrame(GpuRecording(list),
+                                  GpuTarget(device_.Info().backend, target_->Ref(), GpuTargetFormat::Bgra8Srgb,
+                                            kHostLayoutUndefined, kHostLayoutGeneral));
         });
     }
 
 private:
-    VulkanContext& device_;
+    gpu::Device& device_;
     std::filesystem::path testDir_;
     std::unique_ptr<ExternalRenderContext> context_;
-    std::unique_ptr<GpuImage> target_;
+    std::unique_ptr<gpu::Texture> target_;
     String error_;
 };
 

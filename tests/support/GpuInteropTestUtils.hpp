@@ -12,9 +12,7 @@
 
 #include "core/Types.hpp"
 #include "gpu/GpuTypes.hpp"
-#include "gpu/vulkan/VulkanContext.hpp"
 #include "renderer/GpuInterop.hpp"
-#include "renderer/interop/VulkanInterop.hpp"
 
 namespace quantiloom::gpu {
 class CommandList;
@@ -23,11 +21,13 @@ class Device;
 
 namespace quantiloom::testing {
 
-/// Host layout tokens (GpuImageTarget::currentLayout/finalLayout) for the images the
-/// tests own: the Vulkan VkImageLayout values, pinned in VulkanTestDevice.cpp. Metal
-/// ignores layouts.
+/// Host layout tokens (GpuImageTarget::currentLayout/finalLayout, and
+/// gpu::TextureBarrier::hostLayoutBefore/After for a layout no access implies) for the
+/// images the tests own: the Vulkan VkImageLayout values, pinned in VulkanTestDevice.cpp.
+/// gpu::kHostLayoutShaderReadOnly is the fourth. Metal ignores layouts.
 inline constexpr u32 kHostLayoutUndefined = 0;
 inline constexpr u32 kHostLayoutGeneral = 1;
+inline constexpr u32 kHostLayoutTransferDst = 7;
 
 /// The handles a host would give ExternalRenderContext::Create for @p device.
 GpuDeviceHandles GpuHandles(gpu::Device& device);
@@ -38,18 +38,5 @@ GpuCommandRecording GpuRecording(gpu::CommandList& list);
 /// A test-owned texture of @p backend as a host's target, its extent from the ref.
 GpuImageTarget GpuTarget(gpu::Backend backend, gpu::TextureRef texture, GpuTargetFormat format,
                          u32 currentLayout, u32 finalLayout);
-
-inline GpuDeviceHandles GpuHandles(const VulkanContext& context) {
-    vk::Device device;
-    device.physicalDevice = context.GetPhysicalDevice();
-    device.device = context.GetDevice();
-    device.queueFamily = context.GetGraphicsQueueFamily();
-    device.queueIndex = 0;
-    device.queue = context.GetGraphicsQueue();
-    device.instance = context.GetInstance();
-    auto handles = vk::Handles(device, context.GetInstance(), nullptr);
-    handles.vmaAllocator = reinterpret_cast<GpuHandle>(context.GetAllocator());
-    return handles;
-}
 
 }  // namespace quantiloom::testing

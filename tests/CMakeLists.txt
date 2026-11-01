@@ -308,7 +308,9 @@ set(TEST_RENDERER_SOURCES
 # Shared test infrastructure (one headless device per backend, created on first use)
 set(TEST_SUPPORT_SOURCES
     support/GpuTestDevice.cpp
+    support/GpuTestHelpers.cpp
     support/VulkanTestDevice.cpp
+    support/vulkan/QueueBlocker.cpp
 )
 
 # Internal compute RHI (gpu/): CPU mapping tables and a GPU smoke suite

@@ -61,8 +61,8 @@ void VulkanCommandList::Trace(const TraceKernel& kernel, u32 width, u32 height, 
 
 void VulkanCommandList::BuildRtAccelerationStructure(const RtBuild& build) {
     if (rt_.cmdBuildStructures == nullptr) {
-        // A vulkan::Wrap list carries no device functions; neither does a device without the
-        // extension. The same message AccelerationStructure.cpp throws for a missing function.
+        // A device without the extension hands out lists with no device functions. The same
+        // message AccelerationStructure.cpp throws for a missing function.
         throw std::runtime_error("Failed to load acceleration structure functions");
     }
     NativeRtGeometry native;

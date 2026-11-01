@@ -15,14 +15,12 @@
 
 #include <gtest/gtest.h>
 #include "scene/Texture.hpp"
-#include "gpu/vulkan/VulkanResources.hpp"
-#include "gpu/vulkan/CommandHelper.hpp"
-#include "gpu/vulkan/GpuBuffer.hpp"
-#include "gpu/vulkan/GpuImage.hpp"
+#include "gpu/Device.hpp"
+#include "renderer/GpuAlloc.hpp"
 #include "renderer/TextureManager.hpp"
-#include "gpu/vulkan/VulkanContext.hpp"
 #include "renderer/TextureCompressor.hpp"
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
+#include "support/GpuTestHelpers.hpp"
 #include "core/Types.hpp"
 #include <vector>
 #include <unordered_map>
@@ -68,70 +66,58 @@ Texture CreateTestTexture(u32 width, u32 height, const std::string& name = "Test
     return tex;
 }
 
-std::vector<u8> ReadTextureMip(VulkanContext& context, const GpuImage& image,
+std::vector<u8> ReadTextureMip(gpu::Device& device, gpu::TextureRef image,
                                u32 mip, u32 width, u32 height) {
-    const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 4;
-    GpuBuffer readback(context.GetAllocator(), bytes,
-                       VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                       VMA_MEMORY_USAGE_GPU_TO_CPU);
-    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        VkImageMemoryBarrier toCopy{};
-        toCopy.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        toCopy.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        toCopy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        toCopy.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toCopy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toCopy.image = image.GetImage();
-        toCopy.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        toCopy.subresourceRange.baseMipLevel = mip;
-        toCopy.subresourceRange.levelCount = 1;
-        toCopy.subresourceRange.baseArrayLayer = 0;
-        toCopy.subresourceRange.layerCount = 1;
-        toCopy.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                             0, nullptr, 0, nullptr, 1, &toCopy);
+    const u64 bytes = static_cast<u64>(width) * height * 4;
+    auto readback = CreateBufferOrThrow(
+        device, gpu::BufferDesc{bytes, gpu::BufferUsage::TransferDst,
+                                gpu::MemoryClass::Readback, 0});
+    // Every stage that samples the uploaded textures; the native barriers name
+    // all commands rather than those stages.
+    constexpr gpu::Access kSampled =
+        gpu::Access::RayTraceRead | gpu::Access::ComputeRead | gpu::Access::FragmentRead;
+    const gpu::TextureRef texture = image.WithLayout(gpu::TextureLayoutPolicy::Optimal);
+    device.ExecuteImmediate([&](gpu::CommandList& list) {
+        gpu::TextureBarrier toCopy;
+        toCopy.texture = texture;
+        toCopy.from = kSampled;
+        toCopy.to = gpu::Access::TransferRead;
+        toCopy.baseMip = mip;
+        toCopy.mipCount = 1;
+        toCopy.layerCount = 1;
+        gpu::BarrierBatch toCopyBatch;
+        toCopyBatch.textures = std::span<const gpu::TextureBarrier>(&toCopy, 1);
+        toCopyBatch.srcStages = gpu::PipelineStage::AllCommands;
+        list.Barrier(toCopyBatch);
 
-        VkBufferImageCopy copy{};
-        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy.imageSubresource.mipLevel = mip;
-        copy.imageSubresource.layerCount = 1;
-        copy.imageExtent = {width, height, 1};
-        vkCmdCopyImageToBuffer(cmd, image.GetImage(),
-                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                               readback.GetHandle(), 1, &copy);
+        gpu::BufferTextureCopy copy;
+        copy.mipLevel = mip;
+        copy.width = width;
+        copy.height = height;
+        list.CopyTextureToBuffer(texture, readback->Ref(), copy);
 
-        VkBufferMemoryBarrier hostReady{};
-        hostReady.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        hostReady.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        hostReady.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-        hostReady.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        hostReady.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        hostReady.buffer = readback.GetHandle();
-        hostReady.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_HOST_BIT, 0,
-                             0, nullptr, 1, &hostReady, 0, nullptr);
+        list.Barrier(gpu::BufferBarrier{readback->Ref(), gpu::Access::TransferWrite,
+                                        gpu::Access::HostRead});
 
-        std::swap(toCopy.oldLayout, toCopy.newLayout);
-        toCopy.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        toCopy.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
-                             0, nullptr, 0, nullptr, 1, &toCopy);
+        gpu::TextureBarrier toSampled = toCopy;
+        toSampled.from = gpu::Access::TransferRead;
+        toSampled.to = kSampled;
+        gpu::BarrierBatch toSampledBatch;
+        toSampledBatch.textures = std::span<const gpu::TextureBarrier>(&toSampled, 1);
+        toSampledBatch.dstStages = gpu::PipelineStage::AllCommands;
+        list.Barrier(toSampledBatch);
     });
 
-    const auto* mapped = static_cast<const u8*>(readback.MapRead());
+    const auto* mapped = static_cast<const u8*>(readback->MapRead());
     if (!mapped) return {};
     std::vector<u8> result(mapped, mapped + bytes);
-    readback.Unmap();
+    readback->Unmap();
     return result;
 }
 
-/// The native image behind a manager's texture, for the byte, mip and format checks.
-const GpuImage& DiagnosticImage(const TextureManager& textures, u32 index) {
-    return gpu::vulkan::AsGpuImage(textures.GetImageForDiagnostics(index));
+/// The texture behind a manager's slot, for the byte, mip and format checks.
+const gpu::Texture& DiagnosticImage(const TextureManager& textures, u32 index) {
+    return textures.GetImageForDiagnostics(index);
 }
 
 /**
@@ -164,10 +150,11 @@ struct TextureCache {
 
 } // anonymous namespace
 
-class TextureUploadGpuTest : public quantiloom::testing::VulkanDeviceTest {};
+class TextureUploadGpuTest : public quantiloom::testing::GpuDeviceTest {};
+QL_INSTANTIATE_GPU_SUITE(TextureUploadGpuTest);
 
-TEST_F(TextureUploadGpuTest, BatchesUploadsWithoutChangingIdsFormatsPixelsOrMips) {
-    TextureManager manager(GpuDevice(), /*uploadBatchBytes=*/32);
+TEST_P(TextureUploadGpuTest, BatchesUploadsWithoutChangingIdsFormatsPixelsOrMips) {
+    TextureManager manager(Gpu(), /*uploadBatchBytes=*/32);
     std::vector<Texture> textures;
     textures.push_back(CreateTestTexture(2, 2, "srgb"));
     textures.push_back(CreateTestTexture(2, 2, "linear"));
@@ -192,15 +179,15 @@ TEST_F(TextureUploadGpuTest, BatchesUploadsWithoutChangingIdsFormatsPixelsOrMips
     EXPECT_EQ(manager.SamplerRefs().size(), 4u);
     EXPECT_EQ(manager.GetLastUploadBatchCount(), 3u)
         << "two small textures, one oversized texture, and one tail batch";
-    EXPECT_EQ(DiagnosticImage(manager, 0).GetFormat(), VK_FORMAT_R8G8B8A8_SRGB);
-    EXPECT_EQ(DiagnosticImage(manager, 1).GetFormat(), VK_FORMAT_R8G8B8A8_UNORM);
+    EXPECT_EQ(DiagnosticImage(manager, 0).Ref().format, gpu::Format::RGBA8Srgb);
+    EXPECT_EQ(DiagnosticImage(manager, 1).Ref().format, gpu::Format::RGBA8Unorm);
 
-    EXPECT_EQ(ReadTextureMip(Device(), DiagnosticImage(manager, 0), 0, 2, 2),
+    EXPECT_EQ(ReadTextureMip(Gpu(), DiagnosticImage(manager, 0).Ref(), 0, 2, 2),
               expectedSrgb);
-    EXPECT_EQ(ReadTextureMip(Device(), DiagnosticImage(manager, 1), 0, 2, 2),
+    EXPECT_EQ(ReadTextureMip(Gpu(), DiagnosticImage(manager, 1).Ref(), 0, 2, 2),
               expectedLinear);
-    EXPECT_EQ(DiagnosticImage(manager, 2).GetMipLevels(), 3u);
-    EXPECT_EQ(ReadTextureMip(Device(), DiagnosticImage(manager, 2), 2, 1, 1),
+    EXPECT_EQ(quantiloom::testing::TextureMipLevels(Backend(), DiagnosticImage(manager, 2)), 3u);
+    EXPECT_EQ(ReadTextureMip(Gpu(), DiagnosticImage(manager, 2).Ref(), 2, 1, 1),
               (std::vector<u8>{32, 64, 96, 255}));
 
     EXPECT_TRUE(textures[0].pixels.empty());
@@ -209,14 +196,14 @@ TEST_F(TextureUploadGpuTest, BatchesUploadsWithoutChangingIdsFormatsPixelsOrMips
     EXPECT_TRUE(textures[3].pixels.empty());
 }
 
-TEST_F(TextureUploadGpuTest, EmptySceneStillUploadsOneWhiteDummyInOneBatch) {
-    TextureManager manager(GpuDevice(), /*uploadBatchBytes=*/8);
+TEST_P(TextureUploadGpuTest, EmptySceneStillUploadsOneWhiteDummyInOneBatch) {
+    TextureManager manager(Gpu(), /*uploadBatchBytes=*/8);
     std::vector<Texture> textures;
     manager.UploadTextures(textures);
 
     ASSERT_EQ(manager.GetTextureCount(), 1u);
     EXPECT_EQ(manager.GetLastUploadBatchCount(), 1u);
-    EXPECT_EQ(ReadTextureMip(Device(), DiagnosticImage(manager, 0), 0, 1, 1),
+    EXPECT_EQ(ReadTextureMip(Gpu(), DiagnosticImage(manager, 0).Ref(), 0, 1, 1),
               (std::vector<u8>{255, 255, 255, 255}));
 }
 

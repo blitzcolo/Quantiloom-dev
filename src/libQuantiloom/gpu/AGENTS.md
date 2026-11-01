@@ -35,8 +35,8 @@ no `QL_API`, no header under `include/`, no `docs/abi/exports.golden` change.
   `RtInstances::referencedBottomLevels`). `Trace.hpp`: a `TraceKernel` owns its shader binding
   table on Vulkan and no `gpu/` header mentions one; Metal has none, every ray being inline from
   raygen. The Vulkan ray tracing entry points are fetched once per `VulkanDevice` and copied into
-  every list it hands out (`ExecuteImmediate`, `WrapRecording`, a `CommandPool`'s buffers); a
-  `vulkan::Wrap` list has none, so an acceleration structure build on it throws.
+  every list it hands out (`ExecuteImmediate`, `WrapRecording`, a `CommandPool`'s buffers); on
+  a device without them an acceleration structure build throws.
 - **No RGB32Float textures.** Metal has no 3-channel 2D format. Pad to RGBA32Float with alpha
   1: sampling a 3-component format already returns alpha 1, so the shader reads the same values.
 - **Errors.** On Vulkan, the `Err` of a failed `gpu/Sync.hpp` call, `CreateSampler`, `CreateGpuEvent`,
@@ -61,9 +61,9 @@ no `QL_API`, no header under `include/`, no `docs/abi/exports.golden` change.
   and the exported `vk::CreateDevice` (`VulkanInterop.cpp`). Library code outside it reaches
   the backend only through `gpu/DeviceFactory.hpp`; no file outside it calls a raw `vk*`
   function (`vk_residual.sh` prints 0).
-- **No bridge.** The conversions between native objects and refs live beside their types:
-  `Wrap` in `VulkanCommandList.hpp`, `NativeImage`/`NativeBuffer`/`Ref(VkQueryPool, count)` in
-  `VulkanMapping.hpp`, `Ref(GpuImage)`/`Ref(GpuBuffer)`/`AsGpuImage` in `VulkanResources.hpp`.
-  Only Vulkan-only code uses them: the tests that record on raw handles, which reach the context
-  through `VulkanDevice::Context()`.
+- **No bridge.** The two conversions left between native objects and refs live beside their
+  types in `VulkanResources.hpp`: `Ref(GpuImage)` and `AsGpuImage`. Only Vulkan-only test code
+  uses them (`test_gpu_vulkan.cpp`, `tests/support/VulkanTestDevice.cpp`), and it reaches the
+  context through `VulkanDevice::Context()`. Every other GPU test is written against `gpu::`
+  (`tests/support/GpuTestDevice.hpp`).
 - New compute code uses `gpu::`, not raw `vk*`.

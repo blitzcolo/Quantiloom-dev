@@ -10,7 +10,6 @@ namespace quantiloom::gpu::vulkan {
 
 class VulkanCommandList final : public CommandList {
 public:
-    explicit VulkanCommandList(VkCommandBuffer cmd) : cmd_(cmd) {}
     /// What a VulkanDevice hands out: the list can also record acceleration structure builds.
     VulkanCommandList(VkCommandBuffer cmd, const RtFunctions& rt) : cmd_(cmd), rt_(rt) {}
 
@@ -49,11 +48,5 @@ private:
     VkCommandBuffer cmd_;
     RtFunctions rt_{};
 };
-
-/// A list over a raw command buffer, for Vulkan-only code that records on one (the Vulkan-only
-/// tests). It has no ray tracing entry points.
-[[nodiscard]] inline VulkanCommandList Wrap(VkCommandBuffer cmd) {
-    return VulkanCommandList(cmd);
-}
 
 }  // namespace quantiloom::gpu::vulkan

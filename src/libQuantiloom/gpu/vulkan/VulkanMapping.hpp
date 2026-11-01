@@ -53,18 +53,4 @@ template <class T>
     }
 }
 
-// The native object behind a ref, and a ref over a raw query pool, for Vulkan-only code that
-// records on raw handles (the Vulkan-only tests).
-[[nodiscard]] inline VkImage NativeImage(TextureRef ref) {
-    return FromHandle<VkImage>(ref.image);
-}
-
-[[nodiscard]] inline VkBuffer NativeBuffer(BufferRef ref) {
-    return FromHandle<VkBuffer>(ref.handle);
-}
-
-[[nodiscard]] inline TimestampPoolRef Ref(VkQueryPool pool, u32 count) {
-    return TimestampPoolRef{ToHandle(pool), count};
-}
-
 }  // namespace quantiloom::gpu::vulkan
