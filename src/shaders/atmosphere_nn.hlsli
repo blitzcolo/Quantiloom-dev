@@ -26,27 +26,9 @@
 
 #include "blackbody.hlsli"
 
-// Mirror of quantiloom::AtmosNNHeaderGPU (80 bytes)
-struct AtmosNNHeader {
-    uint  enabled;
-    uint  pathMode;      // 0 = ground (range axis), 1 = slant (cos zenith axis)
-    uint  numLambda;
-    uint  countA;
-    uint  countAz;
-    uint  hasLdown;
-    uint  hasSky;
-    uint  thermalBand;
-    float aStart;
-    float aStep;
-    float azStart;       // degrees
-    float azStep;        // degrees
-    uint  tauOffset;
-    uint  lpathOffset;
-    uint  ldownOffset;
-    uint  skyOffset;
-    float3 sunDirWorld;  // unit vector toward the sun
-    float worldUnitsToMeters;
-};
+// Shared with the host, which calls it AtmosNNHeaderGPU: ql_shared_scene.hlsli.
+#define QL_SHARED_WANT_AtmosNNHeader
+#include "ql_shared_scene.hlsli"
 
 // ----------------------------------------------------------------------------
 // Axis coordinates

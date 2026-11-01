@@ -49,6 +49,11 @@
 #include <memory>
 #include <vector>
 
+// InstanceGeometryInfo and EmissiveTriangleGPU, defined once for common.hlsli and
+// the host. By a path relative to this file, as RtBindings.hpp includes its
+// manifest.
+#include "../../shaders/ql_shared_scene.hlsli"
+
 namespace quantiloom {
 class RayTracingPipeline;
 class TextureManager;
@@ -285,24 +290,15 @@ private:
  * instance's slice of each merged global buffer starts, which is how the closest-hit
  * shader finds its vertices after every primitive was concatenated into one buffer.
  *
- * @note Defined once. It used to be declared separately in ExternalRenderContext.cpp
- *       and in the CLI's main.cpp, two copies of a layout the shader depends on.
+ * thermalElementBase is the first thermal element of the instance, or 0xFFFFFFFF
+ * where no solve ran. The vertex shading adds the hit's primitive index to it,
+ * which is the whole of how a triangle finds the temperature the balance gave it.
+ *
+ * @note Defined once, for the shader and the host, in ql_shared_scene.hlsli. It
+ *       used to be declared separately in ExternalRenderContext.cpp, in the CLI's
+ *       main.cpp and in the shader, three copies of one layout.
  */
-struct InstanceGeometryInfo {
-    u32 vertexOffset;   // Offset into the merged vertex buffer, in vertices
-    u32 indexOffset;    // Offset into the merged index buffer, in indices
-    u32 normalOffset;   // Offset into the merged normal buffer, in normals
-    u32 uvOffset;       // Offset into the merged UV buffer, in UVs
-    u32 tangentOffset;  // Offset into the merged tangent buffer, in tangents
-    u32 materialId;     // Index into Scene::materials
-    /// First thermal element of this instance, or 0xFFFFFFFF where no solve
-    /// ran. The vertex shading adds the hit's primitive index to it, which is the
-    /// whole of how a triangle finds the temperature the balance gave it.
-    u32 thermalElementBase;
-    u32 pad;            // Pad to 32 bytes
-};
-
-static_assert(sizeof(InstanceGeometryInfo) == 32, "InstanceGeometryInfo size mismatch");
+using InstanceGeometryInfo = shader::InstanceGeometryInfo;
 
 /**
  * @brief One emissive triangle, in world space, for next-event estimation
@@ -334,14 +330,7 @@ static_assert(sizeof(InstanceGeometryInfo) == 32, "InstanceGeometryInfo size mis
  * curve -- which is the whole point, since the density may be approximate but
  * the radiance may not.
  */
-struct EmissiveTriangleGPU {
-    glm::vec3 v0;         float cumulativePower;  //  0..16
-    glm::vec3 edge1;      float area;             // 16..32
-    glm::vec3 edge2;      i32   emissiveCurveIndex; // 32..48
-    glm::vec3 emissive;   float _pad1;            // 48..64
-};
-
-static_assert(sizeof(EmissiveTriangleGPU) == 64, "EmissiveTriangleGPU size mismatch");
+using EmissiveTriangleGPU = shader::EmissiveTriangleGPU;  // ql_shared_scene.hlsli
 
 /**
  * @brief The emissive triangles of a scene, in world space, power-ordered CDF built

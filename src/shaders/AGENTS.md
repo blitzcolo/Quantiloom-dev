@@ -71,6 +71,13 @@ so its preprocessed tokens stay what they were and it gains no struct it does
 not use; the host includes the header by a relative path and aliases the
 struct (`using DisplayRangePush = shader::RangePush;`).
 
+A struct that is also public API keeps its C++ definition in
+`include/quantiloom/`, the only thing the SDK installs, and is locked instead:
+`ql_shared_public.hlsli` holds the HLSL definition beside asserts on the
+public type's size and every offset, compiled once by
+`gpu/SharedLayoutChecks.cpp`. Change the HLSL text and the offset list next
+to it together.
+
 ## Stage extensions
 
 `.rgen` / `.rchit` / `.rmiss` ray tracing stages, `.comp` and `.comp.hlsl` compute,

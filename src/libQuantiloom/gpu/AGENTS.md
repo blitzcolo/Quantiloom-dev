@@ -50,6 +50,9 @@ no `QL_API`, no header under `include/`, no `docs/abi/exports.golden` change.
   declare a different member than the backend defines (and `VulkanDevice` is `final`, so calls
   devirtualize to a symbol that does not exist). Hence `CreateGpuEvent`.
 - **Shaders** come from `core/ResourceLocator` through `ShaderLibrary`; there is no second search list.
+- **`SharedLayoutChecks.cpp`** compiles the C++ half of `src/shaders/ql_shared_public.hlsli`:
+  the layout locks of the public structs the shaders read. It defines nothing; the structs
+  the host alone owns are single definitions in the other `ql_shared_*.hlsli`.
 - **Backend files.** `gpu/vulkan/` is the whole Vulkan backend: the `gpu::` implementation
   (`VulkanDevice`, `VulkanDeviceFactory`, `VulkanCommandList`, `VulkanResources`, `VulkanSync`,
   `VulkanRt`, `VulkanTrace`, `VulkanMapping`), the context it runs on (`VulkanContext`, or

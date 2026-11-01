@@ -530,12 +530,17 @@ private:
     // 1024 if descriptor indexing available, 32 otherwise
     u32 m_maxTextures = 1024;
 
-    // Push constants (camera + sampling parameters)
+    // Push constants (camera + sampling parameters): the shader's
+    // PushConstantsRayGen (ql_shared_public.hlsli), whose first 108 bytes are the
+    // public PushConstantsRayGen, locked there, and whose last word is
+    // textureCount. These hold the host to the same 112 bytes.
     struct TracePushConstants {
         PushConstantsRayGen cameraAndSampling;
         u32 textureCount = 0;
     };
-    static_assert(offsetof(TracePushConstants, textureCount) == 108);
+    QL_SHARED_LAYOUT(TracePushConstants, 112)
+    QL_SHARED_OFFSET(TracePushConstants, cameraAndSampling, 0)
+    QL_SHARED_OFFSET(TracePushConstants, textureCount, 108)
     static_assert(sizeof(TracePushConstants) <= 128);
     mutable TracePushConstants m_pushConstants{};
     std::unique_ptr<gpu::Buffer> m_spectralFallback;

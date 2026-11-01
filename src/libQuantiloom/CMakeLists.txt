@@ -186,6 +186,7 @@ add_library(quantiloom_core OBJECT
     gpu/ShaderLibrary.hpp
     gpu/ShaderLibrary.cpp
     gpu/NeutralHeaders.cpp
+    gpu/SharedLayoutChecks.cpp
     gpu/vulkan/VulkanMapping.hpp
     gpu/vulkan/VulkanMapping.cpp
     gpu/vulkan/VulkanResources.hpp
