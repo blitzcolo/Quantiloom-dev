@@ -7,14 +7,13 @@
 
 #include "core/Log.hpp"
 #include "core/NNLS.hpp"
+#include "core/ParallelFor.hpp"
 #include "io/ImageIO.hpp"
 #include "renderer/ConfigResolve.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <execution>
-#include <numeric>
 
 namespace quantiloom::rendercore {
 
@@ -141,31 +140,29 @@ u64 UnmixTexels(const u8* rgba, const u64 texelCount, const bool srgb,
     const auto& toLinear = SrgbToLinearTable();
     const usize count = static_cast<usize>(texelCount);
 
-    // Indices rather than pointers so the parallel policy has something to
-    // partition; the work per texel is a handful of flops, so this only pays
-    // on textures of any size, which is exactly where it is needed.
-    Vector<u64> rows(count);
-    std::iota(rows.begin(), rows.end(), u64{0});
-
     // Solved weights are kept as floats for a second pass. Transient, and
     // freed on the way out -- the alternative is solving every texel twice.
     Vector<f32> weights(count * Material::MAX_ENDMEMBERS, 0.0f);
 
-    std::for_each(std::execution::par_unseq, rows.begin(), rows.end(), [&](const u64 i) {
-        const usize base = static_cast<usize>(i) * 4;
+    // The work per texel is a handful of flops, so this only pays on
+    // textures of any size, which is exactly where it is needed.
+    par::ParallelFor(count, [&](const usize begin, const usize end) {
+        for (usize i = begin; i < end; ++i) {
+            const usize base = i * 4;
 
-        glm::vec3 texel;
-        if (srgb) {
-            texel = glm::vec3(toLinear[rgba[base + 0]], toLinear[rgba[base + 1]],
-                              toLinear[rgba[base + 2]]);
-        } else {
-            texel = glm::vec3(static_cast<f32>(rgba[base + 0]) / 255.0f,
-                              static_cast<f32>(rgba[base + 1]) / 255.0f,
-                              static_cast<f32>(rgba[base + 2]) / 255.0f);
+            glm::vec3 texel;
+            if (srgb) {
+                texel = glm::vec3(toLinear[rgba[base + 0]], toLinear[rgba[base + 1]],
+                                  toLinear[rgba[base + 2]]);
+            } else {
+                texel = glm::vec3(static_cast<f32>(rgba[base + 0]) / 255.0f,
+                                  static_cast<f32>(rgba[base + 1]) / 255.0f,
+                                  static_cast<f32>(rgba[base + 2]) / 255.0f);
+            }
+            texel *= baseColorFactor;
+
+            SolveNNLS(colors, k, texel, &weights[base]);
         }
-        texel *= baseColorFactor;
-
-        SolveNNLS(colors, k, texel, &weights[base]);
     });
 
     // ------------------------------------------------------------------
@@ -215,22 +212,27 @@ u64 UnmixTexels(const u8* rgba, const u64 texelCount, const bool srgb,
     // loop exits as soon as the encoded mean is within a UNORM8 quantum of 1.
     // Parallel over texels like the solve and encode passes: the fixed-point
     // loop below calls this up to 8 times, and serially that is 8 full scans
-    // of the weight texture.
+    // of the weight texture. Chunk partials are summed in fixed order, so the
+    // result does not depend on scheduling.
     const auto encodedMean = [&](const f32 scale) {
-        const f64 sum = std::transform_reduce(
-            std::execution::par_unseq, rows.begin(), rows.end(), f64{0.0},
-            std::plus<>(), [&](const u64 i) {
-                f64 rowSum = 0.0;
-                for (i32 c = 0; c < k; ++c) {
-                    const f32 w =
-                        weights[static_cast<usize>(i) * Material::MAX_ENDMEMBERS +
-                                static_cast<usize>(c)] *
-                        scale;
-                    rowSum += std::min(static_cast<f64>(w),
-                                       static_cast<f64>(kWeightScale));
+        const f64 sum = par::ParallelReduce(
+            count, f64{0.0},
+            [&](const usize begin, const usize end) {
+                f64 partial = 0.0;
+                for (usize i = begin; i < end; ++i) {
+                    f64 rowSum = 0.0;
+                    for (i32 c = 0; c < k; ++c) {
+                        const f32 w =
+                            weights[i * Material::MAX_ENDMEMBERS + static_cast<usize>(c)] *
+                            scale;
+                        rowSum += std::min(static_cast<f64>(w),
+                                           static_cast<f64>(kWeightScale));
+                    }
+                    partial += rowSum;
                 }
-                return rowSum;
-            });
+                return partial;
+            },
+            [](const f64 a, const f64 b) { return a + b; });
         return sum / static_cast<f64>(count);
     };
 
@@ -258,16 +260,18 @@ u64 UnmixTexels(const u8* rgba, const u64 texelCount, const bool srgb,
     }
 
     std::atomic<u64> clippedCount{0};
-    std::for_each(std::execution::par_unseq, rows.begin(), rows.end(), [&](const u64 i) {
-        const usize base = static_cast<usize>(i) * 4;
-        bool clipped = false;
-        for (i32 c = 0; c < 4; ++c) {
-            rgbaOut[base + static_cast<usize>(c)] =
-                c < k ? EncodeWeight(weights[base + static_cast<usize>(c)] * normalise, clipped)
-                      : u8{0};
-        }
-        if (clipped) {
-            clippedCount.fetch_add(1, std::memory_order_relaxed);
+    par::ParallelFor(count, [&](const usize begin, const usize end) {
+        for (usize i = begin; i < end; ++i) {
+            const usize base = i * 4;
+            bool clipped = false;
+            for (i32 c = 0; c < 4; ++c) {
+                rgbaOut[base + static_cast<usize>(c)] =
+                    c < k ? EncodeWeight(weights[base + static_cast<usize>(c)] * normalise, clipped)
+                          : u8{0};
+            }
+            if (clipped) {
+                clippedCount.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     });
 
