@@ -125,8 +125,6 @@ add_library(quantiloom_core OBJECT
     renderer/GpuBuffer.hpp
     renderer/GpuImage.cpp
     renderer/GpuImage.hpp
-    renderer/Upload.cpp
-    renderer/Upload.hpp
     renderer/TextureManager.cpp
     renderer/TextureManager.hpp
     renderer/TextureTransitions.cpp
