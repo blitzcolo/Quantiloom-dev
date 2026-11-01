@@ -67,6 +67,7 @@
 #include <limits>
 #include <optional>
 #include <random>
+#include <stdexcept>
 
 namespace quantiloom {
 
@@ -334,7 +335,7 @@ struct ExternalRenderContext::Impl {
     CameraGpuTimings lastCameraGpuTimings{};
 
     // Command pool for internal operations
-    VkCommandPool commandPool = VK_NULL_HANDLE;
+    std::unique_ptr<gpu::CommandPool> commandPool;
 
     // Rendering state
     SpectralMode spectralMode = SpectralMode::RGB;  // Default: Fast RGB mode
@@ -451,12 +452,13 @@ struct ExternalRenderContext::Impl {
 
     // Viewport pick (1x1 inline ray-query dispatch; see Pick())
     std::unique_ptr<GpuBuffer> pickOutputBuffer;  // host-visible, one PickResultGpu
-    VkDescriptorSetLayout pickDescriptorSetLayout = VK_NULL_HANDLE;
-    VkPipelineLayout pickPipelineLayout = VK_NULL_HANDLE;
-    VkDescriptorPool pickDescriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet pickDescriptorSet = VK_NULL_HANDLE;
-    VkPipeline pickPipeline = VK_NULL_HANDLE;
-    VkShaderModule pickShader = VK_NULL_HANDLE;
+    // Destroyed in reverse declaration order -- kernel, pool, kernel layout,
+    // binding layout -- which is the order Cleanup releases them in.
+    std::unique_ptr<gpu::BindingLayout> pickBindingLayout;
+    std::unique_ptr<gpu::KernelLayout> pickKernelLayout;
+    std::unique_ptr<gpu::BindGroupPool> pickBindGroupPool;
+    gpu::BindGroup pickBindGroup;
+    std::unique_ptr<gpu::ComputeKernel> pickKernel;
     bool pickInitAttempted = false;  // one failed attempt is not retried
 
     void CreatePickPipeline();
@@ -601,8 +603,8 @@ struct ExternalRenderContext::Impl {
 
     void Cleanup() {
         // Wait for GPU to finish
-        if (device != VK_NULL_HANDLE) {
-            vkDeviceWaitIdle(device);
+        if (gpuDevice) {
+            (void)gpuDevice->WaitIdle();
         }
         // Queued writes name buffers that are about to be destroyed.
         pendingUploads.Clear();
@@ -682,37 +684,16 @@ struct ExternalRenderContext::Impl {
 
         // Destroy pick resources
         pickOutputBuffer.reset();
-        if (device != VK_NULL_HANDLE) {
-            if (pickPipeline != VK_NULL_HANDLE) {
-                vkDestroyPipeline(device, pickPipeline, nullptr);
-                pickPipeline = VK_NULL_HANDLE;
-            }
-            if (pickShader != VK_NULL_HANDLE) {
-                vkDestroyShaderModule(device, pickShader, nullptr);
-                pickShader = VK_NULL_HANDLE;
-            }
-            if (pickDescriptorPool != VK_NULL_HANDLE) {
-                vkDestroyDescriptorPool(device, pickDescriptorPool, nullptr);
-                pickDescriptorPool = VK_NULL_HANDLE;
-            }
-            if (pickPipelineLayout != VK_NULL_HANDLE) {
-                vkDestroyPipelineLayout(device, pickPipelineLayout, nullptr);
-                pickPipelineLayout = VK_NULL_HANDLE;
-            }
-            if (pickDescriptorSetLayout != VK_NULL_HANDLE) {
-                vkDestroyDescriptorSetLayout(device, pickDescriptorSetLayout, nullptr);
-                pickDescriptorSetLayout = VK_NULL_HANDLE;
-            }
-        }
+        pickKernel.reset();
+        pickBindGroupPool.reset();
+        pickKernelLayout.reset();
+        pickBindingLayout.reset();
         pickInitAttempted = false;
 
         // Reset merged global geometry buffers
         geometry = {};
 
-        if (commandPool != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
-            vkDestroyCommandPool(device, commandPool, nullptr);
-            commandPool = VK_NULL_HANDLE;
-        }
+        commandPool.reset();
 
         scene.reset();
 
@@ -777,7 +758,7 @@ struct ExternalRenderContext::Impl {
     }
 
     bool CompleteLookupReaders() {
-        if (vkDeviceWaitIdle(device) == VK_SUCCESS)
+        if (gpuDevice->WaitIdle())
             return true;
         QL_LOG_ERROR("Cannot replace lookup table: previous GPU readers did not complete");
         return false;
@@ -1166,20 +1147,6 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     targetWidth = params.width;
     targetHeight = params.height;
 
-    // Magnifying the accumulation needs a filterable source. Every driver that
-    // supports ray tracing supports this for RGBA32F, but the fallback costs
-    // one query and turns "wrong" into "blockier".
-    VkFormatProperties accumFormatProps{};
-    vkGetPhysicalDeviceFormatProperties(physicalDevice, VK_FORMAT_R32G32B32A32_SFLOAT,
-                                        &accumFormatProps);
-    linearBlitSupported =
-        (accumFormatProps.optimalTilingFeatures &
-         VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0U;
-    if (!linearBlitSupported) {
-        QL_LOG_WARN("R32G32B32A32_SFLOAT does not support linear filtering: a "
-                    "reduced render scale will magnify with NEAREST");
-    }
-
     // The sRGB warning moved to the target descriptor: the format that
     // matters is the one being presented into, not one recorded at creation.
     // See NoteTargetFormat, called from BlitToTarget.
@@ -1217,20 +1184,28 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     }
     gpuDevice = gpu::vulkan::AdoptContext(*contextAdapter);
 
+    // Magnifying the accumulation needs a filterable source. Every driver that
+    // supports ray tracing supports this for RGBA32F, but the fallback costs
+    // one query and turns "wrong" into "blockier". The adopted device made
+    // that query when it was created.
+    linearBlitSupported = gpuDevice->Info().linearFilterRGBA32Float;
+    if (!linearBlitSupported) {
+        QL_LOG_WARN("R32G32B32A32_SFLOAT does not support linear filtering: a "
+                    "reduced render scale will magnify with NEAREST");
+    }
+
     perfLogger = std::make_unique<PerformanceLogger>(*gpuDevice);
     cameraTracePerf = std::make_unique<PerformanceLogger>(*gpuDevice);
     cameraFullPerf = std::make_unique<PerformanceLogger>(*gpuDevice);
 
-    // Create command pool
-    VkCommandPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    poolInfo.queueFamilyIndex = graphicsQueueFamily;
-
-    VkResult result = vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool);
-    if (result != VK_SUCCESS) {
+    // Create command pool (graphics family, buffers reset one at a time)
+    gpu::CommandPoolDesc poolDesc;
+    poolDesc.resettable = true;
+    auto createdPool = gpuDevice->CreateCommandPool(poolDesc);
+    if (!createdPool) {
         return Result<void, String>::Err("Failed to create command pool");
     }
+    commandPool = std::move(createdPool).value();
 
     // Initialize default lighting params
     lightingParams = CreateDefaultLightingParams();
@@ -1743,7 +1718,7 @@ void ExternalRenderContext::Impl::AdoptScene(Scene&& loaded,
 }
 
 void ExternalRenderContext::Impl::RebuildSceneGpuResources() {
-    vkDeviceWaitIdle(device);
+    (void)gpuDevice->WaitIdle();
 
     textureManager->UploadTextures(scene->textures);
     BuildAccelerationStructures();
@@ -1861,7 +1836,7 @@ bool ExternalRenderContext::Impl::UploadThermalSunResponse(
     if (reallocate) {
         // A pending upload would still name the buffer being replaced.
         FlushPendingGpuWork();
-        if (thermalSunResponseBuffer) vkDeviceWaitIdle(device);
+        if (thermalSunResponseBuffer) (void)gpuDevice->WaitIdle();
         thermalSunResponseBuffer = std::make_unique<GpuBuffer>(
             contextAdapter->GetAllocator(), bytes,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -1895,7 +1870,7 @@ bool ExternalRenderContext::Impl::UploadThermalTangent(const Vector<f32>& tangen
     if (reallocate) {
         // A pending upload would still name the buffer being replaced.
         FlushPendingGpuWork();
-        if (thermalParameterTangentBuffer) vkDeviceWaitIdle(device);
+        if (thermalParameterTangentBuffer) (void)gpuDevice->WaitIdle();
         thermalParameterTangentBuffer = std::make_unique<GpuBuffer>(
             contextAdapter->GetAllocator(), bytes,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -2684,7 +2659,7 @@ void ExternalRenderContext::Impl::ApplyInternalExtent(u32 renderW, u32 renderH) 
     height = renderH;
 
     // Wait for GPU
-    vkDeviceWaitIdle(device);
+    (void)gpuDevice->WaitIdle();
 
     outputImage =
         rendercore::CreateRenderTarget(*contextAdapter, width, height);
@@ -3104,7 +3079,7 @@ void ExternalRenderContext::Impl::UpdateMaterial(u32 materialIndex, const Materi
         rendercore::IsOpaqueForRayTracing(*scene, materialIndex) != wasOpaque) {
         // A frame the host submitted may still be tracing the structures being
         // replaced, as RebuildAccelerationStructure has to assume too.
-        vkDeviceWaitIdle(device);
+        (void)gpuDevice->WaitIdle();
         if (geometry.RefreshMaterialOpacity(*contextAdapter, *scene) && pipeline) {
             pipeline->BindAccelerationStructure(geometry.Tlas().GetHandle());
             if (geometry.InstanceCount() > 0) {
@@ -3296,7 +3271,7 @@ Result<i32, String> ExternalRenderContext::BuildEndmemberWeightTexture(
 
     // The texture array is what the shader indexes, so nothing may be reading
     // it while the descriptor is rewritten.
-    vkDeviceWaitIdle(m_impl->contextAdapter->GetDevice());
+    (void)m_impl->gpuDevice->WaitIdle();
 
     const i32 index = m_impl->textureManager->AppendTexture(weights);
     if (index < 0) {
@@ -3358,7 +3333,7 @@ void ExternalRenderContext::Impl::UploadSolarLut(const SolarSpectralLUT& lut) {
     // the upload queue first so nothing pending still names the old buffer.
     FlushPendingGpuWork();
     if (solarLutBuffer && device != VK_NULL_HANDLE)
-        vkDeviceWaitIdle(device);
+        (void)gpuDevice->WaitIdle();
 
     solarLutBuffer = std::make_unique<GpuBuffer>(
         contextAdapter->GetAllocator(), sizeof(SolarSpectralLUT),
@@ -3525,7 +3500,7 @@ void ExternalRenderContext::SetThermalSolveEnabled(const bool enabled) {
     if (!enabled && m_impl->thermalTemperatureBuffer) {
         try {
             m_impl->FlushPendingGpuWork();
-            vkDeviceWaitIdle(m_impl->device);
+            (void)m_impl->gpuDevice->WaitIdle();
             const f32 zero = 0.0f;
             m_impl->thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
                 m_impl->contextAdapter->GetAllocator(), sizeof(f32),
@@ -3578,7 +3553,7 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
             (m_impl->thermalTemperatureBuffer ? m_impl->thermalTemperatureBuffer->GetSize() : 0)) {
         // A pending upload would still name the buffer being replaced.
         m_impl->FlushPendingGpuWork();
-        vkDeviceWaitIdle(m_impl->device);
+        (void)m_impl->gpuDevice->WaitIdle();
         m_impl->thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
             m_impl->contextAdapter->GetAllocator(),
             result.surfaceTemperature_K.size() * sizeof(f32),
@@ -3652,7 +3627,7 @@ void ExternalRenderContext::Impl::UploadDeferred(GpuBuffer& dst, VkDeviceSize of
     // means the device is already lost, so log and still write rather than
     // leave a stale field standing.
     FlushPendingGpuWork();
-    if (vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS)
+    if (!gpuDevice->WaitQueueIdle())
         QL_LOG_ERROR("deferred buffer upload: previous GPU readers did not complete");
     dst.Upload(data, bytes, offset);
 }
@@ -3678,7 +3653,7 @@ Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s, bool d
             // trajectory cannot do. Rebuilding is the honest recovery for
             // whatever did.
             QL_LOG_DEBUG("Timeline: refit refused, rebuilding the TLAS");
-            vkDeviceWaitIdle(device);
+            (void)gpuDevice->WaitIdle();
             geometry.RebuildTlas(*contextAdapter, *scene);
             if (pipeline) {
                 pipeline->BindAccelerationStructure(geometry.Tlas().GetHandle());
@@ -3928,7 +3903,7 @@ void ExternalRenderContext::RebuildAccelerationStructure() {
 
     // A frame the host submitted may still be tracing the TLAS being replaced.
     m_impl->pendingTlasRefit = false;
-    vkDeviceWaitIdle(m_impl->device);
+    (void)m_impl->gpuDevice->WaitIdle();
 
     m_impl->geometry.RebuildTlas(*m_impl->contextAdapter, *m_impl->scene);
 
@@ -4031,98 +4006,44 @@ Result<glm::vec4, String> ExternalRenderContext::ReadPixelValue(u32 x, u32 y) {
     }
 
     // Allocate command buffer for copy operation
-    VkCommandBufferAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.commandPool = m_impl->commandPool;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = 1;
-
-    VkCommandBuffer cmd;
-    if (vkAllocateCommandBuffers(m_impl->device, &allocInfo, &cmd) != VK_SUCCESS) {
+    auto allocated = m_impl->commandPool->Allocate();
+    if (!allocated) {
         return Result<glm::vec4, String>::Err("Failed to allocate command buffer");
     }
+    std::unique_ptr<gpu::CommandBuffer> commandBuffer = std::move(allocated).value();
 
-    // Begin command buffer
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &beginInfo);
+    // Begin command buffer. Its result was not checked before; a buffer that
+    // did not begin has nothing to record into.
+    auto begun = commandBuffer->Begin();
+    if (!begun) {
+        return Result<glm::vec4, String>::Err("Failed to begin command buffer");
+    }
+    gpu::CommandList& list = *begun.value();
 
-    // Transition outputImage to TRANSFER_SRC_OPTIMAL
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;  // outputImage is kept in GENERAL
-    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = m_impl->outputImage->GetImage();
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    // Transition outputImage to TRANSFER_SRC_OPTIMAL (it is kept in GENERAL)
+    const gpu::TextureRef source =
+        gpu::vulkan::Ref(*m_impl->outputImage).WithLayout(gpu::TextureLayoutPolicy::Optimal);
+    list.Barrier(gpu::TextureBarrier{source, gpu::Access::RayTraceWrite, gpu::Access::TransferRead});
 
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0,
-        0, nullptr,
-        0, nullptr,
-        1, &barrier
-    );
-
-    // Copy single pixel to staging buffer
-    VkBufferImageCopy region{};
-    region.bufferOffset = 0;
-    region.bufferRowLength = 0;    // Tightly packed
-    region.bufferImageHeight = 0;  // Tightly packed
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.mipLevel = 0;
-    region.imageSubresource.baseArrayLayer = 0;
-    region.imageSubresource.layerCount = 1;
-    region.imageOffset = {static_cast<i32>(x), static_cast<i32>(y), 0};
-    region.imageExtent = {1, 1, 1};  // Single pixel
-
-    vkCmdCopyImageToBuffer(
-        cmd,
-        m_impl->outputImage->GetImage(),
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        m_impl->pixelReadbackBuffer->GetHandle(),
-        1, &region
-    );
+    // Copy single pixel to staging buffer (tightly packed)
+    gpu::BufferTextureCopy region;
+    region.x = static_cast<i32>(x);
+    region.y = static_cast<i32>(y);
+    region.width = 1;  // Single pixel
+    region.height = 1;
+    list.CopyTextureToBuffer(source, gpu::vulkan::Ref(*m_impl->pixelReadbackBuffer), region);
 
     // Transition outputImage back to GENERAL
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        0,
-        0, nullptr,
-        0, nullptr,
-        1, &barrier
-    );
+    list.Barrier(gpu::TextureBarrier{source, gpu::Access::TransferRead, gpu::Access::RayTraceWrite});
 
     // End and submit command buffer
-    vkEndCommandBuffer(cmd);
+    (void)commandBuffer->End();
 
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &cmd;
-
-    vkQueueSubmit(m_impl->graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(m_impl->graphicsQueue);  // Wait for copy to complete
+    (void)m_impl->gpuDevice->Submit(*commandBuffer, nullptr);
+    (void)m_impl->gpuDevice->WaitQueueIdle();  // Wait for copy to complete
 
     // Free command buffer
-    vkFreeCommandBuffers(m_impl->device, m_impl->commandPool, 1, &cmd);
+    commandBuffer.reset();
 
     // Map staging buffer and read pixel value
     const void* mappedData = m_impl->pixelReadbackBuffer->MapRead();
@@ -4248,37 +4169,17 @@ Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
     y = Impl::MapToRender(y, m_impl->targetHeight, m_impl->height);
 
     m_impl->CreatePickPipeline();
-    if (m_impl->pickPipeline == VK_NULL_HANDLE || !m_impl->pickOutputBuffer) {
+    if (!m_impl->pickKernel || !m_impl->pickOutputBuffer) {
         return Result<PickResult, String>::Err("Pick: pipeline unavailable");
     }
 
     // Rebind every call: RebuildTlas replaces the TLAS object outright
-    VkAccelerationStructureKHR tlas = m_impl->geometry.Tlas().GetHandle();
-    VkWriteDescriptorSetAccelerationStructureKHR asInfo{};
-    asInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
-    asInfo.accelerationStructureCount = 1;
-    asInfo.pAccelerationStructures = &tlas;
-
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = m_impl->pickOutputBuffer->GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
-
-    std::array<VkWriteDescriptorSet, 2> writes{};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].pNext = &asInfo;
-    writes[0].dstSet = m_impl->pickDescriptorSet;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    writes[0].descriptorCount = 1;
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = m_impl->pickDescriptorSet;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[1].descriptorCount = 1;
-    writes[1].pBufferInfo = &bufferInfo;
-    vkUpdateDescriptorSets(m_impl->device, static_cast<u32>(writes.size()),
-                           writes.data(), 0, nullptr);
+    const gpu::BufferRef pickOutput = gpu::vulkan::Ref(*m_impl->pickOutputBuffer);
+    const gpu::BindingWrite writes[] = {
+        gpu::BindingWrite::Scene(0, gpu::vulkan::Ref(m_impl->geometry.Tlas().GetHandle())),
+        gpu::BindingWrite::Buffer(1, gpu::BindingKind::ReadWriteBuffer, pickOutput),
+    };
+    m_impl->gpuDevice->WriteBindGroup(m_impl->pickBindGroup, writes);
 
     // The exact camera the raygen shader gets, so the pick ray matches the frame
     const CameraData cameraData = m_impl->camera.GetCameraData();
@@ -4324,27 +4225,13 @@ Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
         pc.projection = 0;
     }
 
-    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->pickPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                m_impl->pickPipelineLayout, 0, 1,
-                                &m_impl->pickDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, m_impl->pickPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
-                           0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, 1, 1, 1);
+    m_impl->gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
+        list.SetKernel(*m_impl->pickKernel);
+        list.SetBindGroup(*m_impl->pickKernelLayout, 0, m_impl->pickBindGroup);
+        list.PushConstants(*m_impl->pickKernelLayout, pc);
+        list.Dispatch(1, 1, 1);
 
-        VkBufferMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.buffer = m_impl->pickOutputBuffer->GetHandle();
-        barrier.offset = 0;
-        barrier.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &barrier,
-                             0, nullptr);
+        list.Barrier(gpu::BufferBarrier{pickOutput, gpu::Access::ComputeWrite, gpu::Access::HostRead});
     });
 
     PickResultGpu gpu{};
@@ -6367,100 +6254,58 @@ void ExternalRenderContext::Impl::CreatePickPipeline() {
 
     QL_LOG_INFO("Creating pick compute pipeline...");
 
-    const std::vector<u32> code = rendercore::LoadSpirv("pick.spv");
-    if (code.empty()) {
+    const StringView kShaderNames[] = {"pick"};
+    auto shaders = gpuDevice->Shaders().Load(kShaderNames);
+    if (!shaders.has_value()) {
         QL_LOG_WARN("Pick: could not load pick.spv, picking disabled");
         return;
     }
 
-    VkShaderModuleCreateInfo moduleInfo{};
-    moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    moduleInfo.codeSize = code.size() * sizeof(u32);
-    moduleInfo.pCode = code.data();
-    if (vkCreateShaderModule(device, &moduleInfo, nullptr, &pickShader) != VK_SUCCESS) {
-        QL_LOG_WARN("Pick: failed to create shader module");
-        return;
-    }
-
-    // binding 0: TLAS, binding 1: result buffer
-    std::vector<VkDescriptorSetLayoutBinding> bindings(2);
-    bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    bindings[1].binding = 1;
-    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-    VkDescriptorSetLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = static_cast<u32>(bindings.size());
-    layoutInfo.pBindings = bindings.data();
-    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr,
-                                    &pickDescriptorSetLayout) != VK_SUCCESS) {
+    // binding 0: TLAS, binding 1: result buffer, both compute-visible
+    constexpr gpu::BindingSlot kSlots[] = {
+        {0, gpu::BindingKind::AccelerationStructure, 1, false},
+        {1, gpu::BindingKind::ReadWriteBuffer, 1, false},
+    };
+    auto bindingLayoutResult = gpuDevice->CreateBindingLayout(
+        gpu::BindingLayoutDesc{0, std::span<const gpu::BindingSlot>(kSlots)});
+    if (!bindingLayoutResult.has_value()) {
         QL_LOG_WARN("Pick: failed to create descriptor set layout");
         return;
     }
+    pickBindingLayout = std::move(bindingLayoutResult.value());
 
-    VkPushConstantRange pushRange{};
-    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushRange.offset = 0;
-    pushRange.size = sizeof(PickPushConstants);
-
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &pickDescriptorSetLayout;
-    pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
-    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr,
-                               &pickPipelineLayout) != VK_SUCCESS) {
+    const gpu::BindingLayout* spaces[] = {pickBindingLayout.get()};
+    auto kernelLayoutResult = gpuDevice->CreateKernelLayout(gpu::KernelLayoutDesc{
+        std::span<const gpu::BindingLayout* const>(spaces), sizeof(PickPushConstants)});
+    if (!kernelLayoutResult.has_value()) {
         QL_LOG_WARN("Pick: failed to create pipeline layout");
         return;
     }
+    pickKernelLayout = std::move(kernelLayoutResult.value());
 
-    VkPipelineShaderStageCreateInfo stageInfo{};
-    stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    stageInfo.module = pickShader;
-    stageInfo.pName = "main";
-
-    VkComputePipelineCreateInfo pipelineInfo{};
-    pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    pipelineInfo.stage = stageInfo;
-    pipelineInfo.layout = pickPipelineLayout;
-    if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
-                                 &pickPipeline) != VK_SUCCESS) {
-        QL_LOG_WARN("Pick: failed to create compute pipeline");
-        pickPipeline = VK_NULL_HANDLE;
+    // The shader module lives only as long as the pipeline creation.
+    auto kernelResult = gpuDevice->CreateComputeKernel(
+        gpu::ComputeKernelDesc{&shaders.value()[0], pickKernelLayout.get()});
+    if (!kernelResult.has_value()) {
+        QL_LOG_WARN("Pick: failed to create compute pipeline ({})", kernelResult.error());
         return;
     }
+    pickKernel = std::move(kernelResult.value());
 
-    std::vector<VkDescriptorPoolSize> poolSizes = {
-        {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
-    };
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = static_cast<u32>(poolSizes.size());
-    poolInfo.pPoolSizes = poolSizes.data();
-    poolInfo.maxSets = 1;
-    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &pickDescriptorPool) != VK_SUCCESS) {
+    // Pool sizes follow the layout: {acceleration structure 1, storage buffer 1}, one set.
+    auto poolResult = gpuDevice->CreateBindGroupPool(*pickBindingLayout, 1);
+    if (!poolResult.has_value()) {
         QL_LOG_WARN("Pick: failed to create descriptor pool");
         return;
     }
+    pickBindGroupPool = std::move(poolResult.value());
 
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = pickDescriptorPool;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &pickDescriptorSetLayout;
-    if (vkAllocateDescriptorSets(device, &allocInfo, &pickDescriptorSet) != VK_SUCCESS) {
+    auto groups = pickBindGroupPool->Allocate(1);
+    if (!groups.has_value()) {
         QL_LOG_WARN("Pick: failed to allocate descriptor set");
-        pickDescriptorSet = VK_NULL_HANDLE;
         return;
     }
+    pickBindGroup = groups.value()[0];
 
     pickOutputBuffer = std::make_unique<GpuBuffer>(
         contextAdapter->GetAllocator(), sizeof(PickResultGpu),
@@ -6501,7 +6346,7 @@ void ExternalRenderContext::Impl::RecreateClaheDisplayImage() {
     // Replacing a descriptor-backed image a submitted frame may still read;
     // configuration changes happen between frames, but a resize or a camera
     // config change is not guaranteed to.
-    vkDeviceWaitIdle(device);
+    (void)gpuDevice->WaitIdle();
     const auto extent = ClaheInputExtent();
     displayImage = std::make_unique<GpuImage>(
         contextAdapter->GetAllocator(),
@@ -6679,64 +6524,58 @@ void ExternalRenderContext::Impl::TransitionImageLayoutImmediate(
     VkImageLayout oldLayout,
     VkImageLayout newLayout) {
 
-    // Allocate command buffer
-    VkCommandBufferAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandPool = commandPool;
-    allocInfo.commandBufferCount = 1;
-
-    VkCommandBuffer cmd;
-    vkAllocateCommandBuffers(device, &allocInfo, &cmd);
+    // Allocate command buffer. Allocation and begin were unchecked before, and a
+    // failure recorded into an invalid handle; they throw now, as an immediate
+    // submission does and as the image constructor every caller just ran does.
+    auto allocated = commandPool->Allocate();
+    if (!allocated) {
+        throw std::runtime_error("Failed to allocate command buffer: " + allocated.error());
+    }
+    std::unique_ptr<gpu::CommandBuffer> commandBuffer = std::move(allocated).value();
 
     // Begin command buffer
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &beginInfo);
+    auto begun = commandBuffer->Begin();
+    if (!begun) {
+        throw std::runtime_error("Failed to begin command buffer: " + begun.error());
+    }
+    gpu::CommandList& list = *begun.value();
 
-    // Image memory barrier
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = oldLayout;
-    barrier.newLayout = newLayout;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
-
-    VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-    VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    // Image memory barrier over every mip and layer, all commands against all
+    // commands. Under Optimal the accesses name the layouts the table names.
+    gpu::TextureBarrier barrier;
+    barrier.texture.image = gpu::vulkan::ToHandle(image);
+    barrier.texture.layout = gpu::TextureLayoutPolicy::Optimal;
+    barrier.mipCount = gpu::kRemaining;
+    barrier.layerCount = gpu::kRemaining;
 
     if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_GENERAL) {
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.discard = true;
+        barrier.to = gpu::Access::ComputeRead | gpu::Access::ComputeWrite;
     } else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.discard = true;
+        barrier.to = gpu::Access::TransferWrite;
     } else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.from = gpu::Access::TransferWrite;
+        barrier.to = gpu::Access::ComputeRead;
+    } else {
+        // No access on either side; the two layouts are named as given.
+        barrier.hostLayoutBefore = static_cast<u32>(oldLayout);
+        barrier.hostLayoutAfter = static_cast<u32>(newLayout);
     }
 
-    vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    gpu::BarrierBatch batch;
+    batch.textures = std::span<const gpu::TextureBarrier>(&barrier, 1);
+    batch.srcStages = gpu::PipelineStage::AllCommands;
+    batch.dstStages = gpu::PipelineStage::AllCommands;
+    list.Barrier(batch);
 
     // End and submit
-    vkEndCommandBuffer(cmd);
+    (void)commandBuffer->End();
 
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &cmd;
+    (void)gpuDevice->Submit(*commandBuffer, nullptr);
+    (void)gpuDevice->WaitQueueIdle();
 
-    vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(graphicsQueue);
-
-    vkFreeCommandBuffers(device, commandPool, 1, &cmd);
+    commandBuffer.reset();
 
     (void)format;  // Format used for barrier determination in more complex cases
 }
@@ -6778,7 +6617,7 @@ const AtmosphereNNConfig& ExternalRenderContext::GetAtmosphere() const {
 Result<void, String> ExternalRenderContext::LoadEnvironmentMap(const String& hdrPath) {
     // The previous scene's cubemap is freed below; a frame the host submitted may
     // still be reading it.
-    vkDeviceWaitIdle(m_impl->device);
+    (void)m_impl->gpuDevice->WaitIdle();
 
     auto loaded = rendercore::EnvironmentCubemap::Load(*m_impl->contextAdapter, hdrPath);
     if (!loaded.has_value()) {
