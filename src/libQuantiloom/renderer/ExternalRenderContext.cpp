@@ -5,15 +5,14 @@
  * @author blitzcolo
  */
 
-// VMA must be included BEFORE GpuBuffer.hpp/GpuImage.hpp to avoid enum redefinition
 #include <type_traits>
 #include <mutex>
 #include <set>
-#include <vk_mem_alloc.h>
 
 #include "renderer/ExternalRenderContext.hpp"
 #include "core/ResourceLocator.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
+#include "gpu/Device.hpp"
+#include "gpu/DeviceFactory.hpp"
 #include "renderer/ConfigResolve.hpp"
 #include "renderer/GpuAlloc.hpp"
 #include "renderer/ShaderBinary.hpp"
@@ -21,18 +20,15 @@
 #include "renderer/SpectralUnmixer.hpp"
 #include "renderer/TemperatureTextureLoader.hpp"
 #include "renderer/RenderCore.hpp"
+#include "renderer/TextureTransitions.hpp"
 #include "renderer/ThermalSunResponse.hpp"
-#include "VulkanContextAdapter.hpp"
 #include "RayTracingPipeline.hpp"
 #include "AccelerationStructure.hpp"
-#include "GpuBuffer.hpp"
 #include "DeferredBufferUploads.hpp"
 #include "AsyncPixelReadback.hpp"
-#include "GpuImage.hpp"
 #include "GpuClahe.hpp"
 #include "GpuDisplayRange.hpp"
 #include "TextureManager.hpp"
-#include "CommandHelper.hpp"
 #include "PerformanceLogger.hpp"
 #include "BRDFLutGenerator.hpp"
 #include "renderer/LightingParams.hpp"
@@ -89,24 +85,6 @@ using core::GetDefaultCacheDirectory;
 
 
 namespace {
-
-/// Neutral u64 handles back into the backend's own types. A dispatchable
-/// handle is a pointer, a non-dispatchable one an integer; the cast differs.
-template <typename T>
-T FromGpuHandle(GpuHandle handle) {
-    if constexpr (std::is_pointer_v<T>) {
-        return reinterpret_cast<T>(static_cast<uintptr_t>(handle));
-    } else {
-        return static_cast<T>(handle);
-    }
-}
-
-/// The recording descriptor for a command buffer the SDK itself allocated
-/// (the internal immediate-submit paths), in the same shape a host passes.
-GpuCommandRecording RecordingOf(VkCommandBuffer cmd) {
-    return {GpuBackend::Vulkan, kGpuInteropVersion,
-            static_cast<GpuHandle>(reinterpret_cast<uintptr_t>(cmd))};
-}
 
 String BackendError(GpuBackend backend) {
     if (backend == GpuBackend::Metal) return "this SDK build has no Metal backend";
@@ -178,6 +156,12 @@ gpu::Format HostTargetFormat(GpuTargetFormat format) {
     return gpu::Format::Undefined;
 }
 
+/// The layout a depth target that names no final layout is left in. Host
+/// layouts are the backend's own tokens and travel verbatim (GpuInterop.hpp);
+/// this is the value of Vulkan's shader-read-only-optimal layout, the one a
+/// host samples a depth AOV in. A backend without layouts ignores it.
+constexpr u32 kDepthTargetDefaultFinalLayout = 5;
+
 }  // namespace
 
 // ============================================================================
@@ -185,12 +169,11 @@ gpu::Format HostTargetFormat(GpuTargetFormat format) {
 // ============================================================================
 
 struct ExternalRenderContext::Impl {
-    // Context adapter (provides VulkanContext interface for external handles)
-    std::unique_ptr<VulkanContextAdapter> contextAdapter;
-
-    // The adopted compute RHI view of the adapter's context. Declared
-    // immediately after contextAdapter so it is destroyed right after every
-    // module that holds gpu:: objects and before the adapter itself.
+    // The device over the host's handles. It owns the context adapter that
+    // wraps them, and with it the VMA allocator every buffer and image below
+    // is allocated from. Declared first, so it is destroyed last: after every
+    // member that holds a gpu:: object or a gpu::Device&, whether or not
+    // Cleanup remembers to reset it.
     std::unique_ptr<gpu::Device> gpuDevice;
 
     // The facade that owns this Impl. Used by internal steps that need a
@@ -198,13 +181,6 @@ struct ExternalRenderContext::Impl {
     // SetTimelineTime). Re-pointed by the facade's move operations; never
     // null while the Impl is alive.
     ExternalRenderContext* owner = nullptr;
-
-    // External Vulkan handles (cached for reference)
-    VkInstance instance = VK_NULL_HANDLE;
-    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-    VkDevice device = VK_NULL_HANDLE;
-    VkQueue graphicsQueue = VK_NULL_HANDLE;
-    u32 graphicsQueueFamily = 0;
 
     // Current internal render extent -- what the trace, the sensor chain,
     // CLAHE and every extent-sized image are sized to.
@@ -221,7 +197,7 @@ struct ExternalRenderContext::Impl {
     u32 targetHeight = 720;
     f32 renderScale = 1.0f;
 
-    // Whether the accumulation format can be magnified with VK_FILTER_LINEAR.
+    // Whether the accumulation format can be magnified with linear filtering.
     // Queried once at init; NEAREST is the fallback and only looks blockier.
     bool linearBlitSupported = false;
 
@@ -443,13 +419,13 @@ struct ExternalRenderContext::Impl {
     f32 lastSampleGpuMs = 0.0f;
 
     // Pixel readback buffer (for debug hover display)
-    std::unique_ptr<GpuBuffer> pixelReadbackBuffer;
+    std::unique_ptr<gpu::Buffer> pixelReadbackBuffer;
     std::unique_ptr<rendercore::AsyncPixelReadback> asyncPixelReadback;
 
     // Display enhancement resources. The pipeline is still the three CLAHE
     // passes -- Linear skips the first two and Equalize sums across tiles.
     DisplayEnhancementParams displayParams;
-    std::unique_ptr<GpuImage> displayImage;           // tone-mapped output for display
+    std::unique_ptr<gpu::Texture> displayImage;       // tone-mapped output for display
     // True once ExecuteCLAHE has written displayImage under the current
     // setting. Enabling CLAHE after the trace stopped leaves the image
     // never-written; without this flag a present would blit undefined
@@ -463,7 +439,7 @@ struct ExternalRenderContext::Impl {
     bool displayRangeInitAttempted = false;
 
     // Viewport pick (1x1 inline ray-query dispatch; see Pick())
-    std::unique_ptr<GpuBuffer> pickOutputBuffer;  // host-visible, one PickResultGpu
+    std::unique_ptr<gpu::Buffer> pickOutputBuffer;  // host-visible, one PickResultGpu
     // Destroyed in reverse declaration order -- kernel, pool, kernel layout,
     // binding layout -- which is the order Cleanup releases them in.
     std::unique_ptr<gpu::BindingLayout> pickBindingLayout;
@@ -491,29 +467,30 @@ struct ExternalRenderContext::Impl {
     bool cameraCaptureCompleted = false;
     u64 cameraAcquisitionIndex = 0;
     f64 cameraAcquisitionTimeSeconds = 0.0;
-    std::unique_ptr<GpuImage>
+    std::unique_ptr<gpu::Texture>
         cameraMeasurementImage; // Binding 28, physical pixels, one layer per time stratum.
-    std::unique_ptr<GpuImage> cameraMeasurementDepthImage; // Binding 31, per-stratum primary depth.
-    std::unique_ptr<GpuImage> cameraBaselineImage;
-    std::unique_ptr<GpuImage> cameraDepthImage;
-    std::unique_ptr<GpuBuffer> cameraResponseBuffer;       // Binding 29, knot/CDF table.
-    std::unique_ptr<GpuBuffer> cameraDynamicCounterBuffer; // Binding 30, 4 x u32 raygen counters.
+    std::unique_ptr<gpu::Texture>
+        cameraMeasurementDepthImage; // Binding 31, per-stratum primary depth.
+    std::unique_ptr<gpu::Texture> cameraBaselineImage;
+    std::unique_ptr<gpu::Texture> cameraDepthImage;
+    std::unique_ptr<gpu::Buffer> cameraResponseBuffer;       // Binding 29, knot/CDF table.
+    std::unique_ptr<gpu::Buffer> cameraDynamicCounterBuffer; // Binding 30, 4 x u32 raygen counters.
     /// 32 bytes of GPU_TO_CPU: the raygen counters then the camera pipeline's
     /// dynamic counters, copied at the end of a measurement recording so
     /// GetLastDynamicExposureReport reads what already landed instead of
     /// waiting on the queue. The event is set by that copy block and reset
     /// by the next measurement recording.
-    std::unique_ptr<GpuBuffer> cameraDynamicReadback;
+    std::unique_ptr<gpu::Buffer> cameraDynamicReadback;
     std::unique_ptr<gpu::Event> cameraDynamicReadbackEvent;
     // The report's host-side inputs, snapshotted where the copy is recorded
     // so a config change between record and read cannot retcon them.
     u32 cameraDynamicSensorWidth = 0;
     u32 cameraDynamicSensorHeight = 0;
     u32 cameraDynamicGpuTimePositions = 1;
-    std::unique_ptr<GpuBuffer> cameraAtmosHeaderBuffer;
-    std::unique_ptr<GpuBuffer> cameraAtmosDataBuffer;
-    std::unique_ptr<GpuBuffer> cameraBaselineAtmosHeaderBuffer;
-    std::unique_ptr<GpuBuffer> cameraBaselineAtmosDataBuffer;
+    std::unique_ptr<gpu::Buffer> cameraAtmosHeaderBuffer;
+    std::unique_ptr<gpu::Buffer> cameraAtmosDataBuffer;
+    std::unique_ptr<gpu::Buffer> cameraBaselineAtmosHeaderBuffer;
+    std::unique_ptr<gpu::Buffer> cameraBaselineAtmosDataBuffer;
     std::unique_ptr<rendercore::GpuCameraPipeline> cameraGpuPipeline;
     f32 cameraAtmosMinNm = 0.0f;
     f32 cameraAtmosStepNm = 0.0f;
@@ -642,7 +619,7 @@ struct ExternalRenderContext::Impl {
         cameraBaselineAtmosDataBuffer.reset();
 
         // Save and destroy pipeline cache
-        if (pipelineCache && contextAdapter) {
+        if (pipelineCache && gpuDevice) {
             RayTracingPipeline::SavePipelineCache(pipelineCache.get(), pipelineCachePath);
             RayTracingPipeline::DestroyPipelineCache(pipelineCache);
         }
@@ -703,15 +680,15 @@ struct ExternalRenderContext::Impl {
 
         scene.reset();
 
-        // The context adapter is deliberately NOT reset here. It owns the VMA
-        // allocator, so anything holding a VMA allocation has to die first --
-        // and resetting it at the end of this list only covers the members the
-        // list remembers. cieCmfBuffer was missing from it for six months, and
-        // freed itself against a dangling allocator every time this context was
-        // destroyed: an access violation inside vmaDestroyBuffer, on every
-        // minimize of the Studio window.
+        // The device is deliberately NOT reset here. It owns the context
+        // adapter and with it the VMA allocator, so anything holding a VMA
+        // allocation has to die first -- and resetting it at the end of this
+        // list only covers the members the list remembers. cieCmfBuffer was
+        // missing from it for six months, and freed itself against a dangling
+        // allocator every time this context was destroyed: an access violation
+        // inside vmaDestroyBuffer, on every minimize of the Studio window.
         //
-        // contextAdapter is the first member declared, so it is the last one
+        // gpuDevice is the first member declared, so it is the last one
         // destroyed, after every other member regardless of whether this
         // function knows about it. Leave it that way and do not add a member
         // above it.
@@ -842,7 +819,7 @@ struct ExternalRenderContext::Impl {
     ///
     /// @return the nodes that actually moved
     Vector<u32> ApplyTimelinePose(f64 t_s, bool deferRefit = false);
-    /// Same pose change, but every GPU write is recorded into @p cmd instead
+    /// Same pose change, but every GPU write is recorded into @p list instead
     /// of submitted immediately. RecordCameraMeasurement poses each stratum
     /// while the host's command buffer is still open, and an immediate refit
     /// there would run before any of the recorded traces -- leaving every
@@ -853,7 +830,10 @@ struct ExternalRenderContext::Impl {
     /// Unlike ApplyTimelinePose a refused refit is an error, not a rebuild:
     /// rebuilding mid-recording would rebind descriptors the recorded traces
     /// already captured.
-    Result<void, String> RecordTimelinePose(VkCommandBuffer cmd, f64 t_s);
+    ///
+    /// The refit needs the device's ray tracing entry points, which every list
+    /// a gpu::Device hands out carries (WrapRecording, ExecuteImmediate).
+    Result<void, String> RecordTimelinePose(gpu::CommandList& list, f64 t_s);
     /// Flush everything a synchronous consumer needs before it dispatches or
     /// replaces buffers: the deferred TLAS refit, then any queued buffer
     /// uploads, in one submission.
@@ -879,7 +859,7 @@ struct ExternalRenderContext::Impl {
     void CreatePipeline();
 
     void CreateClaheDisplayImage();
-    void ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height);
+    void ExecuteCLAHE(gpu::CommandList& list, u32 width, u32 height);
     void ComputeImageMinMax(f32& outMin, f32& outMax);
 
     Result<void, String> EnsureCameraResources();
@@ -889,7 +869,7 @@ struct ExternalRenderContext::Impl {
     /// re-record the current tick for convergence on redraws, and apply a
     /// pending history reset (which records nothing). Returns true when a new
     /// acquisition was committed.
-    Result<bool, String> StepCameraAcquisition(VkCommandBuffer cmd);
+    Result<bool, String> StepCameraAcquisition(gpu::CommandList& list);
     /// How many paths one record traces. An explicit acquisition (the
     /// Queue/Record/Complete facade) is a finished measurement: `spp` paths
     /// split across the time strata. A viewport frame is one step of a
@@ -897,8 +877,12 @@ struct ExternalRenderContext::Impl {
     /// a viewport frame costs and the host's sample count -- one per frame --
     /// is the number of paths each stratum holds.
     enum class CameraSampleBudget { Acquisition, ViewportFrame };
-    Result<void, String> RecordCameraMeasurement(VkCommandBuffer cmd, CameraSampleBudget budget);
-    Result<void, String> RecordCameraBaseline(VkCommandBuffer cmd);
+    Result<void, String> RecordCameraMeasurement(gpu::CommandList& list, CameraSampleBudget budget);
+    Result<void, String> RecordCameraBaseline(gpu::CommandList& list);
+    /// RecordQueuedCameraAcquisition's checks and recording on a list that is
+    /// already open: the facade's, over the host's command buffer, or an
+    /// immediate submission's (WarmUpCamera, AdvanceCameraTo).
+    Result<void, String> RecordQueuedAcquisition(gpu::CommandList& list);
     Result<CameraData, String>
     CameraDataForCapture(SpectralMode mode, f64 wavelengthNm,
                          f64 timeSeconds = std::numeric_limits<f64>::quiet_NaN()) const;
@@ -917,9 +901,9 @@ struct ExternalRenderContext::Impl {
     /// A photon detector with AE or AWB on: the loop has something to do.
     [[nodiscard]] bool CameraAutoControlActive() const;
     /// Record the display-half reprocess (demosaic -> color -> display ->
-    /// HSV) over the last acquisition on `cmd`. No trace, no statistics, no
+    /// HSV) over the last acquisition on `list`. No trace, no statistics, no
     /// state advance; see ReprocessCameraDisplay.
-    [[nodiscard]] Result<void, String> RecordCameraDisplayReprocess(VkCommandBuffer cmd);
+    [[nodiscard]] Result<void, String> RecordCameraDisplayReprocess(gpu::CommandList& list);
 
     /// Which image the swapchain blit should read, and the extent to blit
     /// from: CLAHE's output if the viewport override is on, then the camera
@@ -927,7 +911,7 @@ struct ExternalRenderContext::Impl {
     /// RenderFrame, PresentAccumulated and ReprocessAccumulated must never
     /// disagree about what "the current image" is.
     struct DisplaySource {
-        VkImage image;
+        gpu::TextureRef texture;
         u32 width;
         u32 height;
     };
@@ -942,9 +926,9 @@ struct ExternalRenderContext::Impl {
     /// only after a recorded run. The camera display needs no check here --
     /// CameraDisplayImage() already gates on cameraCaptureCompleted.
     [[nodiscard]] bool DisplaySourceReady(const DisplaySource& source) const {
-        if (outputImage && source.image == gpu::vulkan::NativeImage(outputImage->Ref()))
+        if (outputImage && source.texture.image == outputImage->Ref().image)
             return rawAccumulationValid;
-        if (displayImage && source.image == displayImage->GetImage())
+        if (displayImage && source.texture.image == displayImage->Ref().image)
             return displayImageValid;
         return true;
     }
@@ -1022,8 +1006,10 @@ struct ExternalRenderContext::Impl {
     /// @p dstHeight the target's. They differ whenever the render scale is
     /// below 1.0, and the blit magnifies. @p sourceWrite is the write of the
     /// pass that produced @p source (RayTraceWrite or ComputeWrite).
-    void BlitToTarget(VkCommandBuffer cmd, VkImage source, VkImage targetImage,
-                      VkImageLayout targetLayout, VkImageLayout targetFinalLayout,
+    /// @p targetImage and its two layouts are the host's (GpuImageTarget),
+    /// passed through verbatim.
+    void BlitToTarget(gpu::CommandList& gpuList, gpu::TextureRef source, GpuHandle targetImage,
+                      u32 targetLayout, u32 targetFinalLayout,
                       u32 srcWidth, u32 srcHeight,
                       u32 dstWidth, u32 dstHeight,
                       gpu::Access sourceWrite, GpuTargetFormat targetFormat);
@@ -1064,12 +1050,10 @@ struct ExternalRenderContext::Impl {
         return static_cast<u32>(std::min<u64>(scaled, renderDim - 1U));
     }
 
-    void TransitionImageLayoutImmediate(
-        VkImage image,
-        VkFormat format,
-        VkImageLayout oldLayout,
-        VkImageLayout newLayout
-    );
+    /// UNDEFINED -> GENERAL over every mip and layer of @p texture, for compute
+    /// reads and writes, in its own submission from the internal command pool,
+    /// waited for with the queue.
+    void TransitionImageLayoutImmediate(gpu::TextureRef texture);
 
 };
 
@@ -1114,10 +1098,10 @@ Result<std::unique_ptr<ExternalRenderContext>, String> ExternalRenderContext::Cr
     if (handles.backend != GpuBackend::Vulkan) {
         return CreateResult::Err(BackendError(handles.backend));
     }
-    if (handles.instance == 0) return CreateResult::Err("GpuDeviceHandles.instance (VkInstance) is null");
-    if (handles.physicalDevice == 0) return CreateResult::Err("GpuDeviceHandles.physicalDevice (VkPhysicalDevice) is null");
-    if (handles.device == 0) return CreateResult::Err("GpuDeviceHandles.device (VkDevice) is null");
-    if (handles.queue == 0) return CreateResult::Err("GpuDeviceHandles.queue (VkQueue) is null");
+    if (handles.instance == 0) return CreateResult::Err("GpuDeviceHandles.instance (the Vulkan instance) is null");
+    if (handles.physicalDevice == 0) return CreateResult::Err("GpuDeviceHandles.physicalDevice (the Vulkan physical device) is null");
+    if (handles.device == 0) return CreateResult::Err("GpuDeviceHandles.device (the Vulkan device) is null");
+    if (handles.queue == 0) return CreateResult::Err("GpuDeviceHandles.queue (the Vulkan queue) is null");
     if (params.width == 0 || params.height == 0) {
         return CreateResult::Err("Invalid dimensions");
     }
@@ -1144,12 +1128,6 @@ Result<std::unique_ptr<ExternalRenderContext>, String> ExternalRenderContext::Cr
 Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& params) {
     QL_LOG_INFO("Initializing ExternalRenderContext...");
 
-    // Store external handles
-    instance = FromGpuHandle<VkInstance>(params.device.instance);
-    physicalDevice = FromGpuHandle<VkPhysicalDevice>(params.device.physicalDevice);
-    device = FromGpuHandle<VkDevice>(params.device.device);
-    graphicsQueue = FromGpuHandle<VkQueue>(params.device.queue);
-    graphicsQueueFamily = params.device.queueFamily;
     width = params.width;
     height = params.height;
     targetWidth = params.width;
@@ -1173,29 +1151,22 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     }
     QL_LOG_INFO("Pipeline cache path: {}", pipelineCachePath);
 
-    // Create VulkanContextAdapter from external handles
-    VulkanContext::ExternalHandles adapterHandles{};
-    adapterHandles.instance = instance;
-    adapterHandles.physicalDevice = physicalDevice;
-    adapterHandles.device = device;
-    adapterHandles.graphicsQueue = graphicsQueue;
-    adapterHandles.graphicsQueueFamily = graphicsQueueFamily;
-    adapterHandles.allocator = FromGpuHandle<VmaAllocator>(params.device.vmaAllocator);
-
-    try {
-        // Any module holding gpu:: objects must release the adopted device
-        // before the adapter it names is replaced.
-        gpuDevice.reset();
-        contextAdapter = std::make_unique<VulkanContextAdapter>(adapterHandles, true);
-    } catch (const std::exception& e) {
-        return Result<void, String>::Err(String("Failed to create VulkanContextAdapter: ") + e.what());
+    // The device over the host's handles: on Vulkan a context adapter over the
+    // instance, physical device, device, queue and allocator the host owns.
+    // Any module holding gpu:: objects must release a previous device before
+    // it is replaced.
+    gpuDevice.reset();
+    auto createdDevice = gpu::CreateDeviceFromHandles(params.device);
+    if (!createdDevice) {
+        return Result<void, String>::Err(String("Failed to create VulkanContextAdapter: ") +
+                                         createdDevice.error());
     }
-    gpuDevice = gpu::vulkan::AdoptContext(*contextAdapter);
+    gpuDevice = std::move(createdDevice).value();
 
     // Magnifying the accumulation needs a filterable source. Every driver that
     // supports ray tracing supports this for RGBA32F, but the fallback costs
-    // one query and turns "wrong" into "blockier". The adopted device made
-    // that query when it was created.
+    // one query and turns "wrong" into "blockier". The device made that query
+    // when it was created.
     linearBlitSupported = gpuDevice->Info().linearFilterRGBA32Float;
     if (!linearBlitSupported) {
         QL_LOG_WARN("R32G32B32A32_SFLOAT does not support linear filtering: a "
@@ -2040,10 +2011,6 @@ void ExternalRenderContext::RenderFrame(
         QL_LOG_ERROR("ExternalRenderContext::RenderFrame: {}", invalid);
         return;
     }
-    const VkCommandBuffer cmd = FromGpuHandle<VkCommandBuffer>(recording.commandBuffer);
-    const VkImage targetImage = FromGpuHandle<VkImage>(target.image);
-    const VkImageLayout targetLayout = static_cast<VkImageLayout>(target.currentLayout);
-    const VkImageLayout targetFinalLayout = static_cast<VkImageLayout>(target.finalLayout);
     const u32 width = target.width;
     const u32 height = target.height;
 
@@ -2061,9 +2028,9 @@ void ExternalRenderContext::RenderFrame(
     // rather than a crash that takes unsaved work with it.
     try {
         // One list over the host's command buffer for everything this frame
-        // records through a module; it carries the refit's ray tracing entry points.
+        // records; it carries the refit's ray tracing entry points.
         const std::unique_ptr<gpu::CommandList> frameList =
-            m_impl->gpuDevice->WrapRecording(gpu::vulkan::ToHandle(cmd));
+            m_impl->gpuDevice->WrapRecording(recording.commandBuffer);
 
         // Host writes deferred since the last recording land first: the barriers
         // in Record order them after whatever earlier submissions are still
@@ -2167,7 +2134,7 @@ void ExternalRenderContext::RenderFrame(
                 // accumulation in outputImage is not traced in this mode; hosts that
                 // read CaptureScreenshot with the camera enabled get the last
                 // non-camera frame, if any.
-                if (auto stepped = m_impl->StepCameraAcquisition(cmd); !stepped) {
+                if (auto stepped = m_impl->StepCameraAcquisition(*frameList); !stepped) {
                     QL_LOG_WARN("Camera scheduler: {}", stepped.error());
                 }
                 // A settling frame restarted the measurement at a new
@@ -2201,17 +2168,17 @@ void ExternalRenderContext::RenderFrame(
         if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
             m_impl->clahe && m_impl->displayImage && m_impl->ClaheInputReady()) {
             const auto claheExtent = m_impl->ClaheInputExtent();
-            m_impl->ExecuteCLAHE(cmd, claheExtent.width, claheExtent.height);
+            m_impl->ExecuteCLAHE(*frameList, claheExtent.width, claheExtent.height);
         }
 
         const auto blitSource = m_impl->CurrentDisplaySource();
         // Whichever pass wrote it last is what the barrier has to wait on.
-        const gpu::Access srcWrite = (blitSource.image == gpu::vulkan::NativeImage(m_impl->outputImage->Ref()))
+        const gpu::Access srcWrite = (blitSource.texture.image == m_impl->outputImage->Ref().image)
                                          ? gpu::Access::RayTraceWrite
                                          : gpu::Access::ComputeWrite;
-        m_impl->BlitToTarget(cmd, blitSource.image, targetImage, targetLayout, targetFinalLayout,
-                             blitSource.width, blitSource.height, width, height, srcWrite,
-                             target.format);
+        m_impl->BlitToTarget(*frameList, blitSource.texture, target.image, target.currentLayout,
+                             target.finalLayout, blitSource.width, blitSource.height, width,
+                             height, srcWrite, target.format);
 
         m_impl->frameIndex++;
     } catch (const std::exception& e) {
@@ -2240,37 +2207,33 @@ ExternalRenderContext::Impl::CurrentDisplaySource() const {
     if (displayImage && clahe && displayImageValid && ClaheInputReady() &&
         (displayParams.enabled || CameraClahePersistent())) {
         const auto extent = ClaheInputExtent();
-        return {displayImage->GetImage(), extent.width, extent.height};
+        return {displayImage->Ref(), extent.width, extent.height};
     }
     const gpu::TextureRef cameraDisplay = CameraDisplayImage();
     if (cameraDisplay.IsValid()) {
-        return {gpu::vulkan::NativeImage(cameraDisplay), cameraConfig.optics.sensorWidthPx,
+        return {cameraDisplay, cameraConfig.optics.sensorWidthPx,
                 cameraConfig.optics.sensorHeightPx};
     }
-    return {gpu::vulkan::NativeImage(outputImage->Ref()), width, height};
+    return {outputImage->Ref(), width, height};
 }
 
-void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage source,
-                                               VkImage targetImage,
-                                               VkImageLayout targetLayout,
-                                               VkImageLayout targetFinalLayout,
+void ExternalRenderContext::Impl::BlitToTarget(gpu::CommandList& gpuList,
+                                               gpu::TextureRef source,
+                                               GpuHandle targetImage,
+                                               u32 targetLayout,
+                                               u32 targetFinalLayout,
                                                u32 srcWidth, u32 srcHeight,
                                                u32 dstWidth, u32 dstHeight,
                                                gpu::Access sourceWrite,
                                                GpuTargetFormat targetFormat) {
     NoteTargetFormat(targetFormat);
 
-    auto gpuList = gpu::vulkan::Wrap(cmd);
     // The source is a storage image kept in GENERAL, passed under Optimal so
     // its transfer read is TRANSFER_SRC_OPTIMAL. The target is the host's
     // image; its layouts are the caller's and travel verbatim.
-    gpu::TextureRef sourceRef;
-    sourceRef.image = gpu::vulkan::ToHandle(source);
-    sourceRef.width = srcWidth;
-    sourceRef.height = srcHeight;
-    sourceRef.layout = gpu::TextureLayoutPolicy::Optimal;
+    const gpu::TextureRef sourceRef = source.WithLayout(gpu::TextureLayoutPolicy::Optimal);
     const gpu::TextureRef targetRef = gpuDevice->ImportHostTexture(
-        gpu::vulkan::ToHandle(targetImage), HostTargetFormat(targetFormat), dstWidth, dstHeight);
+        targetImage, HostTargetFormat(targetFormat), dstWidth, dstHeight);
 
     // Step 1: source GENERAL -> TRANSFER_SRC_OPTIMAL, ordered against the pass
     // that wrote it and nothing else.
@@ -2283,7 +2246,7 @@ void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage sour
     // compositor still sampling the previous frame's texture, which the old
     // trace-stage-only barrier with srcAccess 0 did not.
     gpu::TextureBarrier targetIn{targetRef, gpu::Access::AnyWrite, gpu::Access::TransferWrite};
-    targetIn.hostLayoutBefore = static_cast<u32>(targetLayout);
+    targetIn.hostLayoutBefore = targetLayout;
     gpuList.Barrier(targetIn);
 
     // Step 3: blit, converting R32G32B32A32_SFLOAT to the target format and
@@ -2313,7 +2276,7 @@ void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage sour
     // same-layout barrier rather than a transition from a stale scope.
     gpu::TextureBarrier targetOut{targetRef, gpu::Access::TransferWrite,
                                   gpu::Access::AnyRead | gpu::Access::AnyWrite};
-    targetOut.hostLayoutAfter = static_cast<u32>(targetFinalLayout);
+    targetOut.hostLayoutAfter = targetFinalLayout;
     gpuList.Barrier(targetOut);
 }
 
@@ -2329,10 +2292,6 @@ bool ExternalRenderContext::PresentAccumulated(
         QL_LOG_ERROR("ExternalRenderContext::PresentAccumulated: {}", invalid);
         return false;
     }
-    const VkCommandBuffer cmd = FromGpuHandle<VkCommandBuffer>(recording.commandBuffer);
-    const VkImage targetImage = FromGpuHandle<VkImage>(target.image);
-    const VkImageLayout targetLayout = static_cast<VkImageLayout>(target.currentLayout);
-    const VkImageLayout targetFinalLayout = static_cast<VkImageLayout>(target.finalLayout);
     const u32 width = target.width;
     const u32 height = target.height;
 
@@ -2368,12 +2327,14 @@ bool ExternalRenderContext::PresentAccumulated(
     // The post-processed images still hold the last frame's result -- nothing
     // has changed the accumulation since -- so the chains are not re-run.
     const gpu::Access sourceWrite =
-        (source.image == gpu::vulkan::NativeImage(m_impl->outputImage->Ref()))
+        (source.texture.image == m_impl->outputImage->Ref().image)
             ? gpu::Access::RayTraceWrite
             : gpu::Access::ComputeWrite;
 
-    m_impl->BlitToTarget(cmd, source.image, targetImage, targetLayout, targetFinalLayout,
-                         source.width, source.height, width, height,
+    const std::unique_ptr<gpu::CommandList> list =
+        m_impl->gpuDevice->WrapRecording(recording.commandBuffer);
+    m_impl->BlitToTarget(*list, source.texture, target.image, target.currentLayout,
+                         target.finalLayout, source.width, source.height, width, height,
                          sourceWrite, target.format);
     // Deliberately no accumulatedSamples++: that is the whole point.
     return true;
@@ -2391,10 +2352,6 @@ bool ExternalRenderContext::ReprocessAccumulated(
         QL_LOG_ERROR("ExternalRenderContext::ReprocessAccumulated: {}", invalid);
         return false;
     }
-    const VkCommandBuffer cmd = FromGpuHandle<VkCommandBuffer>(recording.commandBuffer);
-    const VkImage targetImage = FromGpuHandle<VkImage>(target.image);
-    const VkImageLayout targetLayout = static_cast<VkImageLayout>(target.currentLayout);
-    const VkImageLayout targetFinalLayout = static_cast<VkImageLayout>(target.finalLayout);
     const u32 width = target.width;
     const u32 height = target.height;
 
@@ -2434,6 +2391,10 @@ bool ExternalRenderContext::ReprocessAccumulated(
         m_impl->hasCachedMinMax = true;
     }
 
+    // One list over the host's command buffer for the reprocess and the blit.
+    const std::unique_ptr<gpu::CommandList> list =
+        m_impl->gpuDevice->WrapRecording(recording.commandBuffer);
+
     // The post-processing half of RenderFrame, over the accumulation as it
     // stands. When the camera owns the frame, a display-setting change only
     // re-runs the display half of the camera chain (demosaic through HSV):
@@ -2441,14 +2402,14 @@ bool ExternalRenderContext::ReprocessAccumulated(
     // window keeps riding in the statistics buffer.
     if (m_impl->cameraConfig.enabled && m_impl->cameraCaptureCompleted &&
         !m_impl->cameraCapturePending && !m_impl->cameraCaptureRecorded) {
-        if (auto reprocessed = m_impl->RecordCameraDisplayReprocess(cmd); !reprocessed)
+        if (auto reprocessed = m_impl->RecordCameraDisplayReprocess(*list); !reprocessed)
             QL_LOG_WARN("Camera display reprocess: {}", reprocessed.error());
     }
 
     if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
         m_impl->clahe && m_impl->displayImage && m_impl->ClaheInputReady()) {
         const auto claheExtent = m_impl->ClaheInputExtent();
-        m_impl->ExecuteCLAHE(cmd, claheExtent.width, claheExtent.height);
+        m_impl->ExecuteCLAHE(*list, claheExtent.width, claheExtent.height);
     }
 
     const auto source = m_impl->CurrentDisplaySource();
@@ -2458,12 +2419,12 @@ bool ExternalRenderContext::ReprocessAccumulated(
         return false;
     }
     const gpu::Access sourceWrite =
-        (source.image == gpu::vulkan::NativeImage(m_impl->outputImage->Ref()))
+        (source.texture.image == m_impl->outputImage->Ref().image)
             ? gpu::Access::RayTraceWrite
             : gpu::Access::ComputeWrite;
 
-    m_impl->BlitToTarget(cmd, source.image, targetImage, targetLayout, targetFinalLayout,
-                         source.width, source.height, width, height,
+    m_impl->BlitToTarget(*list, source.texture, target.image, target.currentLayout,
+                         target.finalLayout, source.width, source.height, width, height,
                          sourceWrite, target.format);
     // Like PresentAccumulated: no accumulatedSamples++.
     return true;
@@ -2479,8 +2440,8 @@ Result<void, String> ExternalRenderContext::ReprocessCameraDisplay() {
         return Result<void, String>::Err(
             "complete the queued camera acquisition before reprocessing");
     Result<void, String> status = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-        status = m_impl->RecordCameraDisplayReprocess(cmd);
+    m_impl->gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
+        status = m_impl->RecordCameraDisplayReprocess(list);
     });
     return status;
 }
@@ -2496,12 +2457,9 @@ void ExternalRenderContext::BlitDepthTo(
         QL_LOG_ERROR("ExternalRenderContext::BlitDepthTo: {}", invalid);
         return;
     }
-    const VkCommandBuffer cmd = FromGpuHandle<VkCommandBuffer>(recording.commandBuffer);
-    const VkImage targetImage = FromGpuHandle<VkImage>(target.image);
-    const VkImageLayout targetCurrentLayout = static_cast<VkImageLayout>(target.currentLayout);
-    const VkImageLayout targetFinalLayout = target.finalLayout != 0
-                                                ? static_cast<VkImageLayout>(target.finalLayout)
-                                                : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    const u32 targetCurrentLayout = target.currentLayout;
+    const u32 targetFinalLayout =
+        target.finalLayout != 0 ? target.finalLayout : kDepthTargetDefaultFinalLayout;
     const u32 width = target.width;
     const u32 height = target.height;
 
@@ -2509,14 +2467,16 @@ void ExternalRenderContext::BlitDepthTo(
         return;
     }
 
-    auto gpuList = gpu::vulkan::Wrap(cmd);
+    const std::unique_ptr<gpu::CommandList> recordingList =
+        m_impl->gpuDevice->WrapRecording(recording.commandBuffer);
+    gpu::CommandList& gpuList = *recordingList;
     // The depth AOV is a storage image kept in GENERAL, passed under Optimal
     // for its transfer read. The target is the host's image; its layouts are
     // the caller's and travel verbatim.
     const gpu::TextureRef depthRef =
         m_impl->depthAovImage->Ref().WithLayout(gpu::TextureLayoutPolicy::Optimal);
     const gpu::TextureRef targetRef = m_impl->gpuDevice->ImportHostTexture(
-        gpu::vulkan::ToHandle(targetImage), HostTargetFormat(target.format), width, height);
+        target.image, HostTargetFormat(target.format), width, height);
 
     // Source: depth AOV GENERAL (raygen storage write) -> TRANSFER_SRC
     gpuList.Barrier(
@@ -2526,7 +2486,7 @@ void ExternalRenderContext::BlitDepthTo(
     // present: everything submitted before this point is waited on, which
     // covers last frame's fragment reads as well as the host's own writes.
     gpu::TextureBarrier targetIn{targetRef, gpu::Access::AnyWrite, gpu::Access::TransferWrite};
-    targetIn.hostLayoutBefore = static_cast<u32>(targetCurrentLayout);
+    targetIn.hostLayoutBefore = targetCurrentLayout;
     gpuList.Barrier(targetIn);
 
     // NEAREST on purpose: depth values must never be mixed across silhouettes.
@@ -2549,7 +2509,7 @@ void ExternalRenderContext::BlitDepthTo(
     // default), with the same conservative destination scope as the present.
     gpu::TextureBarrier targetOut{targetRef, gpu::Access::TransferWrite,
                                   gpu::Access::AnyRead | gpu::Access::AnyWrite};
-    targetOut.hostLayoutAfter = static_cast<u32>(targetFinalLayout);
+    targetOut.hostLayoutAfter = targetFinalLayout;
     gpuList.Barrier(targetOut);
 }
 
@@ -3627,12 +3587,12 @@ Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s, bool d
     return moved;
 }
 
-Result<void, String> ExternalRenderContext::Impl::RecordTimelinePose(VkCommandBuffer cmd,
+Result<void, String> ExternalRenderContext::Impl::RecordTimelinePose(gpu::CommandList& list,
                                                                      const f64 t_s) {
     if (!scene)
         return Result<void, String>::Ok();
-    // The refit needs the device's ray tracing entry points; the uploads ride the same list.
-    const std::unique_ptr<gpu::CommandList> list = gpuDevice->WrapRecording(gpu::vulkan::ToHandle(cmd));
+    // The refit records on the caller's list, which carries the device's ray
+    // tracing entry points; the uploads ride the same list.
 
     const Vector<u32> moved = timeline.Apply(*scene, t_s);
     if (!moved.empty()) {
@@ -3640,7 +3600,7 @@ Result<void, String> ExternalRenderContext::Impl::RecordTimelinePose(VkCommandBu
             if (!geometry.PrepareTlasRefit(*scene))
                 return Result<void, String>::Err(
                     "timeline pose changed the instance count while recording");
-            geometry.RecordPreparedTlasRefit(*list);
+            geometry.RecordPreparedTlasRefit(list);
             // The recording consumed whatever a deferred refit had prepared.
             pendingTlasRefit = false;
         }
@@ -3659,7 +3619,7 @@ Result<void, String> ExternalRenderContext::Impl::RecordTimelinePose(VkCommandBu
 
     // The emitter and lighting writes enqueued above must land before the
     // stratum's trace; an empty queue makes this a no-op.
-    pendingUploads.Record(*list);
+    pendingUploads.Record(list);
     return Result<void, String>::Ok();
 }
 
@@ -3945,12 +3905,12 @@ Result<glm::vec4, String> ExternalRenderContext::ReadPixelValue(u32 x, u32 y) {
 
     // Create staging buffer if not exists (16 bytes = sizeof(float4))
     if (!m_impl->pixelReadbackBuffer) {
-        m_impl->pixelReadbackBuffer = std::make_unique<GpuBuffer>(
-            m_impl->contextAdapter->GetAllocator(),
-            16,  // sizeof(float) * 4
-            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_GPU_TO_CPU  // CPU-readable staging buffer
-        );
+        m_impl->pixelReadbackBuffer = CreateBufferOrThrow(
+            *m_impl->gpuDevice,
+            gpu::BufferDesc{16,  // sizeof(float) * 4
+                            gpu::BufferUsage::TransferDst,
+                            gpu::MemoryClass::Readback,  // CPU-readable staging buffer
+                            0});
     }
 
     // Allocate command buffer for copy operation
@@ -3979,7 +3939,7 @@ Result<glm::vec4, String> ExternalRenderContext::ReadPixelValue(u32 x, u32 y) {
     region.y = static_cast<i32>(y);
     region.width = 1;  // Single pixel
     region.height = 1;
-    list.CopyTextureToBuffer(source, gpu::vulkan::Ref(*m_impl->pixelReadbackBuffer), region);
+    list.CopyTextureToBuffer(source, m_impl->pixelReadbackBuffer->Ref(), region);
 
     // Transition outputImage back to GENERAL
     list.Barrier(gpu::TextureBarrier{source, gpu::Access::TransferRead, gpu::Access::RayTraceWrite});
@@ -4122,7 +4082,7 @@ Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
     }
 
     // Rebind every call: RebuildTlas replaces the TLAS object outright
-    const gpu::BufferRef pickOutput = gpu::vulkan::Ref(*m_impl->pickOutputBuffer);
+    const gpu::BufferRef pickOutput = m_impl->pickOutputBuffer->Ref();
     const gpu::BindingWrite writes[] = {
         gpu::BindingWrite::Scene(0, m_impl->geometry.Tlas().Ref()),
         gpu::BindingWrite::Buffer(1, gpu::BindingKind::ReadWriteBuffer, pickOutput),
@@ -4210,14 +4170,9 @@ Result<Image, String> ExternalRenderContext::CaptureScreenshot() {
         return Result<Image, String>::Err("Render context not ready");
     }
 
-    // Read back entire outputImage using CommandHelper
-    std::vector<f32> pixels = CommandHelper::ReadbackImage(
-        *m_impl->contextAdapter,
-        gpu::vulkan::NativeImage(m_impl->outputImage->Ref()),
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        m_impl->width,
-        m_impl->height
-    );
+    // Read back the entire outputImage
+    std::vector<f32> pixels = rendercore::ReadbackTexture(
+        *m_impl->gpuDevice, m_impl->outputImage->Ref(), m_impl->width, m_impl->height);
 
     // Create Image from pixel data
     Image screenshot(m_impl->width, m_impl->height, 4);  // RGBA
@@ -4456,8 +4411,7 @@ ExternalRenderContext::TryUpdateCameraReadoutConfig(const camera::CameraConfig& 
         // A deferred upload must land before this submission, not race it.
         m_impl->FlushPendingGpuWork();
         Result<void, String> status = Result<void, String>::Ok();
-        CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-            auto list = gpu::vulkan::Wrap(cmd);
+        m_impl->gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
             status = m_impl->cameraGpuPipeline->RecordReadoutReprocess(
                 list, m_impl->EffectiveCameraConfig());
         });
@@ -4503,21 +4457,24 @@ Result<void, String> ExternalRenderContext::RecordQueuedCameraAcquisition(
     const GpuCommandRecording& recording) {
     if (const String invalid = ValidateRecording(recording); !invalid.empty())
         return Result<void, String>::Err(invalid);
-    const VkCommandBuffer cmd = FromGpuHandle<VkCommandBuffer>(recording.commandBuffer);
-    if (!m_impl->isReady)
+    return m_impl->RecordQueuedAcquisition(
+        *m_impl->gpuDevice->WrapRecording(recording.commandBuffer));
+}
+
+Result<void, String> ExternalRenderContext::Impl::RecordQueuedAcquisition(gpu::CommandList& list) {
+    if (!isReady)
         return Result<void, String>::Err(
             "camera acquisition needs a ready context and command buffer");
-    if (!m_impl->cameraCapturePending)
+    if (!cameraCapturePending)
         return Result<void, String>::Err("no camera acquisition is queued");
-    if (!m_impl->scene)
+    if (!scene)
         return Result<void, String>::Err("no scene loaded");
     // Recorded, not scrubbed: the host's command buffer is open. Queue already
     // moved the clock and solved its hour; this only restores the pose if
     // something moved it since, ordering the refit with the trace below.
-    if (auto posed = m_impl->RecordTimelinePose(cmd, m_impl->cameraAcquisitionTimeSeconds);
-        !posed)
+    if (auto posed = RecordTimelinePose(list, cameraAcquisitionTimeSeconds); !posed)
         return posed;
-    return m_impl->RecordCameraMeasurement(cmd, Impl::CameraSampleBudget::Acquisition);
+    return RecordCameraMeasurement(list, CameraSampleBudget::Acquisition);
 }
 
 Result<void, String> ExternalRenderContext::CompleteQueuedCameraAcquisition() {
@@ -4592,8 +4549,7 @@ Result<void, String> ExternalRenderContext::CheckpointCameraHistory() {
         Result<rendercore::GpuCameraPipeline::GpuCheckpoint, String>::Err(
             "camera history checkpoint was not recorded");
     m_impl->FlushPendingGpuWork();
-    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    m_impl->gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
         recorded = m_impl->cameraGpuPipeline->RecordStateCheckpoint(list);
     });
     if (!recorded)
@@ -4631,8 +4587,7 @@ Result<void, String> ExternalRenderContext::RestoreCameraHistoryCheckpoint() {
 
     Result<void, String> restored = Result<void, String>::Ok();
     m_impl->FlushPendingGpuWork();
-    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    m_impl->gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
         restored = m_impl->cameraGpuPipeline->RestoreStateCheckpoint(record.gpu, list);
     });
     if (!restored)
@@ -4713,8 +4668,8 @@ Result<void, String> ExternalRenderContext::WarmUpCamera(f64 seconds) {
         if (!queued)
             return queued;
         Result<void, String> recorded = Result<void, String>::Ok();
-        CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-            recorded = RecordQueuedCameraAcquisition(RecordingOf(cmd));
+        m_impl->gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
+            recorded = m_impl->RecordQueuedAcquisition(list);
         });
         if (!recorded)
             return recorded;
@@ -4739,8 +4694,8 @@ Result<void, String> ExternalRenderContext::AdvanceCameraTo(f64 timeSeconds) {
     if (!queued)
         return queued;
     Result<void, String> recorded = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-        recorded = RecordQueuedCameraAcquisition(RecordingOf(cmd));
+    m_impl->gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
+        recorded = m_impl->RecordQueuedAcquisition(list);
     });
     if (!recorded)
         return recorded;
@@ -4756,7 +4711,6 @@ Result<void, String> ExternalRenderContext::RecordCameraBaseline(
     const GpuCommandRecording& recording) {
     if (const String invalid = ValidateRecording(recording); !invalid.empty())
         return Result<void, String>::Err(invalid);
-    const VkCommandBuffer cmd = FromGpuHandle<VkCommandBuffer>(recording.commandBuffer);
     if (!m_impl->isReady)
         return Result<void, String>::Err(
             "camera baseline needs a ready context and command buffer");
@@ -4765,10 +4719,12 @@ Result<void, String> ExternalRenderContext::RecordCameraBaseline(
     // The same reason as RecordQueuedCameraAcquisition: the host is recording,
     // so the pose is recorded with the trace instead of scrubbed, and the
     // thermal hour is the one QueueCameraAcquisition already solved.
-    if (auto posed = m_impl->RecordTimelinePose(cmd, m_impl->cameraAcquisitionTimeSeconds);
+    const std::unique_ptr<gpu::CommandList> list =
+        m_impl->gpuDevice->WrapRecording(recording.commandBuffer);
+    if (auto posed = m_impl->RecordTimelinePose(*list, m_impl->cameraAcquisitionTimeSeconds);
         !posed)
         return posed;
-    return m_impl->RecordCameraBaseline(cmd);
+    return m_impl->RecordCameraBaseline(*list);
 }
 
 CameraGpuTimings ExternalRenderContext::GetLastCameraGpuTimings() const {
@@ -4870,10 +4826,7 @@ Result<camera::CameraOutput, String> ExternalRenderContext::CaptureCameraProduct
     const auto readProductImage = [&](gpu::TextureRef source) -> Result<Image, String> {
         if (!source.IsValid())
             return Result<Image, String>::Err("GPU camera product image is unavailable");
-        const auto rgba =
-            CommandHelper::ReadbackImage(*m_impl->contextAdapter,
-                                         gpu::vulkan::NativeImage(source),
-                                         VK_FORMAT_R32G32B32A32_SFLOAT, width, height);
+        const auto rgba = rendercore::ReadbackTexture(*m_impl->gpuDevice, source, width, height);
         if (rgba.size() != static_cast<size_t>(width) * height * 4u)
             return Result<Image, String>::Err("GPU camera product readback has the wrong size");
         Image image(width, height, channels);
@@ -4979,7 +4932,7 @@ Result<camera::CameraOutput, String> ExternalRenderContext::CaptureCameraProduct
         // the viewer sees.
         const gpu::TextureRef displaySource =
             (m_impl->CameraClahePersistent() && m_impl->displayImage)
-                ? gpu::vulkan::Ref(*m_impl->displayImage)
+                ? m_impl->displayImage->Ref()
                 : outputs.display;
         auto display =
             makeProduct(displaySource, descriptor(camera::SignalKind::DisplaySrgb, "encoded sRGB"));
@@ -5047,7 +5000,7 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
     // Priority 1: CLAHE output (includes all effects)
     if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
         m_impl->clahe && m_impl->displayImage && m_impl->ClaheInputReady()) {
-        sourceImage = gpu::vulkan::Ref(*m_impl->displayImage);
+        sourceImage = m_impl->displayImage->Ref();
         const auto extent = m_impl->ClaheInputExtent();
         sourceWidth = extent.width;
         sourceHeight = extent.height;
@@ -5066,14 +5019,9 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
         QL_LOG_DEBUG("CaptureDisplayImage: Using outputImage (no post-processing)");
     }
 
-    // Read back the appropriate image using CommandHelper
-    std::vector<f32> pixels = CommandHelper::ReadbackImage(
-        *m_impl->contextAdapter,
-        gpu::vulkan::NativeImage(sourceImage),
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        sourceWidth,
-        sourceHeight
-    );
+    // Read back the appropriate image
+    std::vector<f32> pixels = rendercore::ReadbackTexture(*m_impl->gpuDevice, sourceImage,
+                                                          sourceWidth, sourceHeight);
 
     // Create Image from pixel data
     Image displayImage(sourceWidth, sourceHeight, 4); // RGBA
@@ -5410,13 +5358,13 @@ Result<void, String> ExternalRenderContext::Impl::UpdateCameraAtmosphere() {
         baked.header.sunDirWorld[2] = normalizedSun.z;
         baked.header.worldUnitsToMeters =
             lightingParams.worldUnitsToMeters > 0.0f ? lightingParams.worldUnitsToMeters : 1.0f;
-        cameraAtmosHeaderBuffer = std::make_unique<GpuBuffer>(
-            contextAdapter->GetAllocator(), sizeof(AtmosNNHeaderGPU),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        cameraAtmosHeaderBuffer = CreateBufferOrThrow(
+            *gpuDevice, gpu::BufferDesc{sizeof(AtmosNNHeaderGPU), gpu::BufferUsage::Storage,
+                                        gpu::MemoryClass::Upload, 0});
         cameraAtmosHeaderBuffer->Upload(&baked.header, sizeof(baked.header));
-        cameraAtmosDataBuffer = std::make_unique<GpuBuffer>(
-            contextAdapter->GetAllocator(), baked.data.size() * sizeof(f32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        cameraAtmosDataBuffer = CreateBufferOrThrow(
+            *gpuDevice, gpu::BufferDesc{baked.data.size() * sizeof(f32), gpu::BufferUsage::Storage,
+                                        gpu::MemoryClass::Upload, 0});
         cameraAtmosDataBuffer->Upload(baked.data.data(), baked.data.size() * sizeof(f32));
         cameraAtmosMinNm = static_cast<f32>(lo);
         cameraAtmosStepNm = static_cast<f32>((hi - lo) / (kCameraAtmosSamples - 1));
@@ -5429,13 +5377,14 @@ Result<void, String> ExternalRenderContext::Impl::UpdateCameraAtmosphere() {
         baseline.header.sunDirWorld[1] = normalizedSun.y;
         baseline.header.sunDirWorld[2] = normalizedSun.z;
         baseline.header.worldUnitsToMeters = baked.header.worldUnitsToMeters;
-        cameraBaselineAtmosHeaderBuffer = std::make_unique<GpuBuffer>(
-            contextAdapter->GetAllocator(), sizeof(AtmosNNHeaderGPU),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        cameraBaselineAtmosHeaderBuffer = CreateBufferOrThrow(
+            *gpuDevice, gpu::BufferDesc{sizeof(AtmosNNHeaderGPU), gpu::BufferUsage::Storage,
+                                        gpu::MemoryClass::Upload, 0});
         cameraBaselineAtmosHeaderBuffer->Upload(&baseline.header, sizeof(baseline.header));
-        cameraBaselineAtmosDataBuffer = std::make_unique<GpuBuffer>(
-            contextAdapter->GetAllocator(), baseline.data.size() * sizeof(f32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        cameraBaselineAtmosDataBuffer = CreateBufferOrThrow(
+            *gpuDevice,
+            gpu::BufferDesc{baseline.data.size() * sizeof(f32), gpu::BufferUsage::Storage,
+                            gpu::MemoryClass::Upload, 0});
         cameraBaselineAtmosDataBuffer->Upload(baseline.data.data(),
                                               baseline.data.size() * sizeof(f32));
         return Result<void, String>::Ok();
@@ -5447,7 +5396,7 @@ Result<void, String> ExternalRenderContext::Impl::UpdateCameraAtmosphere() {
 Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
     if (!cameraConfig.enabled)
         return Result<void, String>::Err("camera capture is disabled");
-    if (!contextAdapter || !pipeline)
+    if (!gpuDevice || !pipeline)
         return Result<void, String>::Err("camera rendering pipeline is not ready");
     if (!cameraResourcesDirty && cameraMeasurementImage && cameraGpuPipeline)
         return Result<void, String>::Ok();
@@ -5475,42 +5424,48 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
                                           camera::CameraInputKind::FastRgbApproximation
                                       ? RayTracingPipeline::kProjectionSetOrdinary
                                       : RayTracingPipeline::kProjectionSetMeasurement);
-    const auto allocator = contextAdapter->GetAllocator();
-    const auto makeImage = [&](VkFormat format) {
-        auto image = std::make_unique<GpuImage>(allocator, device, physicalW, physicalH, format,
-                                                VK_IMAGE_USAGE_STORAGE_BIT |
-                                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                                                    VK_IMAGE_USAGE_SAMPLED_BIT,
-                                                VMA_MEMORY_USAGE_GPU_ONLY);
-        TransitionImageLayoutImmediate(image->GetImage(), format, VK_IMAGE_LAYOUT_UNDEFINED,
-                                       VK_IMAGE_LAYOUT_GENERAL);
+    const auto makeImage = [&](gpu::Format format) {
+        auto image = CreateTextureOrThrow(
+            *gpuDevice, gpu::TextureDesc{physicalW, physicalH, 1, 1, format,
+                                         gpu::TextureUsage::Storage |
+                                             gpu::TextureUsage::TransferSrc |
+                                             gpu::TextureUsage::Sampled,
+                                         gpu::TextureDimension::Tex2D,
+                                         gpu::MemoryClass::DeviceLocal});
+        TransitionImageLayoutImmediate(image->Ref());
         return image;
     };
     try {
-        cameraMeasurementImage = std::make_unique<GpuImage>(
-            allocator, device, physicalW, physicalH, VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                VK_IMAGE_USAGE_SAMPLED_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY, 1u, rendercore::kCameraTimeStrataMax, 0,
-            VK_IMAGE_VIEW_TYPE_2D_ARRAY);
-        cameraMeasurementDepthImage = std::make_unique<GpuImage>(
-            allocator, device, physicalW, physicalH, VK_FORMAT_R32_SFLOAT,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_GPU_ONLY,
-            1u, rendercore::kCameraTimeStrataMax, 0, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
-        CommandHelper::TransitionImageLayoutImmediate(
-            *contextAdapter, cameraMeasurementImage->GetImage(), VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 1u,
-            rendercore::kCameraTimeStrataMax);
-        CommandHelper::TransitionImageLayoutImmediate(
-            *contextAdapter, cameraMeasurementDepthImage->GetImage(), VK_FORMAT_R32_SFLOAT,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 1u,
-            rendercore::kCameraTimeStrataMax);
-        cameraBaselineImage = makeImage(VK_FORMAT_R32G32B32A32_SFLOAT);
-        cameraDepthImage = makeImage(VK_FORMAT_R32_SFLOAT);
+        // One layer per time stratum, viewed as a 2D array.
+        cameraMeasurementImage = CreateTextureOrThrow(
+            *gpuDevice, gpu::TextureDesc{physicalW, physicalH, rendercore::kCameraTimeStrataMax, 1,
+                                         gpu::Format::RGBA32Float,
+                                         gpu::TextureUsage::Storage |
+                                             gpu::TextureUsage::TransferSrc |
+                                             gpu::TextureUsage::Sampled,
+                                         gpu::TextureDimension::Tex2DArray,
+                                         gpu::MemoryClass::DeviceLocal});
+        cameraMeasurementDepthImage = CreateTextureOrThrow(
+            *gpuDevice, gpu::TextureDesc{physicalW, physicalH, rendercore::kCameraTimeStrataMax, 1,
+                                         gpu::Format::R32Float,
+                                         gpu::TextureUsage::Storage |
+                                             gpu::TextureUsage::TransferSrc,
+                                         gpu::TextureDimension::Tex2DArray,
+                                         gpu::MemoryClass::DeviceLocal});
+        rendercore::LegacyTransitionImmediate(*gpuDevice, cameraMeasurementImage->Ref(),
+                                              rendercore::Layout::Undefined,
+                                              rendercore::Layout::General, 1u,
+                                              rendercore::kCameraTimeStrataMax);
+        rendercore::LegacyTransitionImmediate(*gpuDevice, cameraMeasurementDepthImage->Ref(),
+                                              rendercore::Layout::Undefined,
+                                              rendercore::Layout::General, 1u,
+                                              rendercore::kCameraTimeStrataMax);
+        cameraBaselineImage = makeImage(gpu::Format::RGBA32Float);
+        cameraDepthImage = makeImage(gpu::Format::R32Float);
     } catch (const std::exception& e) {
         return Result<void, String>::Err(String("camera image allocation failed: ") + e.what());
     }
-    if (!cameraMeasurementImage->IsValid() || !cameraMeasurementDepthImage->IsValid())
+    if (!cameraMeasurementImage->Ref().IsValid() || !cameraMeasurementDepthImage->Ref().IsValid())
         return Result<void, String>::Err("camera image allocation failed");
     if (auto baked = UpdateCameraAtmosphere(); !baked)
         return baked;
@@ -5518,32 +5473,32 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
                                                          cameraAtmosStepNm, cameraAtmosCount);
     if (!encoded)
         return Result<void, String>::Err(encoded.error());
-    const VkDeviceSize bytes = encoded.value().size() * sizeof(u32);
-    cameraResponseBuffer = std::make_unique<GpuBuffer>(
-        allocator, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    const u64 bytes = encoded.value().size() * sizeof(u32);
+    cameraResponseBuffer = CreateBufferOrThrow(
+        *gpuDevice, gpu::BufferDesc{bytes, gpu::BufferUsage::Storage, gpu::MemoryClass::Upload, 0});
     cameraResponseBuffer->Upload(encoded.value().data(), bytes);
-    pipeline->BindCameraMeasurementImage(gpu::vulkan::Ref(*cameraMeasurementImage));
-    pipeline->BindCameraResponseBuffer(gpu::vulkan::Ref(*cameraResponseBuffer));
-    pipeline->BindCameraMeasurementDepthImage(gpu::vulkan::Ref(*cameraMeasurementDepthImage));
-    cameraDynamicCounterBuffer = std::make_unique<GpuBuffer>(allocator, 4u * sizeof(u32),
-                                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                                                             VMA_MEMORY_USAGE_GPU_ONLY);
-    if (!cameraDynamicCounterBuffer->IsValid())
+    pipeline->BindCameraMeasurementImage(cameraMeasurementImage->Ref());
+    pipeline->BindCameraResponseBuffer(cameraResponseBuffer->Ref());
+    pipeline->BindCameraMeasurementDepthImage(cameraMeasurementDepthImage->Ref());
+    cameraDynamicCounterBuffer = CreateBufferOrThrow(
+        *gpuDevice, gpu::BufferDesc{4u * sizeof(u32),
+                                    gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst |
+                                        gpu::BufferUsage::TransferSrc,
+                                    gpu::MemoryClass::DeviceLocal, 0});
+    if (!cameraDynamicCounterBuffer->Ref().IsValid())
         return Result<void, String>::Err("camera dynamic counter allocation failed");
     gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
-        list.FillBuffer(gpu::vulkan::Ref(*cameraDynamicCounterBuffer), 0, gpu::kWholeSize, 0);
+        list.FillBuffer(cameraDynamicCounterBuffer->Ref(), 0, gpu::kWholeSize, 0);
     });
-    pipeline->BindCameraDynamicCounterBuffer(gpu::vulkan::Ref(*cameraDynamicCounterBuffer));
+    pipeline->BindCameraDynamicCounterBuffer(cameraDynamicCounterBuffer->Ref());
     // The DynamicExposureReport readback: both 4 x u32 counter blocks side
     // by side, plus the event a measurement recording sets once they have
     // landed. Neither depends on the sensor size, so they are made once.
     if (!cameraDynamicReadback) {
-        cameraDynamicReadback = std::make_unique<GpuBuffer>(allocator, 8u * sizeof(u32),
-                                                            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                                            VMA_MEMORY_USAGE_GPU_TO_CPU);
-        if (!cameraDynamicReadback->IsValid())
+        cameraDynamicReadback = CreateBufferOrThrow(
+            *gpuDevice, gpu::BufferDesc{8u * sizeof(u32), gpu::BufferUsage::TransferDst,
+                                        gpu::MemoryClass::Readback, 0});
+        if (!cameraDynamicReadback->Ref().IsValid())
             return Result<void, String>::Err("camera dynamic readback allocation failed");
     }
     if (!cameraDynamicReadbackEvent) {
@@ -5552,21 +5507,19 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
             return Result<void, String>::Err("camera dynamic readback event creation failed");
         cameraDynamicReadbackEvent = std::move(event).value();
     }
-    pipeline->BindCameraDepthImage(gpu::vulkan::Ref(*cameraDepthImage));
-    pipeline->BindCameraObserverOutputImage(gpu::vulkan::Ref(*cameraBaselineImage));
-    pipeline->BindCameraObserverDepthImage(gpu::vulkan::Ref(*cameraDepthImage));
+    pipeline->BindCameraDepthImage(cameraDepthImage->Ref());
+    pipeline->BindCameraObserverOutputImage(cameraBaselineImage->Ref());
+    pipeline->BindCameraObserverDepthImage(cameraDepthImage->Ref());
     // A camera bake that is absent falls back to the viewport's own atmosphere buffers.
     const gpu::BufferRef atmosHeader =
         atmosHeaderBuffer ? atmosHeaderBuffer->Ref() : gpu::BufferRef{};
     const gpu::BufferRef atmosData = atmosDataBuffer ? atmosDataBuffer->Ref() : gpu::BufferRef{};
     pipeline->BindCameraAtmosphereNN(
-        cameraAtmosHeaderBuffer ? gpu::vulkan::Ref(*cameraAtmosHeaderBuffer) : atmosHeader,
-        cameraAtmosDataBuffer ? gpu::vulkan::Ref(*cameraAtmosDataBuffer) : atmosData);
+        cameraAtmosHeaderBuffer ? cameraAtmosHeaderBuffer->Ref() : atmosHeader,
+        cameraAtmosDataBuffer ? cameraAtmosDataBuffer->Ref() : atmosData);
     pipeline->BindCameraObserverAtmosphereNN(
-        cameraBaselineAtmosHeaderBuffer ? gpu::vulkan::Ref(*cameraBaselineAtmosHeaderBuffer)
-                                        : atmosHeader,
-        cameraBaselineAtmosDataBuffer ? gpu::vulkan::Ref(*cameraBaselineAtmosDataBuffer)
-                                      : atmosData);
+        cameraBaselineAtmosHeaderBuffer ? cameraBaselineAtmosHeaderBuffer->Ref() : atmosHeader,
+        cameraBaselineAtmosDataBuffer ? cameraBaselineAtmosDataBuffer->Ref() : atmosData);
     auto gpu = rendercore::GpuCameraPipeline::Create(*gpuDevice, physicalW, physicalH);
     if (!gpu)
         return Result<void, String>::Err(gpu.error());
@@ -5632,7 +5585,7 @@ ExternalRenderContext::Impl::CameraDataForCapture(SpectralMode mode, f64 wavelen
     return data;
 }
 
-Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(VkCommandBuffer cmd) {
+Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(gpu::CommandList& list) {
     auto& s = cameraScheduler;
     if (!s.drivesAcquisition) {
         s.drivesAcquisition = true;
@@ -5701,7 +5654,7 @@ Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(VkComman
             // recorded traces, exactly as the per-stratum posing below does;
             // the thermal hour the slot maps to is solved once the frame is
             // recorded (see cameraThermalSolvePending).
-            if (auto moved = RecordTimelinePose(cmd, slot); !moved) {
+            if (auto moved = RecordTimelinePose(list, slot); !moved) {
                 return Result<bool, String>(typename Result<bool, String>::Err(moved.error()));
             }
             if (thermalEnabled && timeline.ThermalMapped()) {
@@ -5716,7 +5669,7 @@ Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(VkComman
         cameraAcquisitionTimeSeconds = slot;
         cameraCapturePending = true;
         cameraCaptureRecorded = false;
-        if (auto recorded = RecordCameraMeasurement(cmd, CameraSampleBudget::ViewportFrame);
+        if (auto recorded = RecordCameraMeasurement(list, CameraSampleBudget::ViewportFrame);
             !recorded) {
             cameraCapturePending = false;
             return Result<bool, String>(typename Result<bool, String>::Err(recorded.error()));
@@ -5741,7 +5694,7 @@ Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(VkComman
         // is wherever the host left the clock.
         cameraCapturePending = true;
         cameraCaptureRecorded = false;
-        if (auto recorded = RecordCameraMeasurement(cmd, CameraSampleBudget::ViewportFrame);
+        if (auto recorded = RecordCameraMeasurement(list, CameraSampleBudget::ViewportFrame);
             !recorded) {
             cameraCapturePending = false;
             return Result<bool, String>(typename Result<bool, String>::Err(recorded.error()));
@@ -5842,23 +5795,21 @@ void ExternalRenderContext::Impl::RunCameraAutoControl() {
 }
 
 Result<void, String>
-ExternalRenderContext::Impl::RecordCameraDisplayReprocess(VkCommandBuffer cmd) {
-    if (!cameraGpuPipeline || cmd == VK_NULL_HANDLE)
+ExternalRenderContext::Impl::RecordCameraDisplayReprocess(gpu::CommandList& list) {
+    if (!cameraGpuPipeline)
         return Result<void, String>::Err("camera display reprocess needs the GPU camera pipeline");
-    auto list = gpu::vulkan::Wrap(cmd);
     pendingUploads.Record(list);
     return cameraGpuPipeline->RecordDisplayReprocess(list, EffectiveCameraConfig());
 }
 
 Result<void, String>
-ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
+ExternalRenderContext::Impl::RecordCameraMeasurement(gpu::CommandList& gpuList,
                                                      const CameraSampleBudget budget) {
     if (!cameraCapturePending)
         return Result<void, String>::Err("no camera acquisition is queued");
     // Deferred host writes land first in this submission; anything enqueued
     // by EnsureCameraResources below is caught by the second Record before
     // the strata loop.
-    auto gpuList = gpu::vulkan::Wrap(cmd);
     pendingUploads.Record(gpuList);
     if (auto ready = EnsureCameraResources(); !ready)
         return ready;
@@ -5933,12 +5884,12 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
             cameraStratumRecordedAcquisition = cameraAcquisitionIndex;
         }
         // Zero the transparent/specular counters for this acquisition.
-        gpuList.FillBuffer(gpu::vulkan::Ref(*cameraDynamicCounterBuffer), 0, gpu::kWholeSize, 0);
+        gpuList.FillBuffer(cameraDynamicCounterBuffer->Ref(), 0, gpu::kWholeSize, 0);
         // This recording will publish fresh report counters at the end; the
         // reset keeps a getter mid-flight pointed at the previous report.
         if (cameraDynamicReadbackEvent)
             gpuList.ResetEvent(cameraDynamicReadbackEvent->Ref(), gpu::Stage::Transfer);
-        gpuList.Barrier(gpu::BufferBarrier{gpu::vulkan::Ref(*cameraDynamicCounterBuffer),
+        gpuList.Barrier(gpu::BufferBarrier{cameraDynamicCounterBuffer->Ref(),
                                            gpu::Access::TransferWrite,
                                            gpu::Access::RayTraceRead | gpu::Access::RayTraceWrite});
     }
@@ -5947,17 +5898,17 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
     const f64 restoreTime = timeline.Current_s();
     struct TimelineRestore {
         Impl* self;
-        VkCommandBuffer cmd;
+        gpu::CommandList& list;
         f64 time;
         // The restore refit rides in this same submission, so the TLAS the GPU
         // holds afterwards matches the scene pose the CPU returns to -- a
         // synchronous refit here would leave the recorded strata tracing the
         // restore pose instead of their own.
         ~TimelineRestore() {
-            if (const auto restored = self->RecordTimelinePose(cmd, time); !restored)
+            if (const auto restored = self->RecordTimelinePose(list, time); !restored)
                 QL_LOG_ERROR("camera stratum pose restore failed: {}", restored.error());
         }
-    } restoreGuard{this, cmd, restoreTime};
+    } restoreGuard{this, gpuList, restoreTime};
 
     const ObserverSetScope observerSet{*pipeline, fastRgb};
     pipeline->SetSpecConstants(static_cast<u32>(captureMode), false);
@@ -5979,7 +5930,7 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
         // before every recorded trace and leave all strata on the last-applied
         // pose -- the restore. Recorded in order, each refit's barriers place
         // it between the traces of the strata around it.
-        if (const auto posed = RecordTimelinePose(cmd, stratumTime); !posed)
+        if (const auto posed = RecordTimelinePose(gpuList, stratumTime); !posed)
             return posed;
         const auto pose = CameraDataForCapture(captureMode, centerNm, stratumTime);
         if (!pose)
@@ -6057,8 +6008,8 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
     rendercore::DynamicExposureInput dynamic;
     const auto& readoutConfig = captureConfig.readout;
     const bool rolling = readoutConfig.shutter == camera::ShutterKind::Rolling;
-    dynamic.strataRate = gpu::vulkan::Ref(*cameraMeasurementImage);
-    dynamic.strataDepth = gpu::vulkan::Ref(*cameraMeasurementDepthImage);
+    dynamic.strataRate = cameraMeasurementImage->Ref();
+    dynamic.strataDepth = cameraMeasurementDepthImage->Ref();
     dynamic.layerCameras = layerCameras.data();
     dynamic.strataCount = strataCount;
     dynamic.strataLayers = rendercore::kCameraTimeStrataMax;
@@ -6070,10 +6021,10 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
     const auto readout =
         fastRgb
             ? cameraGpuPipeline->RecordFastRgbMeasurement(
-                  gpuList, gpu::vulkan::Ref(*cameraBaselineImage),
+                  gpuList, cameraBaselineImage->Ref(),
                   cameraAcquisitionIndex, cameraAcquisitionTimeSeconds)
             : cameraGpuPipeline->RecordMeasurement(
-                  gpuList, gpu::vulkan::Ref(*cameraMeasurementImage),
+                  gpuList, cameraMeasurementImage->Ref(),
                   cameraAcquisitionIndex, cameraAcquisitionTimeSeconds, timing, dynamic);
     if (cameraFullPerf)
         cameraFullPerf->EndFrame(gpuList);
@@ -6085,14 +6036,14 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
         // Both counter sets ride one 32-byte readback, copied here -- after
         // the trace and the compositor have written them -- so the report
         // getter only checks the event instead of draining the queue.
-        gpuList.Barrier(gpu::BufferBarrier{gpu::vulkan::Ref(*cameraDynamicCounterBuffer),
+        gpuList.Barrier(gpu::BufferBarrier{cameraDynamicCounterBuffer->Ref(),
                                            gpu::Access::RayTraceWrite, gpu::Access::TransferRead});
         const gpu::BufferCopyRegion copy{0, 0, 4u * sizeof(u32)};
-        gpuList.CopyBuffer(gpu::vulkan::Ref(*cameraDynamicCounterBuffer),
-                           gpu::vulkan::Ref(*cameraDynamicReadback),
+        gpuList.CopyBuffer(cameraDynamicCounterBuffer->Ref(),
+                           cameraDynamicReadback->Ref(),
                            std::span<const gpu::BufferCopyRegion>{&copy, 1});
         cameraGpuPipeline->RecordDynamicCounterCopy(
-            gpuList, gpu::vulkan::Ref(*cameraDynamicReadback), 4u * sizeof(u32));
+            gpuList, cameraDynamicReadback->Ref(), 4u * sizeof(u32));
         gpuList.Barrier(gpu::GlobalBarrier{gpu::Access::TransferWrite, gpu::Access::HostRead});
         gpuList.SetEvent(cameraDynamicReadbackEvent->Ref(), gpu::Stage::Transfer);
         cameraDynamicSensorWidth = cameraConfig.optics.sensorWidthPx;
@@ -6103,8 +6054,7 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
     return Result<void, String>::Ok();
 }
 
-Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(VkCommandBuffer cmd) {
-    auto list = gpu::vulkan::Wrap(cmd);
+Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(gpu::CommandList& list) {
     pendingUploads.Record(list);
     if (auto ready = EnsureCameraResources(); !ready)
         return ready;
@@ -6209,40 +6159,32 @@ void ExternalRenderContext::Impl::CreatePickPipeline() {
     }
     pickBindGroup = groups.value()[0];
 
-    pickOutputBuffer = std::make_unique<GpuBuffer>(
-        contextAdapter->GetAllocator(), sizeof(PickResultGpu),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
+    pickOutputBuffer = CreateBufferOrThrow(
+        *gpuDevice, gpu::BufferDesc{sizeof(PickResultGpu), gpu::BufferUsage::Storage,
+                                    gpu::MemoryClass::Readback, 0});
 }
 
 void ExternalRenderContext::Impl::CreateClaheDisplayImage() {
     // The display image is this Impl's (the blit and capture paths read it),
     // so it is created here and only bound into the CLAHE set.
     const auto claheExtent = ClaheInputExtent();
-    displayImage = std::make_unique<GpuImage>(
-        contextAdapter->GetAllocator(),
-        device,
-        claheExtent.width, claheExtent.height,
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
+    displayImage = CreateTextureOrThrow(
+        *gpuDevice, gpu::TextureDesc{claheExtent.width, claheExtent.height, 1, 1,
+                                     gpu::Format::RGBA32Float,
+                                     gpu::TextureUsage::Storage | gpu::TextureUsage::TransferSrc,
+                                     gpu::TextureDimension::Tex2D, gpu::MemoryClass::DeviceLocal});
 
     // Transition display image to GENERAL layout
-    TransitionImageLayoutImmediate(
-        displayImage->GetImage(),
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_GENERAL
-    );
+    TransitionImageLayoutImmediate(displayImage->Ref());
 
     // At creation the raw accumulation is the input, as it was when the
     // pipeline lived in this Impl; Record() rewrites binding 0 on the first
     // run anyway (the module's bound-input view starts null).
-    clahe->BindAll(outputImage->Ref(), gpu::vulkan::Ref(*displayImage));
+    clahe->BindAll(outputImage->Ref(), displayImage->Ref());
 }
 
 void ExternalRenderContext::Impl::RecreateClaheDisplayImage() {
-    if (!clahe || !contextAdapter) {
+    if (!clahe || !gpuDevice) {
         return;
     }
     // Replacing a descriptor-backed image a submitted frame may still read;
@@ -6250,21 +6192,12 @@ void ExternalRenderContext::Impl::RecreateClaheDisplayImage() {
     // config change is not guaranteed to.
     (void)gpuDevice->WaitIdle();
     const auto extent = ClaheInputExtent();
-    displayImage = std::make_unique<GpuImage>(
-        contextAdapter->GetAllocator(),
-        device,
-        extent.width, extent.height,
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
-    TransitionImageLayoutImmediate(
-        displayImage->GetImage(),
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_GENERAL
-    );
-    clahe->SetOutput(gpu::vulkan::Ref(*displayImage));
+    displayImage = CreateTextureOrThrow(
+        *gpuDevice, gpu::TextureDesc{extent.width, extent.height, 1, 1, gpu::Format::RGBA32Float,
+                                     gpu::TextureUsage::Storage | gpu::TextureUsage::TransferSrc,
+                                     gpu::TextureDimension::Tex2D, gpu::MemoryClass::DeviceLocal});
+    TransitionImageLayoutImmediate(displayImage->Ref());
+    clahe->SetOutput(displayImage->Ref());
     // A fresh allocation holds nothing worth presenting until a run writes it.
     displayImageValid = false;
 }
@@ -6296,13 +6229,8 @@ void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
 
     // Read back the CLAHE input image -- the camera's corrected product when
     // the camera is enabled, else the raw accumulation.
-    std::vector<f32> pixels = CommandHelper::ReadbackImage(
-        *contextAdapter,
-        gpu::vulkan::NativeImage(input),
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        extent.width,
-        extent.height
-    );
+    std::vector<f32> pixels =
+        rendercore::ReadbackTexture(*gpuDevice, input, extent.width, extent.height);
 
     // Collect valid luminance values and find absolute range
     std::vector<f32> luminances;
@@ -6403,14 +6331,13 @@ void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
     }
 }
 
-void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height) {
+void ExternalRenderContext::Impl::ExecuteCLAHE(gpu::CommandList& list, u32 width, u32 height) {
     if (!clahe) return;
 
     // The camera's agcSource product (infrared) or corrected product
     // (visible) feeds CLAHE when the camera is enabled; otherwise the raw
     // accumulation. Callers only run CLAHE once a camera acquisition has
     // completed, so the input product is present whenever the camera is.
-    auto list = gpu::vulkan::Wrap(cmd);
     clahe->Record(list, ClaheInputImage(), rendercore::ClaheRun{
         width, height, displayParams, cachedImageMin, cachedImageMax,
         cameraConfig.enabled ? gpu::Access::ComputeWrite : gpu::Access::RayTraceWrite});
@@ -6420,12 +6347,7 @@ void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u
     displayImageValid = true;
 }
 
-void ExternalRenderContext::Impl::TransitionImageLayoutImmediate(
-    VkImage image,
-    VkFormat format,
-    VkImageLayout oldLayout,
-    VkImageLayout newLayout) {
-
+void ExternalRenderContext::Impl::TransitionImageLayoutImmediate(gpu::TextureRef texture) {
     // Allocate command buffer. Allocation and begin were unchecked before, and a
     // failure recorded into an invalid handle; they throw now, as an immediate
     // submission does and as the image constructor every caller just ran does.
@@ -6443,27 +6365,14 @@ void ExternalRenderContext::Impl::TransitionImageLayoutImmediate(
     gpu::CommandList& list = *begun.value();
 
     // Image memory barrier over every mip and layer, all commands against all
-    // commands. Under Optimal the accesses name the layouts the table names.
+    // commands. Under Optimal, discarding names UNDEFINED and a compute write
+    // names GENERAL.
     gpu::TextureBarrier barrier;
-    barrier.texture.image = gpu::vulkan::ToHandle(image);
-    barrier.texture.layout = gpu::TextureLayoutPolicy::Optimal;
+    barrier.texture = texture.WithLayout(gpu::TextureLayoutPolicy::Optimal);
     barrier.mipCount = gpu::kRemaining;
     barrier.layerCount = gpu::kRemaining;
-
-    if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_GENERAL) {
-        barrier.discard = true;
-        barrier.to = gpu::Access::ComputeRead | gpu::Access::ComputeWrite;
-    } else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-        barrier.discard = true;
-        barrier.to = gpu::Access::TransferWrite;
-    } else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        barrier.from = gpu::Access::TransferWrite;
-        barrier.to = gpu::Access::ComputeRead;
-    } else {
-        // No access on either side; the two layouts are named as given.
-        barrier.hostLayoutBefore = static_cast<u32>(oldLayout);
-        barrier.hostLayoutAfter = static_cast<u32>(newLayout);
-    }
+    barrier.discard = true;
+    barrier.to = gpu::Access::ComputeRead | gpu::Access::ComputeWrite;
 
     gpu::BarrierBatch batch;
     batch.textures = std::span<const gpu::TextureBarrier>(&barrier, 1);
@@ -6478,8 +6387,6 @@ void ExternalRenderContext::Impl::TransitionImageLayoutImmediate(
     (void)gpuDevice->WaitQueueIdle();
 
     commandBuffer.reset();
-
-    (void)format;  // Format used for barrier determination in more complex cases
 }
 
 // ============================================================================
