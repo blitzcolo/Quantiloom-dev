@@ -80,6 +80,7 @@ public:
     VulkanKernelLayout& operator=(const VulkanKernelLayout&) = delete;
 
     [[nodiscard]] u32 PushConstantBytes() const override { return pushBytes_; }
+    [[nodiscard]] ShaderStages PushConstantVisibility() const override { return pushVisibility_; }
     [[nodiscard]] VkPipelineLayout Native() const { return layout_; }
 
 private:
@@ -87,6 +88,7 @@ private:
     VkDevice device_ = VK_NULL_HANDLE;
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     u32 pushBytes_ = 0;
+    ShaderStages pushVisibility_ = ShaderStages::Compute;
 };
 
 class VulkanComputeKernel final : public ComputeKernel {
@@ -126,6 +128,22 @@ private:
     VkDevice device_ = VK_NULL_HANDLE;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
+};
+
+class VulkanSampler final : public Sampler {
+public:
+    [[nodiscard]] static Result<std::unique_ptr<Sampler>, String> Create(VkDevice device, const SamplerDesc& desc);
+    ~VulkanSampler() override;
+    VulkanSampler(const VulkanSampler&) = delete;
+    VulkanSampler& operator=(const VulkanSampler&) = delete;
+
+    [[nodiscard]] SamplerRef Ref() const override { return SamplerRef{ToHandle(sampler_)}; }
+    [[nodiscard]] VkSampler Native() const { return sampler_; }
+
+private:
+    VulkanSampler() = default;
+    VkDevice device_ = VK_NULL_HANDLE;
+    VkSampler sampler_ = VK_NULL_HANDLE;
 };
 
 }  // namespace quantiloom::gpu::vulkan

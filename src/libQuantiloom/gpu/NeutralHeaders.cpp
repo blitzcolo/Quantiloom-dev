@@ -9,6 +9,7 @@
 #include "gpu/Kernel.hpp"
 #include "gpu/Resources.hpp"
 #include "gpu/ShaderLibrary.hpp"
+#include "gpu/Sync.hpp"
 #include "hs_core/GpuSpectralReconstructor.hpp"
 #include "renderer/GpuCameraPipeline.hpp"
 #include "renderer/GpuClahe.hpp"

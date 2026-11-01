@@ -50,4 +50,33 @@ public:
     [[nodiscard]] virtual TextureRef Ref() const = 0;
 };
 
+inline constexpr f32 kLodClampNone = 1000.0f;  // VK_LOD_CLAMP_NONE
+
+/// Field for field a VkSamplerCreateInfo, and every member defaults to the zero value of
+/// its field. A desc that sets the fields a `VkSamplerCreateInfo info{}` site sets therefore
+/// creates the same sampler; "sensible" defaults would change the ones it leaves at zero.
+struct SamplerDesc {
+    Filter magFilter = Filter::Nearest;
+    Filter minFilter = Filter::Nearest;
+    Filter mipmapMode = Filter::Nearest;
+    AddressMode addressModeU = AddressMode::Repeat;
+    AddressMode addressModeV = AddressMode::Repeat;
+    AddressMode addressModeW = AddressMode::Repeat;
+    f32 mipLodBias = 0.0f;  // Metal has no LOD bias
+    bool anisotropyEnable = false;
+    f32 maxAnisotropy = 0.0f;
+    bool compareEnable = false;
+    CompareOp compareOp = CompareOp::Never;
+    f32 minLod = 0.0f;
+    f32 maxLod = 0.0f;
+    BorderColor borderColor = BorderColor::FloatTransparentBlack;
+    bool unnormalizedCoordinates = false;
+};
+
+class Sampler {
+public:
+    virtual ~Sampler() = default;
+    [[nodiscard]] virtual SamplerRef Ref() const = 0;
+};
+
 }  // namespace quantiloom::gpu

@@ -15,7 +15,8 @@ public:
     [[nodiscard]] VkCommandBuffer Native() const { return cmd_; }
 
     void SetKernel(const ComputeKernel& kernel) override;
-    void SetBindGroup(const KernelLayout& layout, u32 space, BindGroup group) override;
+    void SetBindGroup(const KernelLayout& layout, u32 space, BindGroup group, PipelineKind kind) override;
+    using CommandList::SetBindGroup;
     void PushConstants(const KernelLayout& layout, std::span<const std::byte> bytes) override;
     using CommandList::PushConstants;
     void Dispatch(u32 groupsX, u32 groupsY, u32 groupsZ) override;
@@ -27,9 +28,15 @@ public:
     void UpdateBuffer(BufferRef dst, u64 offset, std::span<const std::byte> bytes) override;
     void CopyBuffer(BufferRef src, BufferRef dst, std::span<const BufferCopyRegion> regions) override;
     void CopyTexture(TextureRef src, TextureRef dst, const TextureCopyRegion& region) override;
+    void CopyBufferToTexture(BufferRef src, TextureRef dst, const BufferTextureCopy& region) override;
+    void CopyTextureToBuffer(TextureRef src, BufferRef dst, const BufferTextureCopy& region) override;
+    void BlitTexture(TextureRef src, TextureRef dst, const BlitRegion& region, Filter filter) override;
 
     void ResetTimestamps(TimestampPoolRef pool, u32 first, u32 count) override;
     void WriteTimestamp(TimestampPoolRef pool, u32 index, Stage after) override;
+
+    void SetEvent(EventRef event, Stage after) override;
+    void ResetEvent(EventRef event, Stage after) override;
 
 private:
     VkCommandBuffer cmd_;

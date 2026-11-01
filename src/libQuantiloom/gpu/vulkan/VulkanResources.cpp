@@ -30,7 +30,7 @@ Result<std::unique_ptr<BindingLayout>, String> VulkanBindingLayout::Create(VkDev
         binding.binding = slot.slot;
         binding.descriptorType = ToDescriptorType(slot.kind);
         binding.descriptorCount = slot.count;
-        binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        binding.stageFlags = ToVk(slot.visibility);
         bindings.push_back(binding);
         flags.push_back(static_cast<VkDescriptorBindingFlags>(slot.partiallyBound ? VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT : 0));
         anyPartial = anyPartial || slot.partiallyBound;
@@ -77,7 +77,7 @@ Result<std::unique_ptr<KernelLayout>, String> VulkanKernelLayout::Create(VkDevic
         sets.push_back(space->Native());
     }
 
-    VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, desc.pushConstantBytes};
+    VkPushConstantRange range{ToVk(desc.pushConstantVisibility), 0, desc.pushConstantBytes};
     VkPipelineLayoutCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     info.setLayoutCount = static_cast<u32>(sets.size());
@@ -92,6 +92,7 @@ Result<std::unique_ptr<KernelLayout>, String> VulkanKernelLayout::Create(VkDevic
     }
     layout->device_ = device;
     layout->pushBytes_ = desc.pushConstantBytes;
+    layout->pushVisibility_ = desc.pushConstantVisibility;
     return std::unique_ptr<KernelLayout>(std::move(layout));
 }
 
@@ -219,6 +220,26 @@ Result<Vector<BindGroup>, String> VulkanBindGroupPool::Allocate(u32 count) {
 
 void VulkanBindGroupPool::Reset() {
     vkResetDescriptorPool(device_, pool_, 0);
+}
+
+// ----------------------------------------------------------------------------
+// VulkanSampler
+// ----------------------------------------------------------------------------
+
+Result<std::unique_ptr<Sampler>, String> VulkanSampler::Create(VkDevice device, const SamplerDesc& desc) {
+    const VkSamplerCreateInfo info = ToVk(desc);
+    std::unique_ptr<VulkanSampler> sampler(new VulkanSampler());
+    const VkResult result = vkCreateSampler(device, &info, nullptr, &sampler->sampler_);
+    if (result != VK_SUCCESS) {
+        sampler->sampler_ = VK_NULL_HANDLE;
+        return Fail<std::unique_ptr<Sampler>>(ResultCode(result));
+    }
+    sampler->device_ = device;
+    return std::unique_ptr<Sampler>(std::move(sampler));
+}
+
+VulkanSampler::~VulkanSampler() {
+    if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, sampler_, nullptr);
 }
 
 }  // namespace quantiloom::gpu::vulkan

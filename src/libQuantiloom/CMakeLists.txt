@@ -185,6 +185,7 @@ add_library(quantiloom_core OBJECT
     gpu/Kernel.hpp
     gpu/CommandList.hpp
     gpu/Device.hpp
+    gpu/Sync.hpp
     gpu/ShaderLibrary.hpp
     gpu/ShaderLibrary.cpp
     gpu/NeutralHeaders.cpp
@@ -196,6 +197,8 @@ add_library(quantiloom_core OBJECT
     gpu/vulkan/VulkanCommandList.cpp
     gpu/vulkan/VulkanDevice.hpp
     gpu/vulkan/VulkanDevice.cpp
+    gpu/vulkan/VulkanSync.hpp
+    gpu/vulkan/VulkanSync.cpp
     gpu/vulkan/VulkanBridge.hpp
     gpu/vulkan/VulkanBridge.cpp
     renderer/VulkanDeviceRequirements.cpp

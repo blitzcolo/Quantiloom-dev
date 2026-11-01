@@ -1,6 +1,11 @@
 #include "gpu/vulkan/VulkanMapping.hpp"
 
+#include <string>
+
 namespace quantiloom::gpu::vulkan {
+
+static_assert(kRemaining == VK_REMAINING_MIP_LEVELS && kRemaining == VK_REMAINING_ARRAY_LAYERS);
+static_assert(kLodClampNone == VK_LOD_CLAMP_NONE);
 
 namespace {
 
@@ -25,7 +30,78 @@ constexpr BitScope kScopes[] = {
      VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR},
     {Access::AccelerationStructureWrite, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
      VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR},
+    {Access::RayTraceSceneRead, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+     VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR},
+    {Access::ComputeSceneRead, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR},
+    {Access::FragmentRead, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT},
+    {Access::UniformRead, 0, VK_ACCESS_UNIFORM_READ_BIT},
 };
+
+struct StageBit {
+    PipelineStage bit;
+    VkPipelineStageFlags native;
+};
+
+constexpr StageBit kStages[] = {
+    {PipelineStage::TopOfPipe, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT},
+    {PipelineStage::Compute, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT},
+    {PipelineStage::RayTracing, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR},
+    {PipelineStage::Transfer, VK_PIPELINE_STAGE_TRANSFER_BIT},
+    {PipelineStage::Host, VK_PIPELINE_STAGE_HOST_BIT},
+    {PipelineStage::AccelerationStructureBuild, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR},
+    {PipelineStage::Fragment, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT},
+    {PipelineStage::BottomOfPipe, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT},
+    {PipelineStage::AllCommands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT},
+};
+
+struct ShaderStageBit {
+    ShaderStages bit;
+    VkShaderStageFlags native;
+};
+
+constexpr ShaderStageBit kShaderStages[] = {
+    {ShaderStages::Compute, VK_SHADER_STAGE_COMPUTE_BIT},
+    {ShaderStages::RayGen, VK_SHADER_STAGE_RAYGEN_BIT_KHR},
+    {ShaderStages::ClosestHit, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR},
+    {ShaderStages::AnyHit, VK_SHADER_STAGE_ANY_HIT_BIT_KHR},
+    {ShaderStages::Miss, VK_SHADER_STAGE_MISS_BIT_KHR},
+};
+
+VkSamplerAddressMode ToVkAddressMode(AddressMode mode) {
+    switch (mode) {
+        case AddressMode::Repeat: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        case AddressMode::MirroredRepeat: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+        case AddressMode::ClampToEdge: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        case AddressMode::ClampToBorder: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    }
+    return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+}
+
+VkCompareOp ToVkCompareOp(CompareOp op) {
+    switch (op) {
+        case CompareOp::Never: return VK_COMPARE_OP_NEVER;
+        case CompareOp::Less: return VK_COMPARE_OP_LESS;
+        case CompareOp::Equal: return VK_COMPARE_OP_EQUAL;
+        case CompareOp::LessOrEqual: return VK_COMPARE_OP_LESS_OR_EQUAL;
+        case CompareOp::Greater: return VK_COMPARE_OP_GREATER;
+        case CompareOp::NotEqual: return VK_COMPARE_OP_NOT_EQUAL;
+        case CompareOp::GreaterOrEqual: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+        case CompareOp::Always: return VK_COMPARE_OP_ALWAYS;
+    }
+    return VK_COMPARE_OP_NEVER;
+}
+
+VkBorderColor ToVkBorderColor(BorderColor color) {
+    switch (color) {
+        case BorderColor::FloatTransparentBlack: return VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+        case BorderColor::IntTransparentBlack: return VK_BORDER_COLOR_INT_TRANSPARENT_BLACK;
+        case BorderColor::FloatOpaqueBlack: return VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+        case BorderColor::IntOpaqueBlack: return VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+        case BorderColor::FloatOpaqueWhite: return VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        case BorderColor::IntOpaqueWhite: return VK_BORDER_COLOR_INT_OPAQUE_WHITE;
+    }
+    return VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+}
 
 }  // namespace
 
@@ -48,7 +124,7 @@ AccessScope ScopeOf(Access bits, bool asSource) {
 VkImageLayout LayoutOf(TextureLayoutPolicy policy, Access bits, bool discard) {
     if (discard) return VK_IMAGE_LAYOUT_UNDEFINED;
     if (policy == TextureLayoutPolicy::General) return VK_IMAGE_LAYOUT_GENERAL;
-    constexpr Access kShader = Access::ComputeRead | Access::RayTraceRead;
+    constexpr Access kShader = Access::ComputeRead | Access::RayTraceRead | Access::FragmentRead;
     constexpr Access kXferRead = Access::TransferRead;
     constexpr Access kXferWrite = Access::TransferWrite;
     const auto only = [bits](Access mask) {
@@ -66,8 +142,26 @@ VkPipelineStageFlagBits TimestampStage(Stage stage) {
         case Stage::RayTracing: return VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
         case Stage::Transfer: return VK_PIPELINE_STAGE_TRANSFER_BIT;
         case Stage::AllCommands: return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        case Stage::TopOfPipe: return VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        case Stage::BottomOfPipe: return VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     }
     return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+}
+
+VkPipelineStageFlags ToVk(PipelineStage stages) {
+    VkPipelineStageFlags flags = 0;
+    for (const StageBit& entry : kStages) {
+        if (HasAny(stages, entry.bit)) flags |= entry.native;
+    }
+    return flags;
+}
+
+VkShaderStageFlags ToVk(ShaderStages stages) {
+    VkShaderStageFlags flags = 0;
+    for (const ShaderStageBit& entry : kShaderStages) {
+        if (HasAny(stages, entry.bit)) flags |= entry.native;
+    }
+    return flags;
 }
 
 VkDescriptorType ToDescriptorType(BindingKind kind) {
@@ -92,6 +186,10 @@ VkFormat ToVk(Format format) {
         case Format::RGBA8Unorm: return VK_FORMAT_R8G8B8A8_UNORM;
         case Format::RGBA8Srgb: return VK_FORMAT_R8G8B8A8_SRGB;
         case Format::BGRA8Srgb: return VK_FORMAT_B8G8R8A8_SRGB;
+        case Format::RG32Float: return VK_FORMAT_R32G32_SFLOAT;
+        case Format::RGBA16Float: return VK_FORMAT_R16G16B16A16_SFLOAT;
+        case Format::BC7Unorm: return VK_FORMAT_BC7_UNORM_BLOCK;
+        case Format::BC7Srgb: return VK_FORMAT_BC7_SRGB_BLOCK;
     }
     return VK_FORMAT_UNDEFINED;
 }
@@ -104,6 +202,10 @@ Format FromVk(VkFormat format) {
         case VK_FORMAT_R8G8B8A8_UNORM: return Format::RGBA8Unorm;
         case VK_FORMAT_R8G8B8A8_SRGB: return Format::RGBA8Srgb;
         case VK_FORMAT_B8G8R8A8_SRGB: return Format::BGRA8Srgb;
+        case VK_FORMAT_R32G32_SFLOAT: return Format::RG32Float;
+        case VK_FORMAT_R16G16B16A16_SFLOAT: return Format::RGBA16Float;
+        case VK_FORMAT_BC7_UNORM_BLOCK: return Format::BC7Unorm;
+        case VK_FORMAT_BC7_SRGB_BLOCK: return Format::BC7Srgb;
         default: return Format::Undefined;
     }
 }
@@ -138,6 +240,36 @@ VmaMemoryUsage ToVma(MemoryClass memory) {
         case MemoryClass::HostOnly: return VMA_MEMORY_USAGE_CPU_ONLY;
     }
     return VMA_MEMORY_USAGE_GPU_ONLY;
+}
+
+VkFilter ToVk(Filter filter) {
+    return filter == Filter::Linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+}
+
+VkSamplerCreateInfo ToVk(const SamplerDesc& desc) {
+    VkSamplerCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    info.magFilter = ToVk(desc.magFilter);
+    info.minFilter = ToVk(desc.minFilter);
+    info.mipmapMode =
+        desc.mipmapMode == Filter::Linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    info.addressModeU = ToVkAddressMode(desc.addressModeU);
+    info.addressModeV = ToVkAddressMode(desc.addressModeV);
+    info.addressModeW = ToVkAddressMode(desc.addressModeW);
+    info.mipLodBias = desc.mipLodBias;
+    info.anisotropyEnable = desc.anisotropyEnable ? VK_TRUE : VK_FALSE;
+    info.maxAnisotropy = desc.maxAnisotropy;
+    info.compareEnable = desc.compareEnable ? VK_TRUE : VK_FALSE;
+    info.compareOp = ToVkCompareOp(desc.compareOp);
+    info.minLod = desc.minLod;
+    info.maxLod = desc.maxLod;
+    info.borderColor = ToVkBorderColor(desc.borderColor);
+    info.unnormalizedCoordinates = desc.unnormalizedCoordinates ? VK_TRUE : VK_FALSE;
+    return info;
+}
+
+String ResultCode(VkResult result) {
+    return std::to_string(static_cast<i32>(result));
 }
 
 }  // namespace quantiloom::gpu::vulkan

@@ -25,6 +25,14 @@ TEST(GpuMappingTest, ComputeAndTransferScopes) {
     const AccessScope host = ScopeOf(Access::HostRead, false);
     EXPECT_EQ(host.stages, static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_HOST_BIT));
     EXPECT_EQ(host.access, static_cast<VkAccessFlags>(VK_ACCESS_HOST_READ_BIT));
+
+    const AccessScope fragment = ScopeOf(Access::FragmentRead, false);
+    EXPECT_EQ(fragment.stages, static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT));
+    EXPECT_EQ(fragment.access, static_cast<VkAccessFlags>(VK_ACCESS_SHADER_READ_BIT));
+
+    const AccessScope computeScene = ScopeOf(Access::ComputeSceneRead, false);
+    EXPECT_EQ(computeScene.stages, static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+    EXPECT_EQ(computeScene.access, static_cast<VkAccessFlags>(VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR));
 }
 
 TEST(GpuMappingTest, RayTraceAndAnyScopes) {
@@ -35,6 +43,10 @@ TEST(GpuMappingTest, RayTraceAndAnyScopes) {
     const AccessScope any = ScopeOf(Access::AnyWrite, true);
     EXPECT_EQ(any.stages, static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT));
     EXPECT_EQ(any.access, static_cast<VkAccessFlags>(VK_ACCESS_MEMORY_WRITE_BIT));
+
+    const AccessScope scene = ScopeOf(Access::RayTraceSceneRead, false);
+    EXPECT_EQ(scene.stages, static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR));
+    EXPECT_EQ(scene.access, static_cast<VkAccessFlags>(VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR));
 }
 
 TEST(GpuMappingTest, NoneIsTopOrBottomOfPipe) {
@@ -44,12 +56,32 @@ TEST(GpuMappingTest, NoneIsTopOrBottomOfPipe) {
     const AccessScope dst = ScopeOf(Access::None, false);
     EXPECT_EQ(dst.stages, static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT));
     EXPECT_EQ(dst.access, 0u);
+
+    EXPECT_EQ(TimestampStage(gpu::Stage::TopOfPipe), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+    EXPECT_EQ(TimestampStage(gpu::Stage::BottomOfPipe), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    EXPECT_EQ(ToVk(gpu::PipelineStage::None), 0u);
+    EXPECT_EQ(ToVk(gpu::PipelineStage::TopOfPipe), static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT));
 }
 
 TEST(GpuMappingTest, CombinedScopeIsTheUnionOfItsBits) {
     const AccessScope restore = ScopeOf(Access::ComputeRead | Access::ComputeWrite | Access::TransferWrite, true);
     EXPECT_EQ(restore.stages,
               static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT));
+
+    // DeferredBufferUploads' readers: UniformRead adds an access and no stage.
+    const AccessScope readers = ScopeOf(Access::RayTraceRead | Access::ComputeRead | Access::UniformRead, true);
+    EXPECT_EQ(readers.stages, static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                                                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+    EXPECT_EQ(readers.access, static_cast<VkAccessFlags>(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT));
+
+    // The TLAS refit's readers.
+    const AccessScope sceneReaders = ScopeOf(Access::RayTraceSceneRead | Access::ComputeSceneRead, true);
+    EXPECT_EQ(sceneReaders.stages, static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                                                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+    EXPECT_EQ(sceneReaders.access, static_cast<VkAccessFlags>(VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR));
+
+    EXPECT_EQ(ToVk(gpu::PipelineStage::AllCommands | gpu::PipelineStage::Host),
+              static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT));
 }
 
 TEST(GpuMappingTest, GeneralPolicyIsGeneralUnlessDiscarded) {
@@ -64,6 +96,9 @@ TEST(GpuMappingTest, OptimalPolicyFollowsTheAccess) {
     EXPECT_EQ(LayoutOf(TextureLayoutPolicy::Optimal, Access::TransferWrite, false),
               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     EXPECT_EQ(LayoutOf(TextureLayoutPolicy::Optimal, Access::ComputeWrite, false), VK_IMAGE_LAYOUT_GENERAL);
+    EXPECT_EQ(LayoutOf(TextureLayoutPolicy::Optimal, Access::RayTraceRead | Access::ComputeRead | Access::FragmentRead,
+                       false),
+              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 TEST(GpuMappingTest, DescriptorTypesFollowTheHlslClass) {
@@ -73,11 +108,54 @@ TEST(GpuMappingTest, DescriptorTypesFollowTheHlslClass) {
     EXPECT_EQ(ToDescriptorType(BindingKind::SampledTexture), VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
     EXPECT_EQ(ToDescriptorType(BindingKind::Sampler), VK_DESCRIPTOR_TYPE_SAMPLER);
     EXPECT_EQ(ToDescriptorType(BindingKind::ConstantBuffer), VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+    EXPECT_EQ(ToDescriptorType(BindingKind::AccelerationStructure), VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+
+    // Visibility defaults keep the p03 compute tables compute-only.
+    EXPECT_EQ(ToVk(BindingSlot{}.visibility), static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_COMPUTE_BIT));
+    EXPECT_EQ(ToVk(KernelLayoutDesc{}.pushConstantVisibility),
+              static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_COMPUTE_BIT));
+    EXPECT_EQ(ToVk(gpu::ShaderStages::RayGen | gpu::ShaderStages::ClosestHit | gpu::ShaderStages::AnyHit |
+                   gpu::ShaderStages::Miss),
+              static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+                                              VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR));
+
+    // Sampler descriptors: an empty desc is a zero-initialised create info.
+    const VkSamplerCreateInfo zero = ToVk(gpu::SamplerDesc{});
+    EXPECT_EQ(zero.sType, VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO);
+    EXPECT_EQ(zero.magFilter, VK_FILTER_NEAREST);
+    EXPECT_EQ(zero.mipmapMode, VK_SAMPLER_MIPMAP_MODE_NEAREST);
+    EXPECT_EQ(zero.addressModeU, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+    EXPECT_EQ(zero.anisotropyEnable, static_cast<VkBool32>(VK_FALSE));
+    EXPECT_EQ(zero.compareOp, VK_COMPARE_OP_NEVER);
+    EXPECT_EQ(zero.borderColor, VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK);
+    EXPECT_FLOAT_EQ(zero.maxLod, 0.0f);
+
+    gpu::SamplerDesc material;
+    material.magFilter = gpu::Filter::Linear;
+    material.minFilter = gpu::Filter::Linear;
+    material.mipmapMode = gpu::Filter::Linear;
+    material.addressModeU = gpu::AddressMode::MirroredRepeat;
+    material.addressModeV = gpu::AddressMode::ClampToEdge;
+    material.maxAnisotropy = 1.0f;
+    material.compareOp = gpu::CompareOp::Always;
+    material.borderColor = gpu::BorderColor::IntOpaqueBlack;
+    material.maxLod = gpu::kLodClampNone;
+    const VkSamplerCreateInfo info = ToVk(material);
+    EXPECT_EQ(info.magFilter, VK_FILTER_LINEAR);
+    EXPECT_EQ(info.mipmapMode, VK_SAMPLER_MIPMAP_MODE_LINEAR);
+    EXPECT_EQ(info.addressModeU, VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT);
+    EXPECT_EQ(info.addressModeV, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    EXPECT_EQ(info.addressModeW, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+    EXPECT_EQ(info.compareOp, VK_COMPARE_OP_ALWAYS);
+    EXPECT_EQ(info.borderColor, VK_BORDER_COLOR_INT_OPAQUE_BLACK);
+    EXPECT_FLOAT_EQ(info.maxAnisotropy, 1.0f);
+    EXPECT_FLOAT_EQ(info.maxLod, VK_LOD_CLAMP_NONE);
 }
 
 TEST(GpuMappingTest, FormatsRoundTrip) {
     for (const Format f : {Format::R32Float, Format::RGBA32Float, Format::RGBA32Uint, Format::RGBA8Unorm,
-                           Format::RGBA8Srgb, Format::BGRA8Srgb}) {
+                           Format::RGBA8Srgb, Format::BGRA8Srgb, Format::RG32Float, Format::RGBA16Float,
+                           Format::BC7Unorm, Format::BC7Srgb}) {
         EXPECT_EQ(FromVk(ToVk(f)), f);
     }
 }

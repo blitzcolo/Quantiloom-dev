@@ -30,6 +30,17 @@ public:
     void ExecuteImmediate(const std::function<void(CommandList&)>& record) override;
     [[nodiscard]] Result<void, String> WaitIdle() override;
 
+    [[nodiscard]] Result<std::unique_ptr<Sampler>, String> CreateSampler(const SamplerDesc& desc) override;
+    [[nodiscard]] Result<std::unique_ptr<Event>, String> CreateGpuEvent() override;
+    [[nodiscard]] Result<std::unique_ptr<TimestampPool>, String> CreateTimestampPool(u32 count) override;
+    [[nodiscard]] Result<std::unique_ptr<CommandPool>, String> CreateCommandPool(
+        const CommandPoolDesc& desc) override;
+    [[nodiscard]] Result<std::unique_ptr<Fence>, String> CreateFence() override;
+    [[nodiscard]] Result<void, String> Submit(CommandBuffer& commandBuffer, Fence* signal) override;
+    [[nodiscard]] Result<void, String> WaitQueueIdle() override;
+    [[nodiscard]] std::unique_ptr<CommandList> WrapRecording(NativeHandle commandBuffer) override;
+    [[nodiscard]] TextureRef ImportHostTexture(NativeHandle image, Format format, u32 width, u32 height) override;
+
     [[nodiscard]] VulkanContext& Context() const { return context_; }
 
 private:
