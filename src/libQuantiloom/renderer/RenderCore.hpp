@@ -40,6 +40,7 @@
 #include "core/Config.hpp"
 #include "core/Image.hpp"
 #include "core/Types.hpp"
+#include "gpu/Resources.hpp"
 #include "renderer/AccelerationStructure.hpp"
 #include "renderer/BRDFLutGenerator.hpp"
 #include "renderer/GpuBuffer.hpp"
@@ -195,15 +196,15 @@ public:
                           const String& cachePath = {},
                           const BRDFLutGenerator::Config& config = {});
 
-    [[nodiscard]] bool IsValid() const { return m_sampler != VK_NULL_HANDLE; }
+    [[nodiscard]] bool IsValid() const { return m_sampler != nullptr; }
     [[nodiscard]] VkImageView View() const;
-    [[nodiscard]] VkSampler Sampler() const { return m_sampler; }
+    [[nodiscard]] VkSampler Sampler() const;
     [[nodiscard]] u32 Resolution() const { return m_resolution; }
 
 private:
-    VkDevice m_device = VK_NULL_HANDLE;
     std::unique_ptr<GpuImage> m_image;
-    VkSampler m_sampler = VK_NULL_HANDLE;
+    // After m_image, so the sampler is destroyed first.
+    std::unique_ptr<gpu::Sampler> m_sampler;
     u32 m_resolution = 0;
 };
 
@@ -264,17 +265,17 @@ public:
     static EnvironmentCubemap Fallback(VulkanContext& ctx,
                                        const Params& requested = kFallbackParams);
 
-    [[nodiscard]] bool IsValid() const { return m_image != nullptr && m_sampler != VK_NULL_HANDLE; }
+    [[nodiscard]] bool IsValid() const { return m_image != nullptr && m_sampler != nullptr; }
     [[nodiscard]] VkImageView View() const;
     /// Trilinear and unclamped, so `lod` from the shader actually selects a level.
-    [[nodiscard]] VkSampler Sampler() const { return m_sampler; }
+    [[nodiscard]] VkSampler Sampler() const;
     [[nodiscard]] u32 FaceSize() const { return m_faceSize; }
     [[nodiscard]] u32 MipLevels() const { return m_mipLevels; }
 
 private:
-    VkDevice m_device = VK_NULL_HANDLE;
     std::unique_ptr<GpuImage> m_image;
-    VkSampler m_sampler = VK_NULL_HANDLE;
+    // After m_image, so the sampler is destroyed first.
+    std::unique_ptr<gpu::Sampler> m_sampler;
     u32 m_faceSize = 0;
     u32 m_mipLevels = 0;
 };

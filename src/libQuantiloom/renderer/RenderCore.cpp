@@ -12,11 +12,14 @@
 #include "io/GltfLoader.hpp"
 #include "io/ImageIO.hpp"
 #include "io/UsdLoader.hpp"
+#include "gpu/Device.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/CommandHelper.hpp"
 #include "renderer/GpuBuffer.hpp"
 #include "renderer/GpuImage.hpp"
 #include "renderer/RayTracingPipeline.hpp"
 #include "renderer/TextureManager.hpp"
+#include "renderer/TextureTransitions.hpp"
 #include "renderer/VulkanContext.hpp"
 
 #include <glm/glm.hpp>
@@ -332,33 +335,21 @@ Vector<Image> EquirectToCubemap(const Image& equirect, const u32 faceSize) {
 // BrdfLut
 // ============================================================================
 
-BrdfLut::~BrdfLut() {
-    if (m_sampler != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
-        vkDestroySampler(m_device, m_sampler, nullptr);
-    }
-}
+BrdfLut::~BrdfLut() = default;
 
 BrdfLut::BrdfLut(BrdfLut&& other) noexcept
-    : m_device(other.m_device),
-      m_image(std::move(other.m_image)),
-      m_sampler(other.m_sampler),
+    : m_image(std::move(other.m_image)),
+      m_sampler(std::move(other.m_sampler)),
       m_resolution(other.m_resolution) {
-    other.m_sampler = VK_NULL_HANDLE;
-    other.m_device = VK_NULL_HANDLE;
     other.m_resolution = 0;
 }
 
 BrdfLut& BrdfLut::operator=(BrdfLut&& other) noexcept {
     if (this != &other) {
-        if (m_sampler != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
-            vkDestroySampler(m_device, m_sampler, nullptr);
-        }
-        m_device = other.m_device;
+        // The sampler first: the old one is destroyed before the old image.
+        m_sampler = std::move(other.m_sampler);
         m_image = std::move(other.m_image);
-        m_sampler = other.m_sampler;
         m_resolution = other.m_resolution;
-        other.m_sampler = VK_NULL_HANDLE;
-        other.m_device = VK_NULL_HANDLE;
         other.m_resolution = 0;
     }
     return *this;
@@ -366,6 +357,10 @@ BrdfLut& BrdfLut::operator=(BrdfLut&& other) noexcept {
 
 VkImageView BrdfLut::View() const {
     return m_image ? m_image->GetView() : VK_NULL_HANDLE;
+}
+
+VkSampler BrdfLut::Sampler() const {
+    return m_sampler ? gpu::vulkan::NativeSampler(m_sampler->Ref()) : VK_NULL_HANDLE;
 }
 
 namespace {
@@ -417,8 +412,9 @@ BrdfLut BrdfLut::Create(VulkanContext& ctx,
 
     const u32 size = effective.resolution;
 
+    const std::unique_ptr<gpu::Device> gpuDevice = gpu::vulkan::AdoptContext(ctx);
+
     BrdfLut result;
-    result.m_device = ctx.GetDevice();
     result.m_resolution = size;
     result.m_image = std::make_unique<GpuImage>(
         ctx.GetAllocator(),
@@ -427,10 +423,10 @@ BrdfLut BrdfLut::Create(VulkanContext& ctx,
         VK_FORMAT_R32G32_SFLOAT,  // R = scale, G = bias
         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY);
+    const gpu::TextureRef image =
+        gpu::vulkan::Ref(*result.m_image).WithLayout(gpu::TextureLayoutPolicy::Optimal);
 
-    CommandHelper::TransitionImageLayoutImmediate(
-        ctx, result.m_image->GetImage(), result.m_image->GetFormat(),
-        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    LegacyTransitionImmediate(*gpuDevice, image, Layout::Undefined, Layout::TransferDst);
 
     {
         std::vector<f32> interleaved(static_cast<size_t>(size) * size * 2);
@@ -447,42 +443,37 @@ BrdfLut BrdfLut::Create(VulkanContext& ctx,
                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
         staging.Upload(interleaved.data(), bytes);
 
-        CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
-            VkBufferImageCopy region{};
-            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.layerCount = 1;
-            region.imageExtent = {size, size, 1};
-
-            vkCmdCopyBufferToImage(cmd, staging.GetHandle(), result.m_image->GetImage(),
-                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
+            gpu::BufferTextureCopy region;
+            region.width = size;
+            region.height = size;
+            list.CopyBufferToTexture(gpu::vulkan::Ref(staging), image, region);
         });
     }
 
-    CommandHelper::TransitionImageLayoutImmediate(
-        ctx, result.m_image->GetImage(), result.m_image->GetFormat(),
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    LegacyTransitionImmediate(*gpuDevice, image, Layout::TransferDst, Layout::ShaderReadOnly);
 
     // CLAMP_TO_EDGE on every axis, so the border colour is never sampled -- the two
     // implementations disagreed on it (opaque white against the zero-initialised
     // transparent black) with no observable difference.
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = VK_FILTER_LINEAR;
-    samplerInfo.minFilter = VK_FILTER_LINEAR;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;  // no mip chain
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.anisotropyEnable = VK_FALSE;
-    samplerInfo.compareEnable = VK_FALSE;
-    samplerInfo.minLod = 0.0f;
-    samplerInfo.maxLod = 0.0f;
-    samplerInfo.unnormalizedCoordinates = VK_FALSE;
+    gpu::SamplerDesc samplerDesc;
+    samplerDesc.magFilter = gpu::Filter::Linear;
+    samplerDesc.minFilter = gpu::Filter::Linear;
+    samplerDesc.mipmapMode = gpu::Filter::Nearest;  // no mip chain
+    samplerDesc.addressModeU = gpu::AddressMode::ClampToEdge;
+    samplerDesc.addressModeV = gpu::AddressMode::ClampToEdge;
+    samplerDesc.addressModeW = gpu::AddressMode::ClampToEdge;
+    samplerDesc.anisotropyEnable = false;
+    samplerDesc.compareEnable = false;
+    samplerDesc.minLod = 0.0f;
+    samplerDesc.maxLod = 0.0f;
+    samplerDesc.unnormalizedCoordinates = false;
 
-    if (vkCreateSampler(ctx.GetDevice(), &samplerInfo, nullptr, &result.m_sampler)
-        != VK_SUCCESS) {
+    auto sampler = gpuDevice->CreateSampler(samplerDesc);
+    if (sampler.has_value()) {
+        result.m_sampler = std::move(sampler.value());
+    } else {
         QL_LOG_ERROR("Failed to create BRDF LUT sampler");
-        result.m_sampler = VK_NULL_HANDLE;
     }
 
     return result;
@@ -497,23 +488,22 @@ namespace {
 // Upload one face of one mip level. Each call stages and submits on its own; the
 // cubemap is built once per scene load, so the simplicity is worth more than the
 // batching.
-void UploadCubemapLevel(VulkanContext& ctx, GpuImage& target, u32 face, u32 mip,
-                        u32 size, const std::vector<f32>& rgba) {
+void UploadCubemapLevel(VulkanContext& ctx, gpu::Device& device, GpuImage& target, u32 face,
+                        u32 mip, u32 size, const std::vector<f32>& rgba) {
     const VkDeviceSize bytes = rgba.size() * sizeof(f32);
     GpuBuffer staging(ctx.GetAllocator(), bytes,
                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
     staging.Upload(rgba.data(), bytes);
 
-    CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
-        VkBufferImageCopy region{};
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.mipLevel = mip;
-        region.imageSubresource.baseArrayLayer = face;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent = {size, size, 1};
-
-        vkCmdCopyBufferToImage(cmd, staging.GetHandle(), target.GetImage(),
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    device.ExecuteImmediate([&](gpu::CommandList& list) {
+        gpu::BufferTextureCopy region;
+        region.mipLevel = mip;
+        region.baseLayer = face;
+        region.width = size;
+        region.height = size;
+        list.CopyBufferToTexture(
+            gpu::vulkan::Ref(staging),
+            gpu::vulkan::Ref(target).WithLayout(gpu::TextureLayoutPolicy::Optimal), region);
     });
 }
 
@@ -539,30 +529,29 @@ EnvironmentCubemap::Params ClampToFaceSize(EnvironmentCubemap::Params p) {
 
 // Trilinear across the chain and unclamped, so the shader's roughness-derived lod
 // picks a level instead of being pinned to mip 0 by a maxLod of zero.
-VkSampler CreateEnvironmentSampler(VkDevice device) {
-    VkSamplerCreateInfo info{};
-    info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    info.magFilter = VK_FILTER_LINEAR;
-    info.minFilter = VK_FILTER_LINEAR;
-    info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    info.anisotropyEnable = VK_FALSE;
-    info.compareEnable = VK_FALSE;
-    info.minLod = 0.0f;
-    info.maxLod = VK_LOD_CLAMP_NONE;
-    info.unnormalizedCoordinates = VK_FALSE;
+std::unique_ptr<gpu::Sampler> CreateEnvironmentSampler(gpu::Device& device) {
+    gpu::SamplerDesc desc;
+    desc.magFilter = gpu::Filter::Linear;
+    desc.minFilter = gpu::Filter::Linear;
+    desc.mipmapMode = gpu::Filter::Linear;
+    desc.addressModeU = gpu::AddressMode::ClampToEdge;
+    desc.addressModeV = gpu::AddressMode::ClampToEdge;
+    desc.addressModeW = gpu::AddressMode::ClampToEdge;
+    desc.anisotropyEnable = false;
+    desc.compareEnable = false;
+    desc.minLod = 0.0f;
+    desc.maxLod = gpu::kLodClampNone;
+    desc.unnormalizedCoordinates = false;
 
-    VkSampler sampler = VK_NULL_HANDLE;
-    if (vkCreateSampler(device, &info, nullptr, &sampler) != VK_SUCCESS) {
+    auto sampler = device.CreateSampler(desc);
+    if (!sampler.has_value()) {
         QL_LOG_ERROR("Failed to create environment map sampler");
-        return VK_NULL_HANDLE;
+        return nullptr;
     }
-    return sampler;
+    return std::move(sampler.value());
 }
 
-std::unique_ptr<GpuImage> CreateCubemapImage(VulkanContext& ctx,
+std::unique_ptr<GpuImage> CreateCubemapImage(VulkanContext& ctx, gpu::Device& device,
                                              const EnvironmentCubemap::Params& p) {
     auto image = std::make_unique<GpuImage>(
         ctx.GetAllocator(), ctx.GetDevice(),
@@ -575,10 +564,8 @@ std::unique_ptr<GpuImage> CreateCubemapImage(VulkanContext& ctx,
         VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
         VK_IMAGE_VIEW_TYPE_CUBE);
 
-    CommandHelper::TransitionImageLayoutImmediate(
-        ctx, image->GetImage(), VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        p.mipLevels, 6);
+    LegacyTransitionImmediate(device, gpu::vulkan::Ref(*image, 6), Layout::Undefined,
+                              Layout::TransferDst, p.mipLevels, 6);
 
     return image;
 }
@@ -641,36 +628,24 @@ std::vector<f32> FaceToRgba(const Image& face, u32 size) {
 
 }  // namespace
 
-EnvironmentCubemap::~EnvironmentCubemap() {
-    if (m_sampler != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
-        vkDestroySampler(m_device, m_sampler, nullptr);
-    }
-}
+EnvironmentCubemap::~EnvironmentCubemap() = default;
 
 EnvironmentCubemap::EnvironmentCubemap(EnvironmentCubemap&& other) noexcept
-    : m_device(other.m_device),
-      m_image(std::move(other.m_image)),
-      m_sampler(other.m_sampler),
+    : m_image(std::move(other.m_image)),
+      m_sampler(std::move(other.m_sampler)),
       m_faceSize(other.m_faceSize),
       m_mipLevels(other.m_mipLevels) {
-    other.m_device = VK_NULL_HANDLE;
-    other.m_sampler = VK_NULL_HANDLE;
     other.m_faceSize = 0;
     other.m_mipLevels = 0;
 }
 
 EnvironmentCubemap& EnvironmentCubemap::operator=(EnvironmentCubemap&& other) noexcept {
     if (this != &other) {
-        if (m_sampler != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
-            vkDestroySampler(m_device, m_sampler, nullptr);
-        }
-        m_device = other.m_device;
+        // The sampler first: the old one is destroyed before the old image.
+        m_sampler = std::move(other.m_sampler);
         m_image = std::move(other.m_image);
-        m_sampler = other.m_sampler;
         m_faceSize = other.m_faceSize;
         m_mipLevels = other.m_mipLevels;
-        other.m_device = VK_NULL_HANDLE;
-        other.m_sampler = VK_NULL_HANDLE;
         other.m_faceSize = 0;
         other.m_mipLevels = 0;
     }
@@ -679,6 +654,10 @@ EnvironmentCubemap& EnvironmentCubemap::operator=(EnvironmentCubemap&& other) no
 
 VkImageView EnvironmentCubemap::View() const {
     return m_image ? m_image->GetView() : VK_NULL_HANDLE;
+}
+
+VkSampler EnvironmentCubemap::Sampler() const {
+    return m_sampler ? gpu::vulkan::NativeSampler(m_sampler->Ref()) : VK_NULL_HANDLE;
 }
 
 Result<EnvironmentCubemap, String> EnvironmentCubemap::Load(VulkanContext& ctx,
@@ -707,16 +686,17 @@ Result<EnvironmentCubemap, String> EnvironmentCubemap::Load(VulkanContext& ctx,
         return Result<EnvironmentCubemap, String>::Err(ex.what());
     }
 
+    const std::unique_ptr<gpu::Device> gpuDevice = gpu::vulkan::AdoptContext(ctx);
+
     EnvironmentCubemap result;
-    result.m_device = ctx.GetDevice();
     result.m_faceSize = params.faceSize;
     result.m_mipLevels = params.mipLevels;
-    result.m_image = CreateCubemapImage(ctx, params);
-    result.m_sampler = CreateEnvironmentSampler(ctx.GetDevice());
+    result.m_image = CreateCubemapImage(ctx, *gpuDevice, params);
+    result.m_sampler = CreateEnvironmentSampler(*gpuDevice);
 
     QL_LOG_INFO("  Uploading cubemap to GPU...");
     for (u32 face = 0; face < 6; ++face) {
-        UploadCubemapLevel(ctx, *result.m_image, face, 0, params.faceSize,
+        UploadCubemapLevel(ctx, *gpuDevice, *result.m_image, face, 0, params.faceSize,
                            FaceToRgba(faces[face], params.faceSize));
     }
 
@@ -725,15 +705,13 @@ Result<EnvironmentCubemap, String> EnvironmentCubemap::Load(VulkanContext& ctx,
         u32 mipSize = params.faceSize >> mip;
         if (mipSize == 0) mipSize = 1;
         for (u32 face = 0; face < 6; ++face) {
-            UploadCubemapLevel(ctx, *result.m_image, face, mip, mipSize,
+            UploadCubemapLevel(ctx, *gpuDevice, *result.m_image, face, mip, mipSize,
                                DownsampleFace(faces[face], params.faceSize, mip));
         }
     }
 
-    CommandHelper::TransitionImageLayoutImmediate(
-        ctx, result.m_image->GetImage(), VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        params.mipLevels, 6);
+    LegacyTransitionImmediate(*gpuDevice, gpu::vulkan::Ref(*result.m_image, 6),
+                              Layout::TransferDst, Layout::ShaderReadOnly, params.mipLevels, 6);
 
     QL_LOG_INFO("Environment map loaded successfully: {}", path);
     return Result<EnvironmentCubemap, String>(std::move(result));
@@ -749,12 +727,13 @@ EnvironmentCubemap EnvironmentCubemap::Fallback(VulkanContext& ctx, const Params
     // ride -- the shader reads .rgb only.
     constexpr f32 kBlack[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 
+    const std::unique_ptr<gpu::Device> gpuDevice = gpu::vulkan::AdoptContext(ctx);
+
     EnvironmentCubemap result;
-    result.m_device = ctx.GetDevice();
     result.m_faceSize = params.faceSize;
     result.m_mipLevels = params.mipLevels;
-    result.m_image = CreateCubemapImage(ctx, params);
-    result.m_sampler = CreateEnvironmentSampler(ctx.GetDevice());
+    result.m_image = CreateCubemapImage(ctx, *gpuDevice, params);
+    result.m_sampler = CreateEnvironmentSampler(*gpuDevice);
 
     // Uniform colour, so every level is filled directly rather than downsampled.
     for (u32 mip = 0; mip < params.mipLevels; ++mip) {
@@ -770,14 +749,12 @@ EnvironmentCubemap EnvironmentCubemap::Fallback(VulkanContext& ctx, const Params
         }
 
         for (u32 face = 0; face < 6; ++face) {
-            UploadCubemapLevel(ctx, *result.m_image, face, mip, mipSize, level);
+            UploadCubemapLevel(ctx, *gpuDevice, *result.m_image, face, mip, mipSize, level);
         }
     }
 
-    CommandHelper::TransitionImageLayoutImmediate(
-        ctx, result.m_image->GetImage(), VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        params.mipLevels, 6);
+    LegacyTransitionImmediate(*gpuDevice, gpu::vulkan::Ref(*result.m_image, 6),
+                              Layout::TransferDst, Layout::ShaderReadOnly, params.mipLevels, 6);
 
     return result;
 }
@@ -876,7 +853,7 @@ bool IsDoubleSided(const Scene& scene, u32 materialId) {
 }
 
 
-std::unique_ptr<GpuBuffer> UploadGeometryBuffer(VulkanContext& ctx,
+std::unique_ptr<GpuBuffer> UploadGeometryBuffer(VulkanContext& ctx, gpu::Device& device,
                                                 const void* data, size_t bytes,
                                                 VkBufferUsageFlags extraUsage = 0) {
     // Device-local: every consumer is device-side -- BLAS build inputs read by
@@ -895,12 +872,10 @@ std::unique_ptr<GpuBuffer> UploadGeometryBuffer(VulkanContext& ctx,
     std::memcpy(mapped, data, bytes);
     staging.Unmap();
 
-    CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
-        VkBufferCopy copyRegion{};
-        copyRegion.srcOffset = 0;
-        copyRegion.dstOffset = 0;
-        copyRegion.size = bytes;
-        vkCmdCopyBuffer(cmd, staging.GetHandle(), buffer->GetHandle(), 1, &copyRegion);
+    device.ExecuteImmediate([&](gpu::CommandList& list) {
+        const gpu::BufferCopyRegion copyRegion{0, 0, static_cast<u64>(bytes)};
+        list.CopyBuffer(gpu::vulkan::Ref(staging), gpu::vulkan::Ref(*buffer),
+                        std::span<const gpu::BufferCopyRegion>(&copyRegion, 1));
     });
     return buffer;
 }
@@ -1016,19 +991,20 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
     LogMergeValidation(vertices, indices, normals);
 
     VmaAllocator allocator = ctx.GetAllocator();
-    result.m_vertices = UploadGeometryBuffer(ctx, vertices.data(),
+    const std::unique_ptr<gpu::Device> gpuDevice = gpu::vulkan::AdoptContext(ctx);
+    result.m_vertices = UploadGeometryBuffer(ctx, *gpuDevice, vertices.data(),
         vertices.size() * sizeof(glm::vec3),
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
             VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-    result.m_indices = UploadGeometryBuffer(ctx, indices.data(),
+    result.m_indices = UploadGeometryBuffer(ctx, *gpuDevice, indices.data(),
         indices.size() * sizeof(u32),
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
             VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-    result.m_normals = UploadGeometryBuffer(ctx, normals.data(),
+    result.m_normals = UploadGeometryBuffer(ctx, *gpuDevice, normals.data(),
                                             normals.size() * sizeof(glm::vec3));
-    result.m_uvs = UploadGeometryBuffer(ctx, uvs.data(),
+    result.m_uvs = UploadGeometryBuffer(ctx, *gpuDevice, uvs.data(),
                                         uvs.size() * sizeof(glm::vec2));
-    result.m_tangents = UploadGeometryBuffer(ctx, tangents.data(),
+    result.m_tangents = UploadGeometryBuffer(ctx, *gpuDevice, tangents.data(),
                                              tangents.size() * sizeof(glm::vec4));
     result.m_vertexCount = nVerts;
     result.m_indexCount = nIndices;
@@ -1554,9 +1530,8 @@ std::unique_ptr<GpuImage> CreateRenderTarget(VulkanContext& ctx, const u32 width
 
     // GENERAL because the ray generation shader writes it as a storage image; it is
     // never sampled, only blitted or copied out.
-    CommandHelper::TransitionImageLayoutImmediate(
-        ctx, image->GetImage(), image->GetFormat(),
-        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    LegacyTransitionImmediate(*gpu::vulkan::AdoptContext(ctx), gpu::vulkan::Ref(*image),
+                              Layout::Undefined, Layout::General);
 
     return image;
 }

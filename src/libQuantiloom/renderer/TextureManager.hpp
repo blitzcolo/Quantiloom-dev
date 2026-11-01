@@ -23,7 +23,7 @@
  * - Prevents null descriptor access in shaders
  *
  * @note All textures uploaded during UploadTextures() call (batch operation)
- * @note Samplers destroyed manually in destructor (GpuImage handles images via RAII)
+ * @note Samplers are owned gpu::Sampler objects, destroyed before the images (RAII)
  * @note Texture indices are immutable after upload
  *
  * @author blitzcolo
@@ -37,6 +37,7 @@
 #include "TextureCompressor.hpp"
 #include "VulkanContext.hpp"
 #include "GpuImage.hpp"
+#include "gpu/Device.hpp"
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <memory>
@@ -105,8 +106,8 @@ public:
         VulkanContext& context,
         VkDeviceSize uploadBatchBytes = kDefaultUploadBatchBytes);
 
-    // Destructor: automatically destroys all VkSampler objects
-    // (GpuImage handles VkImage/VkImageView destruction via RAII)
+    // Destructor: the gpu::Sampler owners destroy every sampler, then GpuImage
+    // destroys VkImage/VkImageView (RAII)
     ~TextureManager();
 
     // Non-copyable (contains unique_ptr members)
@@ -195,14 +196,14 @@ private:
                           VkFormat format, u32 texWidth, u32 texHeight,
                           u32 mipLevels) const;
 
-    // Create VkSampler based on TextureSampler settings
-    [[nodiscard]] VkSampler CreateSampler(const TextureSampler& samplerInfo) const;
+    // Create a sampler based on TextureSampler settings
+    [[nodiscard]] std::unique_ptr<gpu::Sampler> CreateSampler(const TextureSampler& samplerInfo) const;
 
-    // Convert TextureSampler::Filter to VkFilter
-    static VkFilter ToVkFilter(TextureSampler::Filter filter);
+    // Convert TextureSampler::Filter to gpu::Filter
+    static gpu::Filter ToFilter(TextureSampler::Filter filter);
 
-    // Convert TextureSampler::WrapMode to VkSamplerAddressMode
-    static VkSamplerAddressMode ToVkAddressMode(TextureSampler::WrapMode wrapMode);
+    // Convert TextureSampler::WrapMode to gpu::AddressMode
+    static gpu::AddressMode ToAddressMode(TextureSampler::WrapMode wrapMode);
 
     // Create a 1x1 white dummy texture (fallback for empty texture list)
     static Texture CreateDummyTexture();
@@ -212,13 +213,19 @@ private:
     // ========================================================================
 
     VulkanContext& m_context;
+    // Adopted from m_context; creates the samplers
+    std::unique_ptr<gpu::Device> m_gpu;
     VkDeviceSize m_uploadBatchBytes = kDefaultUploadBatchBytes;
     u32 m_lastUploadBatchCount = 0;
 
     // GPU image resources (VkImage + VkImageView managed by GpuImage)
     std::vector<std::unique_ptr<GpuImage>> m_images;
 
-    // VkSampler objects (created manually, must be destroyed in destructor)
+    // One sampler per image. Declared after m_images, so the samplers are destroyed first,
+    // as the hand-written destructor did
+    std::vector<std::unique_ptr<gpu::Sampler>> m_samplerObjects;
+
+    // Their VkSampler handles, for descriptor binding
     std::vector<VkSampler> m_samplers;
 
     // Cached arrays for descriptor binding (updated after upload)
