@@ -8,8 +8,7 @@
 #include "core/Log.hpp"
 #include "gpu/CommandList.hpp"
 #include "gpu/Device.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
-#include "renderer/GpuBuffer.hpp"
+#include "renderer/GpuAlloc.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -189,13 +188,18 @@ void EnforceReciprocity(thermal::CsrMatrix& viewFactors, Vector<f32>& skyFractio
     viewFactors = std::move(result);
 }
 
+// A transient storage buffer of the pass, in the memory class its use needs: the inputs
+// host-written, the outputs host-read.
+gpu::BufferDesc StorageDesc(u64 bytes, gpu::MemoryClass memory) {
+    return gpu::BufferDesc{bytes, gpu::BufferUsage::Storage, memory, 0};
+}
+
 }  // namespace
 
 struct ThermalExchangePrecompute::Impl {
     Vector<f32> materialCoverage;
-    VulkanContext& context;
-    /// Adopted from the context; declared before the objects it creates so it outlives them.
-    std::unique_ptr<gpu::Device> gpuDevice;
+    /// The caller's device; it outlives the objects below, which it creates.
+    gpu::Device& gpuDevice;
 
     // Destroyed in reverse declaration order -- kernel, kernel layout, pool, binding
     // layout -- which is the order the native handles were destroyed in before.
@@ -205,13 +209,13 @@ struct ThermalExchangePrecompute::Impl {
     std::unique_ptr<gpu::ComputeKernel> kernel;
     gpu::BindGroup bindGroup;
 
-    explicit Impl(VulkanContext& ctx) : context(ctx), gpuDevice(gpu::vulkan::AdoptContext(ctx)) {}
+    explicit Impl(gpu::Device& device) : gpuDevice(device) {}
 
     /// Each object is kept as soon as it exists, so a failure part-way releases what was
     /// created with the Impl. The bind group is set last: IsValid() is false on any failure.
     bool Create() {
         const StringView kShaderNames[] = {"thermal_exchange"};
-        auto shaders = gpuDevice->Shaders().Load(kShaderNames);
+        auto shaders = gpuDevice.Shaders().Load(kShaderNames);
         if (!shaders.has_value()) {
             QL_LOG_WARN("Thermal exchange: thermal_exchange.spv not found; the solver "
                         "will fall back to open-sky exchange");
@@ -229,7 +233,7 @@ struct ThermalExchangePrecompute::Impl {
             {4, gpu::BindingKind::ReadWriteBuffer, 1, false},
             {5, gpu::BindingKind::ReadOnlyBuffer, 1, false},
         };
-        auto bindingLayoutResult = gpuDevice->CreateBindingLayout(
+        auto bindingLayoutResult = gpuDevice.CreateBindingLayout(
             gpu::BindingLayoutDesc{0, std::span<const gpu::BindingSlot>(kSlots)});
         if (!bindingLayoutResult.has_value()) {
             QL_LOG_WARN("Thermal exchange: failed to create descriptor set layout");
@@ -238,7 +242,7 @@ struct ThermalExchangePrecompute::Impl {
         bindingLayout = std::move(bindingLayoutResult.value());
 
         const gpu::BindingLayout* spaces[] = {bindingLayout.get()};
-        auto kernelLayoutResult = gpuDevice->CreateKernelLayout(gpu::KernelLayoutDesc{
+        auto kernelLayoutResult = gpuDevice.CreateKernelLayout(gpu::KernelLayoutDesc{
             std::span<const gpu::BindingLayout* const>(spaces), sizeof(ExchangePushConstants)});
         if (!kernelLayoutResult.has_value()) {
             QL_LOG_WARN("Thermal exchange: failed to create pipeline layout");
@@ -247,7 +251,7 @@ struct ThermalExchangePrecompute::Impl {
         kernelLayout = std::move(kernelLayoutResult.value());
 
         // The shader module lives only as long as the pipeline creation.
-        auto kernelResult = gpuDevice->CreateComputeKernel(
+        auto kernelResult = gpuDevice.CreateComputeKernel(
             gpu::ComputeKernelDesc{&shaders.value()[0], kernelLayout.get()});
         if (!kernelResult.has_value()) {
             QL_LOG_WARN("Thermal exchange: failed to create compute pipeline ({})",
@@ -257,7 +261,7 @@ struct ThermalExchangePrecompute::Impl {
         kernel = std::move(kernelResult.value());
 
         // Pool sizes follow the layout: {acceleration structure 1, storage buffer 5}, one set.
-        auto poolResult = gpuDevice->CreateBindGroupPool(*bindingLayout, 1);
+        auto poolResult = gpuDevice.CreateBindGroupPool(*bindingLayout, 1);
         if (!poolResult.has_value()) {
             QL_LOG_WARN("Thermal exchange: failed to create descriptor pool");
             return false;
@@ -274,8 +278,8 @@ struct ThermalExchangePrecompute::Impl {
     }
 };
 
-ThermalExchangePrecompute::ThermalExchangePrecompute(VulkanContext& context)
-    : m_impl(std::make_unique<Impl>(context)) {
+ThermalExchangePrecompute::ThermalExchangePrecompute(gpu::Device& device)
+    : m_impl(std::make_unique<Impl>(device)) {
     // A failed Create leaves the bind group unset, so IsValid() stays false.
     m_impl->Create();
 }
@@ -293,10 +297,10 @@ bool ThermalExchangePrecompute::IsValid() const {
 }
 
 thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
-    const VkAccelerationStructureKHR tlas, const Vector<thermal::ThermalElement>& elements,
+    const gpu::RtSceneRef tlas, const Vector<thermal::ThermalElement>& elements,
     const Vector<u32>& instanceElementBase, const Params& params) {
     thermal::ExchangeGeometry exchange;
-    if (!IsValid() || elements.empty() || tlas == VK_NULL_HANDLE) {
+    if (!IsValid() || elements.empty() || !tlas.IsValid()) {
         return exchange;
     }
 
@@ -310,10 +314,10 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
     // Hit records are elementCount * rays uints. At 15k elements and 256 rays
     // that is 15 MB, which is why they are a transient rather than something
     // the scene holds on to.
-    const VkDeviceSize recordBytes =
-        static_cast<VkDeviceSize>(elementCount) * rays * sizeof(u32);
+    const u64 recordBytes =
+        static_cast<u64>(elementCount) * rays * sizeof(u32);
 
-    VmaAllocator allocator = m_impl->context.GetAllocator();
+    gpu::Device& device = m_impl->gpuDevice;
 
     Vector<ThermalElementGpu> gpuElements(elementCount);
     for (u32 e = 0; e < elementCount; ++e) {
@@ -323,42 +327,41 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
         gpuElements[e].materialId = elements[e].materialId;
     }
 
-    GpuBuffer elementBuffer(allocator, gpuElements.size() * sizeof(ThermalElementGpu),
-                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    elementBuffer.Upload(gpuElements.data(), gpuElements.size() * sizeof(ThermalElementGpu));
+    const auto elementBuffer = CreateBufferOrThrow(device, StorageDesc(gpuElements.size() * sizeof(ThermalElementGpu),
+                                                                 gpu::MemoryClass::Upload));
+    elementBuffer->Upload(gpuElements.data(), gpuElements.size() * sizeof(ThermalElementGpu));
 
     Vector<u32> bases = instanceElementBase;
     if (bases.empty()) bases.push_back(0);
-    GpuBuffer baseBuffer(allocator, bases.size() * sizeof(u32),
-                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    baseBuffer.Upload(bases.data(), bases.size() * sizeof(u32));
+    const auto baseBuffer =
+        CreateBufferOrThrow(device, StorageDesc(bases.size() * sizeof(u32), gpu::MemoryClass::Upload));
+    baseBuffer->Upload(bases.data(), bases.size() * sizeof(u32));
 
-    GpuBuffer recordBuffer(allocator, recordBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                           VMA_MEMORY_USAGE_GPU_TO_CPU);
-    GpuBuffer sunBuffer(allocator, elementCount * sizeof(f32),
-                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
+    const auto recordBuffer = CreateBufferOrThrow(device, StorageDesc(recordBytes, gpu::MemoryClass::Readback));
+    const auto sunBuffer =
+        CreateBufferOrThrow(device, StorageDesc(elementCount * sizeof(f32), gpu::MemoryClass::Readback));
 
     // Empty means every material is opaque, which the shader's own bounds
     // check would fall back to anyway -- but a zero-sized buffer is not a
     // legal descriptor, so it gets one entry.
     Vector<f32> coverage = m_impl->materialCoverage;
     if (coverage.empty()) coverage.push_back(1.0f);
-    GpuBuffer coverageBuffer(allocator, coverage.size() * sizeof(f32),
-                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    coverageBuffer.Upload(coverage.data(), coverage.size() * sizeof(f32));
+    const auto coverageBuffer =
+        CreateBufferOrThrow(device, StorageDesc(coverage.size() * sizeof(f32), gpu::MemoryClass::Upload));
+    coverageBuffer->Upload(coverage.data(), coverage.size() * sizeof(f32));
 
     // ------------------------------------------------------------------
     // Bind and dispatch
     // ------------------------------------------------------------------
     const gpu::BindingWrite writes[] = {
-        gpu::BindingWrite::Scene(0, gpu::vulkan::Ref(tlas)),
-        gpu::BindingWrite::Buffer(1, gpu::BindingKind::ReadOnlyBuffer, gpu::vulkan::Ref(elementBuffer)),
-        gpu::BindingWrite::Buffer(2, gpu::BindingKind::ReadOnlyBuffer, gpu::vulkan::Ref(baseBuffer)),
-        gpu::BindingWrite::Buffer(3, gpu::BindingKind::ReadWriteBuffer, gpu::vulkan::Ref(recordBuffer)),
-        gpu::BindingWrite::Buffer(4, gpu::BindingKind::ReadWriteBuffer, gpu::vulkan::Ref(sunBuffer)),
-        gpu::BindingWrite::Buffer(5, gpu::BindingKind::ReadOnlyBuffer, gpu::vulkan::Ref(coverageBuffer)),
+        gpu::BindingWrite::Scene(0, tlas),
+        gpu::BindingWrite::Buffer(1, gpu::BindingKind::ReadOnlyBuffer, elementBuffer->Ref()),
+        gpu::BindingWrite::Buffer(2, gpu::BindingKind::ReadOnlyBuffer, baseBuffer->Ref()),
+        gpu::BindingWrite::Buffer(3, gpu::BindingKind::ReadWriteBuffer, recordBuffer->Ref()),
+        gpu::BindingWrite::Buffer(4, gpu::BindingKind::ReadWriteBuffer, sunBuffer->Ref()),
+        gpu::BindingWrite::Buffer(5, gpu::BindingKind::ReadOnlyBuffer, coverageBuffer->Ref()),
     };
-    m_impl->gpuDevice->WriteBindGroup(m_impl->bindGroup, writes);
+    m_impl->gpuDevice.WriteBindGroup(m_impl->bindGroup, writes);
 
     ExchangePushConstants pc{};
     pc.sunDirection = glm::normalize(params.sunDirection);
@@ -369,7 +372,7 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
     pc.rayOffset = kRayOffsetFloor;
     pc.sunOutputOffset = 0;
 
-    m_impl->gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
+    m_impl->gpuDevice.ExecuteImmediate([&](gpu::CommandList& list) {
         list.SetKernel(*m_impl->kernel);
         list.SetBindGroup(*m_impl->kernelLayout, 0, m_impl->bindGroup);
         list.PushConstants(*m_impl->kernelLayout, pc);
@@ -377,8 +380,8 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
 
         // Both outputs to the host, one barrier: compute shader writes before host reads.
         const gpu::BufferBarrier barriers[2] = {
-            {gpu::vulkan::Ref(recordBuffer), gpu::Access::ComputeWrite, gpu::Access::HostRead},
-            {gpu::vulkan::Ref(sunBuffer), gpu::Access::ComputeWrite, gpu::Access::HostRead},
+            {recordBuffer->Ref(), gpu::Access::ComputeWrite, gpu::Access::HostRead},
+            {sunBuffer->Ref(), gpu::Access::ComputeWrite, gpu::Access::HostRead},
         };
         list.Barrier(gpu::BarrierBatch{{}, std::span<const gpu::BufferBarrier>(barriers), {}});
     });
@@ -386,8 +389,8 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
     // ------------------------------------------------------------------
     // Reduce the hit records into sparse rows
     // ------------------------------------------------------------------
-    const u32* records = static_cast<const u32*>(recordBuffer.MapRead());
-    const f32* sun = static_cast<const f32*>(sunBuffer.MapRead());
+    const u32* records = static_cast<const u32*>(recordBuffer->MapRead());
+    const f32* sun = static_cast<const f32*>(sunBuffer->MapRead());
 
     exchange.viewFactors.rowStart.reserve(elementCount + 1);
     exchange.viewFactors.rowStart.push_back(0);
@@ -455,8 +458,8 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
         exchange.skyFraction[e] = skyFraction;
     }
 
-    recordBuffer.Unmap();
-    sunBuffer.Unmap();
+    recordBuffer->Unmap();
+    sunBuffer->Unmap();
 
     EnforceReciprocity(exchange.viewFactors, exchange.skyFraction, elements);
 
@@ -471,17 +474,17 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
 }
 
 Vector<f32> ThermalExchangePrecompute::RunSunVisibility(
-    const VkAccelerationStructureKHR tlas, const Vector<thermal::ThermalElement>& elements,
+    const gpu::RtSceneRef tlas, const Vector<thermal::ThermalElement>& elements,
     const Vector<u32>& instanceElementBase, std::span<const glm::vec3> directions,
     const u32 sunRays, const f32 sunAngularRadius) {
-    if (!IsValid() || elements.empty() || tlas == VK_NULL_HANDLE || directions.empty()) {
+    if (!IsValid() || elements.empty() || !tlas.IsValid() || directions.empty()) {
         return {};
     }
 
     const u32 elementCount = static_cast<u32>(elements.size());
     const u32 K = static_cast<u32>(directions.size());
 
-    VmaAllocator allocator = m_impl->context.GetAllocator();
+    gpu::Device& device = m_impl->gpuDevice;
 
     Vector<ThermalElementGpu> gpuElements(elementCount);
     for (u32 e = 0; e < elementCount; ++e) {
@@ -491,47 +494,45 @@ Vector<f32> ThermalExchangePrecompute::RunSunVisibility(
         gpuElements[e].materialId = elements[e].materialId;
     }
 
-    GpuBuffer elementBuffer(allocator, gpuElements.size() * sizeof(ThermalElementGpu),
-                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    elementBuffer.Upload(gpuElements.data(), gpuElements.size() * sizeof(ThermalElementGpu));
+    const auto elementBuffer = CreateBufferOrThrow(device, StorageDesc(gpuElements.size() * sizeof(ThermalElementGpu),
+                                                                 gpu::MemoryClass::Upload));
+    elementBuffer->Upload(gpuElements.data(), gpuElements.size() * sizeof(ThermalElementGpu));
 
     Vector<u32> bases = instanceElementBase;
     if (bases.empty()) bases.push_back(0);
-    GpuBuffer baseBuffer(allocator, bases.size() * sizeof(u32),
-                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    baseBuffer.Upload(bases.data(), bases.size() * sizeof(u32));
+    const auto baseBuffer =
+        CreateBufferOrThrow(device, StorageDesc(bases.size() * sizeof(u32), gpu::MemoryClass::Upload));
+    baseBuffer->Upload(bases.data(), bases.size() * sizeof(u32));
 
     // Dummy hit record buffer — the sun-only pass sets rayCount=0, so no
     // hemisphere records are written. The binding still must exist.
-    GpuBuffer recordBuffer(allocator, sizeof(u32),
-                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
+    const auto recordBuffer = CreateBufferOrThrow(device, StorageDesc(sizeof(u32), gpu::MemoryClass::Readback));
 
     // Sun visibility: K columns, each elementCount floats, direction-major.
-    const VkDeviceSize sunBytes =
-        static_cast<VkDeviceSize>(K) * elementCount * sizeof(f32);
-    GpuBuffer sunBuffer(allocator, sunBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                        VMA_MEMORY_USAGE_GPU_TO_CPU);
+    const u64 sunBytes =
+        static_cast<u64>(K) * elementCount * sizeof(f32);
+    const auto sunBuffer = CreateBufferOrThrow(device, StorageDesc(sunBytes, gpu::MemoryClass::Readback));
 
     Vector<f32> coverage = m_impl->materialCoverage;
     if (coverage.empty()) coverage.push_back(1.0f);
-    GpuBuffer coverageBuffer(allocator, coverage.size() * sizeof(f32),
-                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    coverageBuffer.Upload(coverage.data(), coverage.size() * sizeof(f32));
+    const auto coverageBuffer =
+        CreateBufferOrThrow(device, StorageDesc(coverage.size() * sizeof(f32), gpu::MemoryClass::Upload));
+    coverageBuffer->Upload(coverage.data(), coverage.size() * sizeof(f32));
 
     // Bind descriptors
     const gpu::BindingWrite writes[] = {
-        gpu::BindingWrite::Scene(0, gpu::vulkan::Ref(tlas)),
-        gpu::BindingWrite::Buffer(1, gpu::BindingKind::ReadOnlyBuffer, gpu::vulkan::Ref(elementBuffer)),
-        gpu::BindingWrite::Buffer(2, gpu::BindingKind::ReadOnlyBuffer, gpu::vulkan::Ref(baseBuffer)),
-        gpu::BindingWrite::Buffer(3, gpu::BindingKind::ReadWriteBuffer, gpu::vulkan::Ref(recordBuffer)),
-        gpu::BindingWrite::Buffer(4, gpu::BindingKind::ReadWriteBuffer, gpu::vulkan::Ref(sunBuffer)),
-        gpu::BindingWrite::Buffer(5, gpu::BindingKind::ReadOnlyBuffer, gpu::vulkan::Ref(coverageBuffer)),
+        gpu::BindingWrite::Scene(0, tlas),
+        gpu::BindingWrite::Buffer(1, gpu::BindingKind::ReadOnlyBuffer, elementBuffer->Ref()),
+        gpu::BindingWrite::Buffer(2, gpu::BindingKind::ReadOnlyBuffer, baseBuffer->Ref()),
+        gpu::BindingWrite::Buffer(3, gpu::BindingKind::ReadWriteBuffer, recordBuffer->Ref()),
+        gpu::BindingWrite::Buffer(4, gpu::BindingKind::ReadWriteBuffer, sunBuffer->Ref()),
+        gpu::BindingWrite::Buffer(5, gpu::BindingKind::ReadOnlyBuffer, coverageBuffer->Ref()),
     };
-    m_impl->gpuDevice->WriteBindGroup(m_impl->bindGroup, writes);
+    m_impl->gpuDevice.WriteBindGroup(m_impl->bindGroup, writes);
 
     const u32 groups = (elementCount + 63) / 64;
 
-    m_impl->gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
+    m_impl->gpuDevice.ExecuteImmediate([&](gpu::CommandList& list) {
         list.SetKernel(*m_impl->kernel);
         list.SetBindGroup(*m_impl->kernelLayout, 0, m_impl->bindGroup);
 
@@ -553,13 +554,13 @@ Vector<f32> ThermalExchangePrecompute::RunSunVisibility(
             }
         }
 
-        list.Barrier(gpu::BufferBarrier{gpu::vulkan::Ref(sunBuffer), gpu::Access::ComputeWrite,
+        list.Barrier(gpu::BufferBarrier{sunBuffer->Ref(), gpu::Access::ComputeWrite,
                                         gpu::Access::HostRead});
     });
 
-    const f32* mapped = static_cast<const f32*>(sunBuffer.MapRead());
+    const f32* mapped = static_cast<const f32*>(sunBuffer->MapRead());
     Vector<f32> result(mapped, mapped + static_cast<usize>(K) * elementCount);
-    sunBuffer.Unmap();
+    sunBuffer->Unmap();
 
     QL_LOG_INFO("  Thermal exchange: sun-only batch: {} directions x {} elements x {} rays",
                 K, elementCount, sunRays);

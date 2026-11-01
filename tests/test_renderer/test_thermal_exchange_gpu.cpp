@@ -109,12 +109,12 @@ TEST_F(ThermalExchangeGpuTest, APlateUnderOpenSkySeesNothingButSky) {
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
     ASSERT_EQ(mesh.elements.size(), 2u);
 
-    ThermalExchangePrecompute precompute(Device());
+    ThermalExchangePrecompute precompute(GpuDevice());
     if (!precompute.IsValid()) {
         GTEST_SKIP() << "thermal_exchange.spv unavailable";
     }
 
-    const auto exchange = precompute.Run(gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements,
+    const auto exchange = precompute.Run(geometry.Tlas().Ref(), mesh.elements,
                                          mesh.instanceElementBase, {});
     ASSERT_EQ(exchange.skyFraction.size(), 2u);
     EXPECT_NEAR(MeanSkyFraction(exchange, 0, 2), 1.0f, 1e-6f);
@@ -141,14 +141,14 @@ TEST_F(ThermalExchangeGpuTest, TwoParallelPlatesSeeEachOtherByTheAnalyticFactor)
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
     ASSERT_EQ(mesh.elements.size(), 4u);
 
-    ThermalExchangePrecompute precompute(Device());
+    ThermalExchangePrecompute precompute(GpuDevice());
     if (!precompute.IsValid()) {
         GTEST_SKIP() << "thermal_exchange.spv unavailable";
     }
 
     ThermalExchangePrecompute::Params params;
     params.hemisphereRays = 1024;  // this one is a number, so pay for it
-    const auto exchange = precompute.Run(gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements,
+    const auto exchange = precompute.Run(geometry.Tlas().Ref(), mesh.elements,
                                          mesh.instanceElementBase, params);
     ASSERT_EQ(exchange.skyFraction.size(), 4u);
 
@@ -187,7 +187,7 @@ TEST_F(ThermalExchangeGpuTest, OpacityRebuildProducesATraceableAlphaTestedBlas) 
     ASSERT_TRUE(geometry.RefreshMaterialOpacity(GpuDevice(), scene));
 
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
-    ThermalExchangePrecompute precompute(Device());
+    ThermalExchangePrecompute precompute(GpuDevice());
     if (!precompute.IsValid()) {
         GTEST_SKIP() << "thermal_exchange.spv unavailable";
     }
@@ -195,7 +195,7 @@ TEST_F(ThermalExchangeGpuTest, OpacityRebuildProducesATraceableAlphaTestedBlas) 
 
     ThermalExchangePrecompute::Params params;
     params.hemisphereRays = 256;
-    const auto exchange = precompute.Run(gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements,
+    const auto exchange = precompute.Run(geometry.Tlas().Ref(), mesh.elements,
                                          mesh.instanceElementBase, params);
 
     ASSERT_EQ(exchange.skyFraction.size(), 4u);
@@ -218,14 +218,14 @@ TEST_F(ThermalExchangeGpuTest, EveryRowSumsToOneWithItsSkyFraction) {
     ASSERT_TRUE(geometry.IsValid());
 
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
-    ThermalExchangePrecompute precompute(Device());
+    ThermalExchangePrecompute precompute(GpuDevice());
     if (!precompute.IsValid()) {
         GTEST_SKIP() << "thermal_exchange.spv unavailable";
     }
 
     ThermalExchangePrecompute::Params params;
     params.topK = 1;  // truncate hard, so the rescale is doing visible work
-    const auto exchange = precompute.Run(gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements,
+    const auto exchange = precompute.Run(geometry.Tlas().Ref(), mesh.elements,
                                          mesh.instanceElementBase, params);
 
     for (usize e = 0; e < mesh.elements.size(); ++e) {
@@ -252,14 +252,14 @@ TEST_F(ThermalExchangeGpuTest, ViewFactorsAreReciprocalAndRowsStillSumToOne) {
     ASSERT_TRUE(geometry.IsValid());
 
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
-    ThermalExchangePrecompute precompute(Device());
+    ThermalExchangePrecompute precompute(GpuDevice());
     if (!precompute.IsValid()) {
         GTEST_SKIP() << "thermal_exchange.spv unavailable";
     }
 
     ThermalExchangePrecompute::Params params;
     params.topK = 0;  // clamped to one entry per row, never to none
-    const auto exchange = precompute.Run(gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements,
+    const auto exchange = precompute.Run(geometry.Tlas().Ref(), mesh.elements,
                                          mesh.instanceElementBase, params);
 
     const auto& vf = exchange.viewFactors;
@@ -293,14 +293,14 @@ TEST_F(ThermalExchangeGpuTest, AnUnoccludedPlateIsFullyLitAndAShadedOneIsNot) {
     ASSERT_TRUE(geometry.IsValid());
 
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
-    ThermalExchangePrecompute precompute(Device());
+    ThermalExchangePrecompute precompute(GpuDevice());
     if (!precompute.IsValid()) {
         GTEST_SKIP() << "thermal_exchange.spv unavailable";
     }
 
     ThermalExchangePrecompute::Params params;
     params.sunDirection = glm::vec3(0.0f, 1.0f, 0.0f);  // straight up
-    const auto exchange = precompute.Run(gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements,
+    const auto exchange = precompute.Run(geometry.Tlas().Ref(), mesh.elements,
                                          mesh.instanceElementBase, params);
     ASSERT_EQ(exchange.sunVisibility.size(), 4u);
 
@@ -321,14 +321,14 @@ TEST_F(ThermalExchangeGpuTest, AnOpenPlateIsFullyLit) {
     ASSERT_TRUE(geometry.IsValid());
 
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
-    ThermalExchangePrecompute precompute(Device());
+    ThermalExchangePrecompute precompute(GpuDevice());
     if (!precompute.IsValid()) {
         GTEST_SKIP() << "thermal_exchange.spv unavailable";
     }
 
     ThermalExchangePrecompute::Params params;
     params.sunDirection = glm::vec3(0.0f, 1.0f, 0.0f);
-    const auto exchange = precompute.Run(gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements,
+    const auto exchange = precompute.Run(geometry.Tlas().Ref(), mesh.elements,
                                          mesh.instanceElementBase, params);
 
     EXPECT_NEAR(exchange.sunVisibility[0], 1.0f, 1e-6f);
@@ -355,7 +355,7 @@ TEST_F(ThermalExchangeGpuTest, PreparedRefitChunksLargeUploadsAndTracesConsecuti
     ASSERT_TRUE(geometry.IsValid());
     ASSERT_EQ(geometry.InstanceCount(), 1025u);
 
-    ThermalExchangePrecompute precompute(Device());
+    ThermalExchangePrecompute precompute(GpuDevice());
     if (!precompute.IsValid()) {
         GTEST_SKIP() << "thermal_exchange.spv unavailable";
     }
@@ -363,7 +363,7 @@ TEST_F(ThermalExchangeGpuTest, PreparedRefitChunksLargeUploadsAndTracesConsecuti
     const auto targetVisibility = [&]() {
         const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
         const auto visibility = precompute.RunSunVisibility(
-            gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements, mesh.instanceElementBase,
+            geometry.Tlas().Ref(), mesh.elements, mesh.instanceElementBase,
             directions, 1, 0.0f);
         EXPECT_EQ(visibility.size(), mesh.elements.size());
         return 0.5f * (visibility[0] + visibility[1]);

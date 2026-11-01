@@ -50,8 +50,6 @@
 #include <vector>
 
 namespace quantiloom {
-class GpuBuffer;
-class GpuImage;
 class RayTracingPipeline;
 class TextureManager;
 namespace gpu {
@@ -628,18 +626,16 @@ std::unique_ptr<gpu::Texture> CreateRenderTarget(gpu::Device& device, u32 width,
  * sequences. Naming the set once means a new binding is added where it is declared
  * rather than in whichever sequence the author happened to be reading.
  *
- * Null members are skipped. `RayTracingPipeline`'s buffer binders already accept a
- * null pointer for the optional spectral resources; the rest are simply not written.
- *
- * What this file creates is a gpu:: owner; what the two hosts create themselves is
- * still a GpuBuffer/GpuImage until their own migration steps.
+ * Empty refs and null pointers are skipped. `RayTracingPipeline`'s binders for the
+ * optional spectral resources take an empty ref as "none" and bind their own fallback;
+ * the rest are simply not written.
  */
 struct PipelineBindings {
-    const gpu::Texture* outputImage = nullptr;
-    const gpu::Texture* depthImage = nullptr;  // primary-hit depth AOV (binding 22)
+    gpu::TextureRef outputImage{};
+    gpu::TextureRef depthImage{};  // primary-hit depth AOV (binding 22)
     const SceneGeometry* geometry = nullptr;
-    const GpuBuffer* lightingParams = nullptr;
-    const gpu::Buffer* materials = nullptr;
+    gpu::BufferRef lightingParams{};
+    gpu::BufferRef materials{};
     const TextureManager* textures = nullptr;
     const EnvironmentCubemap* environment = nullptr;
     const BrdfLut* brdfLut = nullptr;
@@ -648,28 +644,28 @@ struct PipelineBindings {
     // config; the interactive context binds zero-filled placeholders (see
     // CreateDummyBuffers) except for the refractive index, which Qt fills through
     // ExternalRenderContext::AddComplexRefractiveIndex.
-    const GpuBuffer* spectralCurves = nullptr;
-    const GpuBuffer* complexRefractiveIndex = nullptr;
-    const GpuBuffer* solarLut = nullptr;
-    const GpuBuffer* atmosphereHeader = nullptr;
-    const GpuBuffer* atmosphereData = nullptr;
-    const gpu::Buffer* cieColourMatching = nullptr;
+    gpu::BufferRef spectralCurves{};
+    gpu::BufferRef complexRefractiveIndex{};
+    gpu::BufferRef solarLut{};
+    gpu::BufferRef atmosphereHeader{};
+    gpu::BufferRef atmosphereData{};
+    gpu::BufferRef cieColourMatching{};
     /// Jakob-Hanika RGB -> spectrum coefficients. Always bound: binding 25 has
     /// no partially-bound flag, and every spectral band that meets an RGB
     /// reflectance without a measured curve reads it.
-    const gpu::Buffer* rgbToSpectrum = nullptr;
-    const gpu::Buffer* emissiveTriangles = nullptr;
+    gpu::BufferRef rgbToSpectrum{};
+    gpu::BufferRef emissiveTriangles{};
     /// Per-element surface temperatures from the thermal solver. Always bound;
     /// a scene with no solve gets a single zero entry.
-    const GpuBuffer* thermalTemperatures = nullptr;
+    gpu::BufferRef thermalTemperatures{};
     /// How those temperatures respond to the sun: a header record with the
     /// solve's sun direction, then (dT/dv, v_element) per element. Always
     /// bound; one zeroed record when there is no solve, which the header's
     /// w = 0 turns off.
-    const GpuBuffer* thermalSunResponse = nullptr;
-    const GpuBuffer* thermalParameterTangent = nullptr;
-    const GpuImage* cameraMeasurementImage = nullptr; // binding 28
-    const GpuBuffer* cameraResponse = nullptr;        // binding 29
+    gpu::BufferRef thermalSunResponse{};
+    gpu::BufferRef thermalParameterTangent{};
+    gpu::TextureRef cameraMeasurementImage{};  // binding 28
+    gpu::BufferRef cameraResponse{};           // binding 29
 };
 
 /**

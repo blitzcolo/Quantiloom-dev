@@ -108,18 +108,12 @@ VkAccelerationStructureKHR NativeScene(gpu::RtSceneRef ref) {
     return FromHandle<VkAccelerationStructureKHR>(ref.handle);
 }
 
-std::vector<VkImageView> NativeViews(std::span<const gpu::TextureRef> refs) {
-    std::vector<VkImageView> views;
-    views.reserve(refs.size());
-    for (const gpu::TextureRef& ref : refs) views.push_back(NativeView(ref));
-    return views;
+gpu::BufferRef RefOrEmpty(const GpuBuffer* buffer) {
+    return buffer != nullptr ? Ref(*buffer) : gpu::BufferRef{};
 }
 
-std::vector<VkSampler> NativeSamplers(std::span<const gpu::SamplerRef> refs) {
-    std::vector<VkSampler> samplers;
-    samplers.reserve(refs.size());
-    for (const gpu::SamplerRef& ref : refs) samplers.push_back(NativeSampler(ref));
-    return samplers;
+gpu::TextureRef RefOrEmpty(const GpuImage* image) {
+    return image != nullptr ? Ref(*image) : gpu::TextureRef{};
 }
 
 }  // namespace quantiloom::gpu::vulkan

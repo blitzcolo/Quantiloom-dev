@@ -3,7 +3,6 @@
 #include "core/Types.hpp"
 #include "core/Platform.hpp"
 #include "gpu/Sync.hpp"
-#include <vulkan/vulkan.h>
 #include <memory>
 
 // ============================================================================
@@ -26,7 +25,7 @@
 //   here would serialize the CPU on the GPU and show up as lost frames.
 //
 // References:
-// - Vulkan spec: VkQueryPool for timestamp queries
+// - Vulkan spec: timestamp query pools
 // - SRS §3.2: Performance cost recording requirement
 // ============================================================================
 
@@ -63,10 +62,10 @@ public:
     // ========================================================================
 
     // Begin frame timing (records start timestamp)
-    void BeginFrame(VkCommandBuffer cmd);
+    void BeginFrame(gpu::CommandList& list);
 
     // End frame timing (records end timestamp)
-    void EndFrame(VkCommandBuffer cmd);
+    void EndFrame(gpu::CommandList& list);
 
     // ========================================================================
     // Accessors

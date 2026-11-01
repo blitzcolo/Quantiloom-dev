@@ -1,7 +1,6 @@
 #include "renderer/AsyncPixelReadback.hpp"
 
 #include "gpu/Device.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
 
 #include <cstring>
 #include <span>
@@ -12,8 +11,8 @@ namespace quantiloom::rendercore {
 
 namespace {
 
-// The Err of a failed gpu/Sync.hpp call is its VkResult as a decimal, so the
-// message still names the code.
+// The Err of a failed gpu/Sync.hpp call is the backend's result code as a
+// decimal, so the message still names the code.
 [[noreturn]] void ThrowReadbackError(const String& code) {
     throw std::runtime_error("asynchronous pixel readback Vulkan error " + code);
 }
@@ -54,11 +53,10 @@ AsyncPixelReadback::AsyncPixelReadback(gpu::Device& device) : m_device(device) {
 
 AsyncPixelReadback::~AsyncPixelReadback() { Cleanup(); }
 
-bool AsyncPixelReadback::Submit(VkImage image, u32 renderX, u32 renderY,
+bool AsyncPixelReadback::Submit(gpu::TextureRef image, u32 renderX, u32 renderY,
                                 const PixelReading& reading) {
     // The accumulation image: GENERAL, one mip, one layer.
-    gpu::TextureRef target;
-    target.image = gpu::vulkan::ToHandle(image);
+    const gpu::TextureRef target = image;
     for (auto& slot : m_slots) {
         if (slot.pending) continue;
         Check(slot.command->Reset());

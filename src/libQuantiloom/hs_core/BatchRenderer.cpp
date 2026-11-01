@@ -136,7 +136,7 @@ struct BatchRenderer::Impl {
         cameraData.spectral_mode = 0;  // SPECTRAL_MODE_SINGLE
 
         // Bind output image
-        pipeline.BindOutputImage(*outputImage);
+        pipeline.BindOutputImage(gpu::vulkan::Ref(*outputImage));
 
         // Render with accumulation (multiple samples)
         // Common random numbers across wavelengths reduce the variance of a
@@ -200,7 +200,6 @@ struct BatchRenderer::Impl {
                     return false;
                 }
                 gpu::CommandList& list = *begun.value();
-                const VkCommandBuffer nativeCmd = gpu::vulkan::NativeCommandBuffer(list);
 
                 for (u32 sample = batchStart; sample < batchEnd; ++sample) {
                     // The per-sample seed changes; the sequence seed does not --
@@ -209,7 +208,7 @@ struct BatchRenderer::Impl {
                     const u32 sampleSeed = StableMix(sequenceSeed ^ StableMix(sample));
                     pipeline.SetSamplingParams(params.frameIndex, sample, params.spp,
                                                sampleSeed, sequenceSeed);
-                    pipeline.TraceRays(nativeCmd, imageWidth, imageHeight, sample == params.spp - 1);
+                    pipeline.TraceRays(list, imageWidth, imageHeight, sample == params.spp - 1);
                 }
 
                 static_cast<void>(cmd->End());

@@ -30,7 +30,7 @@ void SunColumnRange(const Vector<std::pair<f64, thermal::ThermalForcing>>& forci
 }
 
 thermal::SunVisibilityTable BuildSunTable(ThermalExchangePrecompute& precompute,
-                                          VkAccelerationStructureKHR tlas,
+                                          gpu::RtSceneRef tlas,
                                           const thermal::ThermalMesh& mesh,
                                           const thermal::ExchangeGeometry& exchange,
                                           const EpochBuildInput& input, usize firstRow,
@@ -38,7 +38,7 @@ thermal::SunVisibilityTable BuildSunTable(ThermalExchangePrecompute& precompute,
     thermal::SunVisibilityTable table;
     const auto& forcing = *input.forcingSeries;
 
-    if (forcing.size() > 1 && tlas != VK_NULL_HANDLE && precompute.IsValid()) {
+    if (forcing.size() > 1 && tlas.IsValid() && precompute.IsValid()) {
         Vector<glm::vec3> directions;
         directions.reserve(lastRow - firstRow + 1);
         table.sampleTime_h.reserve(lastRow - firstRow + 1);
@@ -124,7 +124,7 @@ Vector<f32> ComputeMaterialCoverage(const Scene& scene) {
 }
 
 thermal::ThermalGeometrySchedule BuildThermalGeometrySchedule(
-    VulkanContext& context, EpochGeometryHost& host, const Scene& scene,
+    gpu::Device& device, EpochGeometryHost& host, const Scene& scene,
     const EpochBuildInput& input, thermal::ThermalMesh* epoch0MeshOut) {
     thermal::ThermalGeometrySchedule schedule;
 
@@ -156,7 +156,7 @@ thermal::ThermalGeometrySchedule BuildThermalGeometrySchedule(
         }
     } restoreOnExit{host};
 
-    ThermalExchangePrecompute precompute(context);
+    ThermalExchangePrecompute precompute(device);
     precompute.SetMaterialCoverage(input.materialCoverage);
 
     usize expectedElements = 0;
@@ -167,7 +167,7 @@ thermal::ThermalGeometrySchedule BuildThermalGeometrySchedule(
             input.onEpoch(static_cast<u32>(e), static_cast<u32>(count));
         }
         const f64 t_s = input.epochTimes_s[e];
-        const VkAccelerationStructureKHR tlas = host.ApplyEpoch(t_s);
+        const gpu::RtSceneRef tlas = host.ApplyEpoch(t_s);
 
         // Contacts are the mesh's adjacency, which rigid motion cannot change,
         // so they are found once. Same for the shell pairing and the instance
@@ -191,7 +191,7 @@ thermal::ThermalGeometrySchedule BuildThermalGeometrySchedule(
         }
 
         thermal::ExchangeGeometry exchange;
-        if (precompute.IsValid() && tlas != VK_NULL_HANDLE && !mesh.elements.empty()) {
+        if (precompute.IsValid() && tlas.IsValid() && !mesh.elements.empty()) {
             exchange = precompute.Run(tlas, mesh.elements, mesh.instanceElementBase,
                                       input.precompute);
         } else {

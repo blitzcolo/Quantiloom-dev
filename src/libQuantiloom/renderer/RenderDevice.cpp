@@ -58,14 +58,14 @@ Result<std::unique_ptr<RenderDevice>, String> RenderDevice::Create(
         return CreateResult::Err("Ray tracing not supported on this device");
     }
 
+    // The cache and the four stages below create gpu:: objects, which need no device
+    // after they exist, so one adoption of the context serves them all.
+    const std::unique_ptr<gpu::Device> gpuDevice = gpu::vulkan::AdoptContext(*impl.context);
+
     if (!params.pipelineCachePath.empty()) {
         impl.pipelineCache = RayTracingPipeline::LoadPipelineCache(
-            *impl.context, params.pipelineCachePath);
+            *gpuDevice, params.pipelineCachePath);
     }
-
-    // The four stages below create gpu:: objects, which need no device after they
-    // exist, so one adoption of the context serves them all.
-    const std::unique_ptr<gpu::Device> gpuDevice = gpu::vulkan::AdoptContext(*impl.context);
 
     // Generated or read from its own binary cache, and either way seconds of work
     // at the default resolution. Once per device, not once per scene.

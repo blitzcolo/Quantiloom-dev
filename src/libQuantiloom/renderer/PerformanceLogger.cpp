@@ -1,7 +1,6 @@
 #include "PerformanceLogger.hpp"
 #include "core/Log.hpp"
 #include "gpu/Device.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
 #include <stdexcept>
 #include <utility>
 
@@ -51,7 +50,7 @@ PerformanceLogger::~PerformanceLogger() {
 // Frame Timing
 // ============================================================================
 
-void PerformanceLogger::BeginFrame(VkCommandBuffer cmd) {
+void PerformanceLogger::BeginFrame(gpu::CommandList& list) {
     if (!m_timestampsSupported) {
         return;
     }
@@ -73,14 +72,13 @@ void PerformanceLogger::BeginFrame(VkCommandBuffer cmd) {
 
     // Reset queries for this frame
     u32 startQuery = m_writeQueryIndex * 2;
-    auto list = gpu::vulkan::Wrap(cmd);
     list.ResetTimestamps(m_queryPool->Ref(), startQuery, 2);
 
     // Write start timestamp
     list.WriteTimestamp(m_queryPool->Ref(), startQuery, gpu::Stage::TopOfPipe);
 }
 
-void PerformanceLogger::EndFrame(VkCommandBuffer cmd) {
+void PerformanceLogger::EndFrame(gpu::CommandList& list) {
     if (!m_timestampsSupported) {
         return;
     }
@@ -88,7 +86,6 @@ void PerformanceLogger::EndFrame(VkCommandBuffer cmd) {
     // Write end timestamp, then advance the write cursor so the next
     // recorded frame gets its own query pair (required for batched submits)
     u32 endQuery = m_writeQueryIndex * 2 + 1;
-    auto list = gpu::vulkan::Wrap(cmd);
     list.WriteTimestamp(m_queryPool->Ref(), endQuery, gpu::Stage::BottomOfPipe);
 
     m_writeQueryIndex = (m_writeQueryIndex + 1) % (m_config.queryPoolSize / 2);
@@ -100,8 +97,8 @@ f32 PerformanceLogger::ResolveLastGpuMs() {
         return 0.0f;
     }
 
-    // Never query a pair that was not recorded: QueryGpuTimeMs uses
-    // VK_QUERY_RESULT_WAIT_BIT, which deadlocks on an unwritten query
+    // Never query a pair that was not recorded: QueryGpuTimeMs resolves with
+    // TimestampResolve::Wait, which deadlocks on an unwritten query
     if (m_pendingFrames == 0) {
         return 0.0f;
     }

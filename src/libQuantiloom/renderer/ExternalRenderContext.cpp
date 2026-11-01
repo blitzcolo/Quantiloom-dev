@@ -294,7 +294,7 @@ struct ExternalRenderContext::Impl {
         f64 restore_s = 0.0;
         bool captured = false;
 
-        VkAccelerationStructureKHR ApplyEpoch(f64 t_s) override;
+        gpu::RtSceneRef ApplyEpoch(f64 t_s) override;
         void Restore() override;
     };
     TimelineEpochHost epochHost;
@@ -808,9 +808,9 @@ struct ExternalRenderContext::Impl {
             return false;
         if (pipeline) {
             if constexpr (std::is_same_v<Entry, SpectralCurveGPU>)
-                pipeline->BindSpectralCurvesBuffer(replacement.get());
+                pipeline->BindSpectralCurvesBuffer(gpu::vulkan::RefOrEmpty(replacement.get()));
             else
-                pipeline->BindComplexRefractiveIndexBuffer(replacement.get());
+                pipeline->BindComplexRefractiveIndexBuffer(gpu::vulkan::RefOrEmpty(replacement.get()));
         }
         buffer = std::move(replacement);
         capacity = newCapacity;
@@ -1931,7 +1931,7 @@ void ExternalRenderContext::Impl::UploadLightingParams() {
         // The descriptor names the buffer, not its contents: written once,
         // at creation, and never re-bound by the uploads below.
         if (pipeline)
-            pipeline->BindCameraLightingBuffer(*cameraLightingParamsBuffer);
+            pipeline->BindCameraLightingBuffer(gpu::vulkan::Ref(*cameraLightingParamsBuffer));
     }
     if (cameraConfig.inputKind != camera::CameraInputKind::FastRgbApproximation)
         effective.enableEnvironmentMap = 0;
@@ -2058,10 +2058,15 @@ void ExternalRenderContext::RenderFrame(
     // a scene is loaded again -- a frozen viewport with a reason in the log
     // rather than a crash that takes unsaved work with it.
     try {
+        // One list over the host's command buffer for everything this frame
+        // records through a module; it carries the refit's ray tracing entry points.
+        const std::unique_ptr<gpu::CommandList> frameList =
+            m_impl->gpuDevice->WrapRecording(gpu::vulkan::ToHandle(cmd));
+
         // Host writes deferred since the last recording land first: the barriers
         // in Record order them after whatever earlier submissions are still
         // reading the buffers, and before the trace below reads the new values.
-        m_impl->pendingUploads.Record(cmd);
+        m_impl->pendingUploads.Record(*frameList);
 
         // Ordinary poses are uploaded and refitted in this very submission, so
         // prior traces finish before UPDATE and the new trace sees the new pose.
@@ -2070,8 +2075,7 @@ void ExternalRenderContext::RenderFrame(
             if (m_impl->cameraConfig.enabled) {
                 m_impl->FlushPendingGpuWork();
             } else {
-                m_impl->geometry.RecordPreparedTlasRefit(
-                    *m_impl->gpuDevice->WrapRecording(gpu::vulkan::ToHandle(cmd)));
+                m_impl->geometry.RecordPreparedTlasRefit(*frameList);
                 m_impl->pendingTlasRefit = false;
             }
         }
@@ -2177,10 +2181,10 @@ void ExternalRenderContext::RenderFrame(
                 // scene*. The camera trace is bracketed by the camera perf queries
                 // inside RecordCameraMeasurement.
                 if (m_impl->perfLogger)
-                    m_impl->perfLogger->BeginFrame(cmd);
-                m_impl->pipeline->TraceRays(cmd, renderW, renderH, sample + 1 == samplesToRender);
+                    m_impl->perfLogger->BeginFrame(*frameList);
+                m_impl->pipeline->TraceRays(*frameList, renderW, renderH, sample + 1 == samplesToRender);
                 if (m_impl->perfLogger)
-                    m_impl->perfLogger->EndFrame(cmd);
+                    m_impl->perfLogger->EndFrame(*frameList);
                 m_impl->rawPixelGeneration = m_impl->pixelImageGeneration;
                 m_impl->rawPixelSamples = m_impl->accumulatedSamples + 1;
                 m_impl->rawAccumulationValid = true;
@@ -2605,8 +2609,8 @@ void ExternalRenderContext::Impl::ApplyInternalExtent(u32 renderW, u32 renderH) 
 
     // Re-bind output and depth AOV images
     if (pipeline) {
-        pipeline->BindOutputImage(gpu::vulkan::AsGpuImage(*outputImage));
-        pipeline->BindDepthImage(gpu::vulkan::AsGpuImage(*depthAovImage));
+        pipeline->BindOutputImage(outputImage->Ref());
+        pipeline->BindDepthImage(depthAovImage->Ref());
     }
 
     // Recreate CLAHE display image if initialized. Waits on the device, which
@@ -3018,9 +3022,9 @@ void ExternalRenderContext::Impl::UpdateMaterial(u32 materialIndex, const Materi
         // replaced, as RebuildAccelerationStructure has to assume too.
         (void)gpuDevice->WaitIdle();
         if (geometry.RefreshMaterialOpacity(*gpuDevice, *scene) && pipeline) {
-            pipeline->BindAccelerationStructure(gpu::vulkan::NativeScene(geometry.Tlas().Ref()));
+            pipeline->BindAccelerationStructure(geometry.Tlas().Ref());
             if (geometry.InstanceCount() > 0) {
-                pipeline->BindInstanceGeometryBuffer(gpu::vulkan::AsGpuBuffer(geometry.InstanceInfo()));
+                pipeline->BindInstanceGeometryBuffer(geometry.InstanceInfo().Ref());
             }
         }
     }
@@ -3221,9 +3225,8 @@ Result<i32, String> ExternalRenderContext::BuildEndmemberWeightTexture(
     m_impl->scene->textures.push_back(std::move(weights));
 
     if (m_impl->pipeline) {
-        m_impl->pipeline->BindTextures(
-            gpu::vulkan::NativeViews(m_impl->textureManager->TextureRefs()),
-            gpu::vulkan::NativeSamplers(m_impl->textureManager->SamplerRefs()));
+        m_impl->pipeline->BindTextures(m_impl->textureManager->TextureRefs(),
+                                       m_impl->textureManager->SamplerRefs());
     }
 
     QL_LOG_INFO("BuildEndmemberWeightTexture: material '{}' unmixed into {} endmember(s), "
@@ -3279,7 +3282,7 @@ void ExternalRenderContext::Impl::UploadSolarLut(const SolarSpectralLUT& lut) {
     solarLutBuffer->Upload(&lut, sizeof(SolarSpectralLUT));
 
     if (pipeline) {
-        pipeline->BindSolarSpectralLUT(solarLutBuffer.get());
+        pipeline->BindSolarSpectralLUT(gpu::vulkan::RefOrEmpty(solarLutBuffer.get()));
     }
     if (cameraConfig.enabled)
         cameraCapturePending = true;
@@ -3399,7 +3402,7 @@ Result<void, String> ExternalRenderContext::SetThermalWhatIf(
             m_impl->UploadThermalTangent({}, 0.0f);
             if (m_impl->pipeline) {
                 m_impl->pipeline->BindThermalTangentBuffer(
-                    *m_impl->thermalParameterTangentBuffer);
+                    gpu::vulkan::Ref(*m_impl->thermalParameterTangentBuffer));
             }
             return WhatIfResult::Err(
                 "this solve does not carry a derivative with respect to that "
@@ -3409,7 +3412,7 @@ Result<void, String> ExternalRenderContext::SetThermalWhatIf(
     }
 
     if (m_impl->UploadThermalTangent(tangent, m_impl->whatIfStep) && m_impl->pipeline) {
-        m_impl->pipeline->BindThermalTangentBuffer(*m_impl->thermalParameterTangentBuffer);
+        m_impl->pipeline->BindThermalTangentBuffer(gpu::vulkan::Ref(*m_impl->thermalParameterTangentBuffer));
     }
     ResetAccumulation();
     return WhatIfResult();
@@ -3449,9 +3452,9 @@ void ExternalRenderContext::SetThermalSolveEnabled(const bool enabled) {
             m_impl->UploadThermalTangent({}, 0.0f);
             m_impl->whatIfStep = 0.0f;
             if (m_impl->pipeline) {
-                m_impl->pipeline->BindThermalTemperatureBuffer(*m_impl->thermalTemperatureBuffer);
-                m_impl->pipeline->BindThermalSunResponseBuffer(*m_impl->thermalSunResponseBuffer);
-                m_impl->pipeline->BindThermalTangentBuffer(*m_impl->thermalParameterTangentBuffer);
+                m_impl->pipeline->BindThermalTemperatureBuffer(gpu::vulkan::Ref(*m_impl->thermalTemperatureBuffer));
+                m_impl->pipeline->BindThermalSunResponseBuffer(gpu::vulkan::Ref(*m_impl->thermalSunResponseBuffer));
+                m_impl->pipeline->BindThermalTangentBuffer(gpu::vulkan::Ref(*m_impl->thermalParameterTangentBuffer));
             }
 
             m_impl->geometry.SetThermalElementBases({});
@@ -3472,7 +3475,7 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
         return fail("no scene loaded");
     }
 
-    const VkAccelerationStructureKHR tlas = gpu::vulkan::NativeScene(m_impl->geometry.Tlas().Ref());
+    const gpu::RtSceneRef tlas = m_impl->geometry.Tlas().Ref();
     rendercore::ThermalPreview::SolveResult result;
     try {
         // The precompute consumes the current TLAS, so the deferred refit
@@ -3501,7 +3504,7 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
             result.surfaceTemperature_K.data(),
             result.surfaceTemperature_K.size() * sizeof(f32));
         if (m_impl->pipeline) {
-            m_impl->pipeline->BindThermalTemperatureBuffer(*m_impl->thermalTemperatureBuffer);
+            m_impl->pipeline->BindThermalTemperatureBuffer(gpu::vulkan::Ref(*m_impl->thermalTemperatureBuffer));
         }
         m_impl->geometry.SetThermalElementBases(result.instanceElementBase);
     } else {
@@ -3519,7 +3522,7 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
                                          result.sunDirection, result.lagSensitivity_K,
                                          result.lagVisibility, result.lagDirection) &&
         m_impl->pipeline) {
-        m_impl->pipeline->BindThermalSunResponseBuffer(*m_impl->thermalSunResponseBuffer);
+        m_impl->pipeline->BindThermalSunResponseBuffer(gpu::vulkan::Ref(*m_impl->thermalSunResponseBuffer));
     }
 
     // The what-if tangent is a field of the hour exactly as the temperatures
@@ -3529,7 +3532,7 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
         const auto tangent =
             m_impl->thermalPreview->ParameterSensitivityField(m_impl->whatIfParameter);
         if (m_impl->UploadThermalTangent(tangent, m_impl->whatIfStep) && m_impl->pipeline) {
-            m_impl->pipeline->BindThermalTangentBuffer(*m_impl->thermalParameterTangentBuffer);
+            m_impl->pipeline->BindThermalTangentBuffer(gpu::vulkan::Ref(*m_impl->thermalParameterTangentBuffer));
         }
     }
 
@@ -3547,7 +3550,8 @@ void ExternalRenderContext::Impl::FlushPendingGpuWork() {
     CommandHelper::ExecuteImmediate(*contextAdapter, [this](VkCommandBuffer cmd) {
         if (pendingTlasRefit)
             geometry.RecordPreparedTlasRefit(*gpuDevice->WrapRecording(gpu::vulkan::ToHandle(cmd)));
-        pendingUploads.Record(cmd);
+        auto list = gpu::vulkan::Wrap(cmd);
+        pendingUploads.Record(list);
     });
     pendingTlasRefit = false;
 }
@@ -3555,7 +3559,7 @@ void ExternalRenderContext::Impl::FlushPendingGpuWork() {
 void ExternalRenderContext::Impl::UploadDeferred(GpuBuffer& dst, VkDeviceSize offset,
                                                  const void* data, VkDeviceSize bytes) {
     if (bytes <= DeferredBufferUploads::kMaxPayloadBytes) {
-        pendingUploads.Enqueue(dst, offset, data, bytes);
+        pendingUploads.Enqueue(gpu::vulkan::Ref(dst), offset, data, bytes);
         return;
     }
     // Too large to sit in a command buffer: drain and write through the
@@ -3594,9 +3598,9 @@ Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s, bool d
             (void)gpuDevice->WaitIdle();
             geometry.RebuildTlas(*gpuDevice, *scene);
             if (pipeline) {
-                pipeline->BindAccelerationStructure(gpu::vulkan::NativeScene(geometry.Tlas().Ref()));
+                pipeline->BindAccelerationStructure(geometry.Tlas().Ref());
                 if (geometry.InstanceCount() > 0) {
-                    pipeline->BindInstanceGeometryBuffer(gpu::vulkan::AsGpuBuffer(geometry.InstanceInfo()));
+                    pipeline->BindInstanceGeometryBuffer(geometry.InstanceInfo().Ref());
                 }
             }
         }
@@ -3623,6 +3627,8 @@ Result<void, String> ExternalRenderContext::Impl::RecordTimelinePose(VkCommandBu
                                                                      const f64 t_s) {
     if (!scene)
         return Result<void, String>::Ok();
+    // The refit needs the device's ray tracing entry points; the uploads ride the same list.
+    const std::unique_ptr<gpu::CommandList> list = gpuDevice->WrapRecording(gpu::vulkan::ToHandle(cmd));
 
     const Vector<u32> moved = timeline.Apply(*scene, t_s);
     if (!moved.empty()) {
@@ -3630,7 +3636,7 @@ Result<void, String> ExternalRenderContext::Impl::RecordTimelinePose(VkCommandBu
             if (!geometry.PrepareTlasRefit(*scene))
                 return Result<void, String>::Err(
                     "timeline pose changed the instance count while recording");
-            geometry.RecordPreparedTlasRefit(*gpuDevice->WrapRecording(gpu::vulkan::ToHandle(cmd)));
+            geometry.RecordPreparedTlasRefit(*list);
             // The recording consumed whatever a deferred refit had prepared.
             pendingTlasRefit = false;
         }
@@ -3649,11 +3655,11 @@ Result<void, String> ExternalRenderContext::Impl::RecordTimelinePose(VkCommandBu
 
     // The emitter and lighting writes enqueued above must land before the
     // stratum's trace; an empty queue makes this a no-op.
-    pendingUploads.Record(cmd);
+    pendingUploads.Record(*list);
     return Result<void, String>::Ok();
 }
 
-VkAccelerationStructureKHR ExternalRenderContext::Impl::TimelineEpochHost::ApplyEpoch(
+gpu::RtSceneRef ExternalRenderContext::Impl::TimelineEpochHost::ApplyEpoch(
     const f64 t_s) {
     if (!captured) {
         // Where the clock actually stands, so Restore can put it back. Taken
@@ -3664,8 +3670,7 @@ VkAccelerationStructureKHR ExternalRenderContext::Impl::TimelineEpochHost::Apply
         captured = true;
     }
     owner->ApplyTimelinePose(t_s);
-    return owner->geometry.IsValid() ? gpu::vulkan::NativeScene(owner->geometry.Tlas().Ref())
-                                     : VK_NULL_HANDLE;
+    return owner->geometry.IsValid() ? owner->geometry.Tlas().Ref() : gpu::RtSceneRef{};
 }
 
 void ExternalRenderContext::Impl::TimelineEpochHost::Restore() {
@@ -3847,13 +3852,11 @@ void ExternalRenderContext::RebuildAccelerationStructure() {
     m_impl->geometry.RebuildTlas(*m_impl->gpuDevice, *m_impl->scene);
 
     if (m_impl->pipeline) {
-        m_impl->pipeline->BindAccelerationStructure(
-            gpu::vulkan::NativeScene(m_impl->geometry.Tlas().Ref()));
+        m_impl->pipeline->BindAccelerationStructure(m_impl->geometry.Tlas().Ref());
         // A topology edit makes RebuildTlas replace the instance info buffer;
         // rebinding unconditionally is cheap on the already-idle device
         if (m_impl->geometry.InstanceCount() > 0) {
-            m_impl->pipeline->BindInstanceGeometryBuffer(
-                gpu::vulkan::AsGpuBuffer(m_impl->geometry.InstanceInfo()));
+            m_impl->pipeline->BindInstanceGeometryBuffer(m_impl->geometry.InstanceInfo().Ref());
         }
     }
 
@@ -4019,7 +4022,7 @@ Result<bool, String> ExternalRenderContext::RequestPixelValue(u32 x, u32 y, u64 
         reading.x = x;
         reading.y = y;
         return m_impl->asyncPixelReadback->Submit(
-            gpu::vulkan::NativeImage(m_impl->outputImage->Ref()),
+            m_impl->outputImage->Ref(),
             Impl::MapToRender(x, m_impl->targetWidth, m_impl->width),
             Impl::MapToRender(y, m_impl->targetHeight, m_impl->height), reading);
     } catch (const std::exception& e) {
@@ -5206,7 +5209,7 @@ ExternalRenderContext::Impl::RebuildEmissiveGeometry(const bool mayReallocate) {
     UploadLightingParams();
 
     if (pipeline && moved) {
-        pipeline->BindEmissiveTriangleBuffer(gpu::vulkan::AsGpuBuffer(*emissiveTriangleBuffer));
+        pipeline->BindEmissiveTriangleBuffer(emissiveTriangleBuffer->Ref());
     }
     emissiveTransformDirty = false;
     return Result<void, String>::Ok();
@@ -5298,7 +5301,7 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
     // whether or not anything is previewing, and a step of zero is what "not
     // previewing" looks like from the shader's side.
     UploadThermalTangent({}, 0.0f);
-    thermalPreview = std::make_unique<rendercore::ThermalPreview>(*contextAdapter);
+    thermalPreview = std::make_unique<rendercore::ThermalPreview>(*gpuDevice);
     thermalPreview->SetEpochProgressCallback(thermalEpochProgress);
 }
 
@@ -5312,36 +5315,37 @@ void ExternalRenderContext::Impl::CreateFallbackEnvMap() {
 
 void ExternalRenderContext::Impl::CreatePipeline() {
     if (!pipelineCache) {
-        pipelineCache = RayTracingPipeline::LoadPipelineCache(*contextAdapter,
+        pipelineCache = RayTracingPipeline::LoadPipelineCache(*gpuDevice,
                                                               pipelineCachePath);
     }
 
     rendercore::PipelineBindings bindings;
-    bindings.outputImage = outputImage.get();
-    bindings.depthImage = depthAovImage.get();
+    bindings.outputImage = outputImage ? outputImage->Ref() : gpu::TextureRef{};
+    bindings.depthImage = depthAovImage ? depthAovImage->Ref() : gpu::TextureRef{};
     bindings.geometry = &geometry;
-    bindings.lightingParams = lightingParamsBuffer.get();
-    bindings.materials = materialBuffer.get();
+    bindings.lightingParams = gpu::vulkan::RefOrEmpty(lightingParamsBuffer.get());
+    bindings.materials = materialBuffer ? materialBuffer->Ref() : gpu::BufferRef{};
     bindings.textures = textureManager.get();
     bindings.environment = &envMap;
     bindings.brdfLut = &brdfLut;
-    bindings.spectralCurves = spectralCurvesBuffer.get();
-    bindings.complexRefractiveIndex = criBuffer.get();
-    bindings.solarLut = solarLutBuffer.get();
-    bindings.atmosphereHeader = atmosHeaderBuffer.get();
-    bindings.atmosphereData = atmosDataBuffer.get();
-    bindings.cieColourMatching = cieCmfBuffer.get();
-    bindings.rgbToSpectrum = rgbToSpectrumBuffer.get();
-    bindings.emissiveTriangles = emissiveTriangleBuffer.get();
-    bindings.thermalTemperatures = thermalTemperatureBuffer.get();
-    bindings.thermalSunResponse = thermalSunResponseBuffer.get();
-    bindings.thermalParameterTangent = thermalParameterTangentBuffer.get();
+    bindings.spectralCurves = gpu::vulkan::RefOrEmpty(spectralCurvesBuffer.get());
+    bindings.complexRefractiveIndex = gpu::vulkan::RefOrEmpty(criBuffer.get());
+    bindings.solarLut = gpu::vulkan::RefOrEmpty(solarLutBuffer.get());
+    bindings.atmosphereHeader = gpu::vulkan::RefOrEmpty(atmosHeaderBuffer.get());
+    bindings.atmosphereData = gpu::vulkan::RefOrEmpty(atmosDataBuffer.get());
+    bindings.cieColourMatching = cieCmfBuffer ? cieCmfBuffer->Ref() : gpu::BufferRef{};
+    bindings.rgbToSpectrum = rgbToSpectrumBuffer ? rgbToSpectrumBuffer->Ref() : gpu::BufferRef{};
+    bindings.emissiveTriangles =
+        emissiveTriangleBuffer ? emissiveTriangleBuffer->Ref() : gpu::BufferRef{};
+    bindings.thermalTemperatures = gpu::vulkan::RefOrEmpty(thermalTemperatureBuffer.get());
+    bindings.thermalSunResponse = gpu::vulkan::RefOrEmpty(thermalSunResponseBuffer.get());
+    bindings.thermalParameterTangent = gpu::vulkan::RefOrEmpty(thermalParameterTangentBuffer.get());
 
     pipeline = rendercore::CreateRayTracingPipeline(*gpuDevice, pipelineCache.get(),
                                                     bindings);
     pipeline->SetUploadQueue(&pendingUploads);
     if (cameraLightingParamsBuffer)
-        pipeline->BindCameraLightingBuffer(*cameraLightingParamsBuffer);
+        pipeline->BindCameraLightingBuffer(gpu::vulkan::Ref(*cameraLightingParamsBuffer));
 }
 
 Result<void, String> ExternalRenderContext::Impl::UpdateCameraAtmosphere() {
@@ -5524,9 +5528,9 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
     cameraResponseBuffer = std::make_unique<GpuBuffer>(
         allocator, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
     cameraResponseBuffer->Upload(encoded.value().data(), bytes);
-    pipeline->BindCameraMeasurementImage(*cameraMeasurementImage);
-    pipeline->BindCameraResponseBuffer(*cameraResponseBuffer);
-    pipeline->BindCameraMeasurementDepthImage(*cameraMeasurementDepthImage);
+    pipeline->BindCameraMeasurementImage(gpu::vulkan::Ref(*cameraMeasurementImage));
+    pipeline->BindCameraResponseBuffer(gpu::vulkan::Ref(*cameraResponseBuffer));
+    pipeline->BindCameraMeasurementDepthImage(gpu::vulkan::Ref(*cameraMeasurementDepthImage));
     cameraDynamicCounterBuffer = std::make_unique<GpuBuffer>(allocator, 4u * sizeof(u32),
                                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                                                  VK_BUFFER_USAGE_TRANSFER_DST_BIT |
@@ -5537,7 +5541,7 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
     gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
         list.FillBuffer(gpu::vulkan::Ref(*cameraDynamicCounterBuffer), 0, gpu::kWholeSize, 0);
     });
-    pipeline->BindCameraDynamicCounterBuffer(*cameraDynamicCounterBuffer);
+    pipeline->BindCameraDynamicCounterBuffer(gpu::vulkan::Ref(*cameraDynamicCounterBuffer));
     // The DynamicExposureReport readback: both 4 x u32 counter blocks side
     // by side, plus the event a measurement recording sets once they have
     // landed. Neither depends on the sensor size, so they are made once.
@@ -5554,17 +5558,19 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
             return Result<void, String>::Err("camera dynamic readback event creation failed");
         cameraDynamicReadbackEvent = std::move(event).value();
     }
-    pipeline->BindCameraDepthImage(*cameraDepthImage);
-    pipeline->BindCameraObserverOutputImage(*cameraBaselineImage);
-    pipeline->BindCameraObserverDepthImage(*cameraDepthImage);
+    pipeline->BindCameraDepthImage(gpu::vulkan::Ref(*cameraDepthImage));
+    pipeline->BindCameraObserverOutputImage(gpu::vulkan::Ref(*cameraBaselineImage));
+    pipeline->BindCameraObserverDepthImage(gpu::vulkan::Ref(*cameraDepthImage));
     pipeline->BindCameraAtmosphereNN(
-        cameraAtmosHeaderBuffer ? cameraAtmosHeaderBuffer.get() : atmosHeaderBuffer.get(),
-        cameraAtmosDataBuffer ? cameraAtmosDataBuffer.get() : atmosDataBuffer.get());
+        gpu::vulkan::RefOrEmpty(cameraAtmosHeaderBuffer ? cameraAtmosHeaderBuffer.get()
+                                                        : atmosHeaderBuffer.get()),
+        gpu::vulkan::RefOrEmpty(cameraAtmosDataBuffer ? cameraAtmosDataBuffer.get()
+                                                      : atmosDataBuffer.get()));
     pipeline->BindCameraObserverAtmosphereNN(
-        cameraBaselineAtmosHeaderBuffer ? cameraBaselineAtmosHeaderBuffer.get()
-                                        : atmosHeaderBuffer.get(),
-        cameraBaselineAtmosDataBuffer ? cameraBaselineAtmosDataBuffer.get()
-                                      : atmosDataBuffer.get());
+        gpu::vulkan::RefOrEmpty(cameraBaselineAtmosHeaderBuffer ? cameraBaselineAtmosHeaderBuffer.get()
+                                                                : atmosHeaderBuffer.get()),
+        gpu::vulkan::RefOrEmpty(cameraBaselineAtmosDataBuffer ? cameraBaselineAtmosDataBuffer.get()
+                                                              : atmosDataBuffer.get()));
     auto gpu = rendercore::GpuCameraPipeline::Create(*gpuDevice, physicalW, physicalH);
     if (!gpu)
         return Result<void, String>::Err(gpu.error());
@@ -5843,8 +5849,8 @@ Result<void, String>
 ExternalRenderContext::Impl::RecordCameraDisplayReprocess(VkCommandBuffer cmd) {
     if (!cameraGpuPipeline || cmd == VK_NULL_HANDLE)
         return Result<void, String>::Err("camera display reprocess needs the GPU camera pipeline");
-    pendingUploads.Record(cmd);
     auto list = gpu::vulkan::Wrap(cmd);
+    pendingUploads.Record(list);
     return cameraGpuPipeline->RecordDisplayReprocess(list, EffectiveCameraConfig());
 }
 
@@ -5856,8 +5862,8 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
     // Deferred host writes land first in this submission; anything enqueued
     // by EnsureCameraResources below is caught by the second Record before
     // the strata loop.
-    pendingUploads.Record(cmd);
     auto gpuList = gpu::vulkan::Wrap(cmd);
+    pendingUploads.Record(gpuList);
     if (auto ready = EnsureCameraResources(); !ready)
         return ready;
     // Settle the previous committed tick's AE/AWB feedback first. The
@@ -5886,9 +5892,9 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
     const u32 randomSeed = camera::CounterRandomU32(effectiveSeed, 0u, cameraAcquisitionIndex,
                                                     camera::NoiseClass::EmpiricalEffect, 0u);
     if (cameraFullPerf)
-        cameraFullPerf->BeginFrame(cmd);
+        cameraFullPerf->BeginFrame(gpuList);
     if (cameraTracePerf)
-        cameraTracePerf->BeginFrame(cmd);
+        cameraTracePerf->BeginFrame(gpuList);
     const u32 physicalW = cameraConfig.optics.sensorWidthPx;
     const u32 physicalH = cameraConfig.optics.sensorHeightPx;
     // Raygen progressively averages the device rate in binding 28. These
@@ -5961,7 +5967,7 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
     pipeline->SetSpecConstants(static_cast<u32>(captureMode), false);
     // Writes enqueued while resources were ensured (camera lighting params,
     // the projection block) must reach the GPU before the first trace.
-    pendingUploads.Record(cmd);
+    pendingUploads.Record(gpuList);
     std::array<rendercore::DynamicLayerCamera, rendercore::kCameraTimeStrataMax> layerCameras{};
     u32 totalTraced = 0;
     for (u32 stratum = 0; stratum < strataCount; ++stratum) {
@@ -6018,7 +6024,7 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
                                         viewportFrame ? std::max(spp, 1u) : stratumSamples,
                                         randomSeed ^ (sampleIndex * 0x9e3779b9u),
                                         effectiveSeed);
-            pipeline->TraceRays(cmd, physicalW, physicalH);
+            pipeline->TraceRays(gpuList, physicalW, physicalH);
             if (sample + 1u < stratumSamples || stratum + 1u < strataCount) {
                 gpuList.Barrier(gpu::GlobalBarrier{gpu::Access::RayTraceWrite,
                                                    gpu::Access::RayTraceRead |
@@ -6029,7 +6035,7 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
         totalTraced += stratumSamples;
     }
     if (cameraTracePerf)
-        cameraTracePerf->EndFrame(cmd);
+        cameraTracePerf->EndFrame(gpuList);
     gpuList.Barrier(gpu::GlobalBarrier{gpu::Access::RayTraceWrite, gpu::Access::ComputeRead});
 
     // Object-motion approximation for the report: the mean adjacent-stratum
@@ -6074,7 +6080,7 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
                   gpuList, gpu::vulkan::Ref(*cameraMeasurementImage),
                   cameraAcquisitionIndex, cameraAcquisitionTimeSeconds, timing, dynamic);
     if (cameraFullPerf)
-        cameraFullPerf->EndFrame(cmd);
+        cameraFullPerf->EndFrame(gpuList);
     if (!readout)
         return readout;
     cameraLastAcquisitionSamples = totalTraced;
@@ -6102,7 +6108,8 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
 }
 
 Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(VkCommandBuffer cmd) {
-    pendingUploads.Record(cmd);
+    auto list = gpu::vulkan::Wrap(cmd);
+    pendingUploads.Record(list);
     if (auto ready = EnsureCameraResources(); !ready)
         return ready;
     const auto& optics = cameraConfig.optics;
@@ -6134,12 +6141,12 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(VkCommand
                                 effectiveSeed);
     // Writes enqueued while resources were ensured (camera lighting params,
     // the projection block) must reach the GPU before the trace.
-    pendingUploads.Record(cmd);
+    pendingUploads.Record(list);
     if (perfLogger)
-        perfLogger->BeginFrame(cmd);
-    pipeline->TraceRays(cmd, cameraConfig.optics.sensorWidthPx, cameraConfig.optics.sensorHeightPx);
+        perfLogger->BeginFrame(list);
+    pipeline->TraceRays(list, cameraConfig.optics.sensorWidthPx, cameraConfig.optics.sensorHeightPx);
     if (perfLogger)
-        perfLogger->EndFrame(cmd);
+        perfLogger->EndFrame(list);
     return Result<void, String>::Ok();
 }
 
@@ -6535,8 +6542,7 @@ Result<void, String> ExternalRenderContext::LoadEnvironmentMap(const String& hdr
     m_impl->envMap = std::move(loaded.value());
 
     if (m_impl->pipeline) {
-        m_impl->pipeline->BindPrefilteredEnvMap(gpu::vulkan::NativeView(m_impl->envMap.View()),
-                                                gpu::vulkan::NativeSampler(m_impl->envMap.Sampler()));
+        m_impl->pipeline->BindPrefilteredEnvMap(m_impl->envMap.View(), m_impl->envMap.Sampler());
     }
     // A map that loaded is a map that lights: raising the flag here is what makes
     // a bare LoadEnvironmentMap call work on its own, instead of depending on

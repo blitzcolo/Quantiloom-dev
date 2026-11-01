@@ -6,9 +6,6 @@
 
 #include <vulkan/vulkan.h>
 
-#include <span>
-#include <vector>
-
 namespace quantiloom {
 class VulkanContext;
 class GpuImage;
@@ -50,9 +47,9 @@ namespace quantiloom::gpu::vulkan {
 [[nodiscard]] VkSampler NativeSampler(gpu::SamplerRef ref);               // Transitional; deleted in S19
 [[nodiscard]] VkAccelerationStructureKHR NativeScene(gpu::RtSceneRef ref);  // Transitional; deleted in S19
 
-// RayTracingPipeline::BindTextures' native arrays, from TextureManager's refs, until it takes the
-// refs itself.
-[[nodiscard]] std::vector<VkImageView> NativeViews(std::span<const gpu::TextureRef> refs);  // Transitional; deleted in S15
-[[nodiscard]] std::vector<VkSampler> NativeSamplers(std::span<const gpu::SamplerRef> refs);  // Transitional; deleted in S15
+// A host's GpuBuffer or GpuImage that may be absent, as a binding names it: the empty ref for
+// null, which RayTracingPipeline's optional binders read as "none".
+[[nodiscard]] gpu::BufferRef RefOrEmpty(const GpuBuffer* buffer);  // Transitional; deleted in S19
+[[nodiscard]] gpu::TextureRef RefOrEmpty(const GpuImage* image);   // Transitional; deleted in S19
 
 }  // namespace quantiloom::gpu::vulkan

@@ -13,7 +13,6 @@
 #include "io/ImageIO.hpp"
 #include "io/UsdLoader.hpp"
 #include "gpu/Device.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/GpuAlloc.hpp"
 #include "renderer/RayTracingPipeline.hpp"
 #include "renderer/TextureManager.hpp"
@@ -1529,78 +1528,75 @@ std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
     gpu::Device& device, const gpu::PipelineCache* cache, const PipelineBindings& bindings) {
     QL_LOG_INFO("Creating ray tracing pipeline...");
 
-    // RayTracingPipeline still takes the context and native objects until its own
-    // migration step; the bridge names them for that one step.
     auto pipeline = std::make_unique<RayTracingPipeline>(
-        gpu::vulkan::Context(device), "raygen.spv", "closesthit.spv", "miss.spv", "anyhit.spv", cache);
+        device, "raygen.spv", "closesthit.spv", "miss.spv", "anyhit.spv", cache);
 
-    if (bindings.outputImage) {
-        pipeline->BindOutputImage(gpu::vulkan::AsGpuImage(*bindings.outputImage));  // 0
+    if (bindings.outputImage.IsValid()) {
+        pipeline->BindOutputImage(bindings.outputImage);            // 0
     }
-    if (bindings.depthImage) {
-        pipeline->BindDepthImage(gpu::vulkan::AsGpuImage(*bindings.depthImage));    // 22
+    if (bindings.depthImage.IsValid()) {
+        pipeline->BindDepthImage(bindings.depthImage);              // 22
     }
     if (bindings.geometry && bindings.geometry->IsValid()) {
         const SceneGeometry& geometry = *bindings.geometry;
-        pipeline->BindAccelerationStructure(gpu::vulkan::NativeScene(geometry.Tlas().Ref()));  // 1
-        pipeline->BindGeometryBuffers(gpu::vulkan::AsGpuBuffer(geometry.Vertices()),
-                                      gpu::vulkan::AsGpuBuffer(geometry.Indices()),
-                                      &gpu::vulkan::AsGpuBuffer(geometry.UVs()));   // 3, 4, 8
-        pipeline->BindTangentBuffer(gpu::vulkan::AsGpuBuffer(geometry.Tangents()));  // 9
-        pipeline->BindNormalBuffer(gpu::vulkan::AsGpuBuffer(geometry.Normals()));    // 16
+        pipeline->BindAccelerationStructure(geometry.Tlas().Ref());  // 1
+        pipeline->BindGeometryBuffers(geometry.Vertices().Ref(), geometry.Indices().Ref(),
+                                      geometry.UVs().Ref());         // 3, 4, 8
+        pipeline->BindTangentBuffer(geometry.Tangents().Ref());      // 9
+        pipeline->BindNormalBuffer(geometry.Normals().Ref());        // 16
         if (geometry.InstanceCount() > 0) {
-            pipeline->BindInstanceGeometryBuffer(gpu::vulkan::AsGpuBuffer(geometry.InstanceInfo()));  // 18
+            pipeline->BindInstanceGeometryBuffer(geometry.InstanceInfo().Ref());  // 18
         }
     }
-    if (bindings.lightingParams) {
-        pipeline->BindLUTBuffer(*bindings.lightingParams);           // 2
+    if (bindings.lightingParams.IsValid()) {
+        pipeline->BindLUTBuffer(bindings.lightingParams);           // 2
     }
-    if (bindings.materials) {
-        pipeline->BindMaterialBuffer(gpu::vulkan::AsGpuBuffer(*bindings.materials));  // 5
+    if (bindings.materials.IsValid()) {
+        pipeline->BindMaterialBuffer(bindings.materials);           // 5
     }
     if (bindings.textures) {
-        pipeline->BindTextures(gpu::vulkan::NativeViews(bindings.textures->TextureRefs()),
-                               gpu::vulkan::NativeSamplers(bindings.textures->SamplerRefs()));  // 6, 7
+        pipeline->BindTextures(bindings.textures->TextureRefs(),
+                               bindings.textures->SamplerRefs());    // 6, 7
     }
     if (bindings.environment) {
-        pipeline->BindPrefilteredEnvMap(gpu::vulkan::NativeView(bindings.environment->View()),
-                                        gpu::vulkan::NativeSampler(bindings.environment->Sampler()));  // 10, 21
+        pipeline->BindPrefilteredEnvMap(bindings.environment->View(),
+                                        bindings.environment->Sampler());  // 10, 21
     }
     if (bindings.brdfLut) {
-        pipeline->BindBRDFLut(gpu::vulkan::NativeView(bindings.brdfLut->View()),
-                              gpu::vulkan::NativeSampler(bindings.brdfLut->Sampler()));  // 11, 12
+        pipeline->BindBRDFLut(bindings.brdfLut->View(),
+                              bindings.brdfLut->Sampler());          // 11, 12
     }
 
-    // These binders take a pointer and handle null themselves.
+    // These binders take an empty ref as "none" and handle it themselves.
     pipeline->BindSpectralCurvesBuffer(bindings.spectralCurves);     // 13
     pipeline->BindComplexRefractiveIndexBuffer(bindings.complexRefractiveIndex);  // 14
     pipeline->BindSolarSpectralLUT(bindings.solarLut);               // 15
     pipeline->BindAtmosphereNN(bindings.atmosphereHeader,
                                bindings.atmosphereData);             // 17, 20
 
-    if (bindings.thermalTemperatures) {
-        pipeline->BindThermalTemperatureBuffer(*bindings.thermalTemperatures);  // 24
+    if (bindings.thermalTemperatures.IsValid()) {
+        pipeline->BindThermalTemperatureBuffer(bindings.thermalTemperatures);  // 24
     }
-    if (bindings.thermalParameterTangent) {
-        pipeline->BindThermalTangentBuffer(*bindings.thermalParameterTangent);  // 27
+    if (bindings.thermalParameterTangent.IsValid()) {
+        pipeline->BindThermalTangentBuffer(bindings.thermalParameterTangent);  // 27
     }
-    if (bindings.thermalSunResponse) {
-        pipeline->BindThermalSunResponseBuffer(*bindings.thermalSunResponse);  // 26
+    if (bindings.thermalSunResponse.IsValid()) {
+        pipeline->BindThermalSunResponseBuffer(bindings.thermalSunResponse);  // 26
     }
-    if (bindings.emissiveTriangles) {
-        pipeline->BindEmissiveTriangleBuffer(gpu::vulkan::AsGpuBuffer(*bindings.emissiveTriangles));  // 23
+    if (bindings.emissiveTriangles.IsValid()) {
+        pipeline->BindEmissiveTriangleBuffer(bindings.emissiveTriangles);  // 23
     }
-    if (bindings.cieColourMatching) {
-        pipeline->BindCIE_CMF_LUT(gpu::vulkan::AsGpuBuffer(*bindings.cieColourMatching));  // 19
+    if (bindings.cieColourMatching.IsValid()) {
+        pipeline->BindCIE_CMF_LUT(bindings.cieColourMatching);      // 19
     }
-    if (bindings.rgbToSpectrum) {
-        pipeline->BindRgbToSpectrumTable(gpu::vulkan::AsGpuBuffer(*bindings.rgbToSpectrum));  // 25
+    if (bindings.rgbToSpectrum.IsValid()) {
+        pipeline->BindRgbToSpectrumTable(bindings.rgbToSpectrum);   // 25
     }
-    if (bindings.cameraMeasurementImage) {
-        pipeline->BindCameraMeasurementImage(*bindings.cameraMeasurementImage); // 28
+    if (bindings.cameraMeasurementImage.IsValid()) {
+        pipeline->BindCameraMeasurementImage(bindings.cameraMeasurementImage); // 28
     }
-    if (bindings.cameraResponse) {
-        pipeline->BindCameraResponseBuffer(*bindings.cameraResponse); // 29
+    if (bindings.cameraResponse.IsValid()) {
+        pipeline->BindCameraResponseBuffer(bindings.cameraResponse); // 29
     }
 
     QL_LOG_INFO("  Ray tracing pipeline created and bound");

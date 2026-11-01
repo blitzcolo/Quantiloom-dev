@@ -351,7 +351,7 @@ struct OfflineRenderer::Impl {
         Impl* owner = nullptr;
         f64 restore_s = 0.0;
         bool captured = false;
-        VkAccelerationStructureKHR ApplyEpoch(f64 t_s) override;
+        gpu::RtSceneRef ApplyEpoch(f64 t_s) override;
         void Restore() override;
     };
     OfflineEpochHost epochHost;
@@ -510,7 +510,7 @@ void OfflineRenderer::Impl::UploadThermalResult(const thermal::ThermalResult& re
            empty ? static_cast<const void*>(&zero)
                  : static_cast<const void*>(result.surfaceTemperature_K.data()),
            empty ? sizeof(f32) : result.surfaceTemperature_K.size() * sizeof(f32),
-           [this](const GpuBuffer& b) { pipeline->BindThermalTemperatureBuffer(b); });
+           [this](const GpuBuffer& b) { pipeline->BindThermalTemperatureBuffer(gpu::vulkan::Ref(b)); });
 
     // The sun response goes up wherever the temperatures do, including on
     // every failure path: binding 26 has no partially-bound flag either, so
@@ -520,7 +520,7 @@ void OfflineRenderer::Impl::UploadThermalResult(const thermal::ThermalResult& re
         result.lagSensitivity_K, result.lagVisibility, result.lagDirection);
     upload(thermalSunResponseBuffer, records.data(),
            records.size() * sizeof(rendercore::ThermalSunResponseGpu),
-           [this](const GpuBuffer& b) { pipeline->BindThermalSunResponseBuffer(b); });
+           [this](const GpuBuffer& b) { pipeline->BindThermalSunResponseBuffer(gpu::vulkan::Ref(b)); });
 
     // Binding 27 has no partially-bound flag either, and the vertex shading
     // reads its step on every thermal-element hit. This path never previews a
@@ -529,7 +529,7 @@ void OfflineRenderer::Impl::UploadThermalResult(const thermal::ThermalResult& re
     // previewed").
     const f32 inertTangent[2] = {0.0f, 0.0f};
     upload(thermalParameterTangentBuffer, inertTangent, sizeof(inertTangent),
-           [this](const GpuBuffer& b) { pipeline->BindThermalTangentBuffer(b); });
+           [this](const GpuBuffer& b) { pipeline->BindThermalTangentBuffer(gpu::vulkan::Ref(b)); });
 
     // Point the instances at their elements. This is the whole of how a
     // triangle in the shader finds the temperature the balance gave it.
@@ -539,7 +539,7 @@ void OfflineRenderer::Impl::UploadThermalResult(const thermal::ThermalResult& re
     lastSurfaceTemperatures = result.surfaceTemperature_K;
 }
 
-VkAccelerationStructureKHR OfflineRenderer::Impl::OfflineEpochHost::ApplyEpoch(const f64 t_s) {
+gpu::RtSceneRef OfflineRenderer::Impl::OfflineEpochHost::ApplyEpoch(const f64 t_s) {
     if (!captured) {
         restore_s = owner->timeline.Current_s();
         captured = true;
@@ -550,8 +550,7 @@ VkAccelerationStructureKHR OfflineRenderer::Impl::OfflineEpochHost::ApplyEpoch(c
             owner->geometry.RebuildTlas(*owner->gpuDevice, owner->loadedScene);
         }
     }
-    return owner->geometry.IsValid() ? gpu::vulkan::NativeScene(owner->geometry.Tlas().Ref())
-                                     : VK_NULL_HANDLE;
+    return owner->geometry.IsValid() ? owner->geometry.Tlas().Ref() : gpu::RtSceneRef{};
 }
 
 void OfflineRenderer::Impl::OfflineEpochHost::Restore() {
@@ -573,8 +572,6 @@ f64 OfflineRenderer::Impl::ThermalHourNow() const {
 }
 
 void OfflineRenderer::Impl::BuildThermalSession() {
-    VulkanContext& context = *contextRef;
-
     if (!resolved.thermal.enabled) {
         return;
     }
@@ -756,7 +753,7 @@ void OfflineRenderer::Impl::BuildThermalSession() {
         thermalConfig.sunCorrection ? thermalConfig.sunMemoryLags : 0u;
 
     thermal::ThermalGeometrySchedule schedule = rendercore::BuildThermalGeometrySchedule(
-        context, epochHost, loadedScene, buildInput, nullptr);
+        *gpuDevice, epochHost, loadedScene, buildInput, nullptr);
     if (schedule.Empty() || schedule.epochs.front().exchange.skyFraction.empty()) {
         QL_LOG_WARN("  Thermal: no view factors; every surface will be treated as "
                     "seeing open sky");
@@ -1096,8 +1093,6 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
 // ============================================================================
 
 SetupResult OfflineRenderer::Impl::BuildPipeline() {
-    VulkanContext& context = *contextRef;
-
     // ====================================================================
     // Load or Generate BRDF Integration LUT for IBL (with Disk Caching)
     // ====================================================================
@@ -1182,29 +1177,30 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     // leaves it alone.
     if (!borrowingDevice && !init.pipelineCachePath.empty()) {
         ownedPipelineCache =
-            RayTracingPipeline::LoadPipelineCache(context, init.pipelineCachePath);
+            RayTracingPipeline::LoadPipelineCache(*gpuDevice, init.pipelineCachePath);
         pipelineCache = ownedPipelineCache.get();
     }
 
     rendercore::PipelineBindings bindings;
-    bindings.outputImage = outputImage.get();
+    bindings.outputImage = outputImage ? outputImage->Ref() : gpu::TextureRef{};
     bindings.geometry = &geometry;
-    bindings.lightingParams = lightingParamsBuffer.get();
-    bindings.materials = materialBuffer.get();
+    bindings.lightingParams = gpu::vulkan::RefOrEmpty(lightingParamsBuffer.get());
+    bindings.materials = materialBuffer ? materialBuffer->Ref() : gpu::BufferRef{};
     bindings.textures = textureManager.get();
     bindings.environment = envMapRef;
     bindings.brdfLut = brdfLutRef;
-    bindings.spectralCurves = spectralCurvesBuffer.get();
-    bindings.complexRefractiveIndex = criBuffer.get();
-    bindings.solarLut = solarSpectralLUTBuffer.get();
-    bindings.atmosphereHeader = atmosHeaderBuffer.get();
-    bindings.atmosphereData = atmosDataBuffer.get();
-    bindings.cieColourMatching = cieCMF_LUTRef;
-    bindings.rgbToSpectrum = rgbToSpectrumRef;
-    bindings.emissiveTriangles = emissiveTriangleBuffer.get();
-    bindings.thermalTemperatures = thermalTemperatureBuffer.get();
-    bindings.thermalSunResponse = thermalSunResponseBuffer.get();
-    bindings.thermalParameterTangent = thermalParameterTangentBuffer.get();
+    bindings.spectralCurves = gpu::vulkan::RefOrEmpty(spectralCurvesBuffer.get());
+    bindings.complexRefractiveIndex = gpu::vulkan::RefOrEmpty(criBuffer.get());
+    bindings.solarLut = gpu::vulkan::RefOrEmpty(solarSpectralLUTBuffer.get());
+    bindings.atmosphereHeader = gpu::vulkan::RefOrEmpty(atmosHeaderBuffer.get());
+    bindings.atmosphereData = gpu::vulkan::RefOrEmpty(atmosDataBuffer.get());
+    bindings.cieColourMatching = cieCMF_LUTRef ? cieCMF_LUTRef->Ref() : gpu::BufferRef{};
+    bindings.rgbToSpectrum = rgbToSpectrumRef ? rgbToSpectrumRef->Ref() : gpu::BufferRef{};
+    bindings.emissiveTriangles =
+        emissiveTriangleBuffer ? emissiveTriangleBuffer->Ref() : gpu::BufferRef{};
+    bindings.thermalTemperatures = gpu::vulkan::RefOrEmpty(thermalTemperatureBuffer.get());
+    bindings.thermalSunResponse = gpu::vulkan::RefOrEmpty(thermalSunResponseBuffer.get());
+    bindings.thermalParameterTangent = gpu::vulkan::RefOrEmpty(thermalParameterTangentBuffer.get());
 
     pipeline = rendercore::CreateRayTracingPipeline(*gpuDevice, pipelineCache, bindings);
     pipeline->SetFusionTransport(spectra.fusionTransport);
@@ -1982,13 +1978,13 @@ OfflineRenderer::Impl::RenderCameraWavelength(f64 wavelengthNm, u64 acquisitionI
                 host.lightingParams.enableEnvironmentMap = environment;
                 host.lightingParamsBuffer->Upload(&host.lightingParams, sizeof(LightingParams));
             }
-            host.pipeline->BindOutputImage(gpu::vulkan::AsGpuImage(*host.outputImage));
+            host.pipeline->BindOutputImage(host.outputImage->Ref());
             host.pipeline->SetCameraData(original);
             host.pipeline->SetCameraProjection(nullptr);
             host.pipeline->SetSpecConstants(static_cast<u32>(host.params.mode),
                                             original.debug_mode != 0);
-            host.pipeline->BindAtmosphereNN(host.atmosHeaderBuffer.get(),
-                                            host.atmosDataBuffer.get());
+            host.pipeline->BindAtmosphereNN(gpu::vulkan::RefOrEmpty(host.atmosHeaderBuffer.get()),
+                                            gpu::vulkan::RefOrEmpty(host.atmosDataBuffer.get()));
         }
     } restore{*this, original, lightingParams.enableEnvironmentMap};
     if (lightingParams.enableEnvironmentMap != 0) {
@@ -2030,7 +2026,8 @@ OfflineRenderer::Impl::RenderCameraWavelength(f64 wavelengthNm, u64 acquisitionI
                     contextRef->GetAllocator(), dataBytes,
                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
             cameraAtmosDataBuffer->Upload(baked.data.data(), dataBytes);
-            pipeline->BindAtmosphereNN(cameraAtmosHeaderBuffer.get(), cameraAtmosDataBuffer.get());
+            pipeline->BindAtmosphereNN(gpu::vulkan::RefOrEmpty(cameraAtmosHeaderBuffer.get()),
+                                       gpu::vulkan::RefOrEmpty(cameraAtmosDataBuffer.get()));
         } catch (const std::exception& e) {
             return Result<Image, String>::Err(String("camera atmosphere bake failed: ") + e.what());
         }
@@ -2261,11 +2258,9 @@ Result<void, String> OfflineRenderer::SetTimelineTime(const f64 t_s) {
         if (!impl.geometry.RefitTlas(*impl.gpuDevice, impl.loadedScene)) {
             impl.geometry.RebuildTlas(*impl.gpuDevice, impl.loadedScene);
             if (impl.pipeline) {
-                impl.pipeline->BindAccelerationStructure(
-                    gpu::vulkan::NativeScene(impl.geometry.Tlas().Ref()));
+                impl.pipeline->BindAccelerationStructure(impl.geometry.Tlas().Ref());
                 if (impl.geometry.InstanceCount() > 0) {
-                    impl.pipeline->BindInstanceGeometryBuffer(
-                        gpu::vulkan::AsGpuBuffer(impl.geometry.InstanceInfo()));
+                    impl.pipeline->BindInstanceGeometryBuffer(impl.geometry.InstanceInfo().Ref());
                 }
             }
         }
@@ -2299,8 +2294,7 @@ Result<void, String> OfflineRenderer::SetTimelineTime(const f64 t_s) {
                 impl.lightingParamsBuffer->Upload(&impl.lightingParams, sizeof(LightingParams));
             }
             if (impl.pipeline) {
-                impl.pipeline->BindEmissiveTriangleBuffer(
-                    gpu::vulkan::AsGpuBuffer(*impl.emissiveTriangleBuffer));
+                impl.pipeline->BindEmissiveTriangleBuffer(impl.emissiveTriangleBuffer->Ref());
             }
         }
     }
@@ -2341,7 +2335,7 @@ OfflineRenderer::QueryOpticalPaths(const Vector<dataset::OpticalProbe>& probes, 
                 host.pipeline->BeginFusionRecording(0, 0, 0, 0);
                 host.pipeline->SetCameraProjection(nullptr);
                 host.pipeline->SetCameraData(saved);
-                host.pipeline->BindOutputImage(gpu::vulkan::AsGpuImage(*host.outputImage));
+                host.pipeline->BindOutputImage(host.outputImage->Ref());
                 host.pipeline->SetSpecConstants(static_cast<u32>(host.params.mode),
                                                 saved.debug_mode != 0);
             }
@@ -2376,15 +2370,15 @@ OfflineRenderer::QueryOpticalPaths(const Vector<dataset::OpticalProbe>& probes, 
                            probe.branchMask};
             }
             auto image = rendercore::CreateRenderTarget(*host.gpuDevice, count, 1);
-            host.pipeline->BindOutputImage(gpu::vulkan::AsGpuImage(*image));
+            host.pipeline->BindOutputImage(image->Ref());
             host.pipeline->SetCameraData(*pose);
             host.pipeline->SetSpecConstants(static_cast<u32>(SpectralMode::Single), false);
             host.pipeline->SetSamplingParams(0, 0, 1, 17, 17);
             host.pipeline->SetFusionInitialMedia(*initial);
             host.pipeline->BeginFusionRecording(count, 1, 1, 0);
             host.pipeline->SetFusionProbes(rays);
-            CommandHelper::ExecuteImmediate(*host.contextRef, [&](VkCommandBuffer cmd) {
-                host.pipeline->TraceRays(cmd, count, 1);
+            host.gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
+                host.pipeline->TraceRays(list, count, 1);
             });
             const auto bytes = host.pipeline->ReadFusionRecording();
             const auto word = [&](size_t position) {
@@ -3025,16 +3019,15 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
                 throw std::runtime_error("Queue submit failed");
             }
             gpu::CommandList& list = *begun.value();
-            const VkCommandBuffer nativeCmd = gpu::vulkan::NativeCommandBuffer(list);
 
             for (u32 sampleIndex = batchStart; sampleIndex < batchEnd; ++sampleIndex) {
                 u32 randomSeed = dist(rng) ^ (frameIndex * 997 + sampleIndex * 1009);
                 pipeline->SetSamplingParams(frameIndex, sampleIndex, spp, randomSeed, sequenceSeed);
 
-                perfLogger->BeginFrame(nativeCmd);
+                perfLogger->BeginFrame(list);
                 bool isFinal = (sampleIndex == spp - 1);
-                pipeline->TraceRays(nativeCmd, width, height, isFinal);
-                perfLogger->EndFrame(nativeCmd);
+                pipeline->TraceRays(list, width, height, isFinal);
+                perfLogger->EndFrame(list);
             }
 
             static_cast<void>(cmd->End());

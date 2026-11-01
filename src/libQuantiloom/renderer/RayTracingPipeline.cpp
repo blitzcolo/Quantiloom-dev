@@ -1,9 +1,9 @@
 #include "RayTracingPipeline.hpp"
-#include "CommandHelper.hpp"
 #include "DeferredBufferUploads.hpp"
 #include "RtBindings.hpp"
 #include "ShaderBinary.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
+#include "renderer/GpuAlloc.hpp"
+#include "renderer/TextureTransitions.hpp"
 #include "core/ResourceLocator.hpp"
 #include "renderer/FusionRecordLayout.hpp"
 #include "core/Log.hpp"
@@ -36,17 +36,6 @@ namespace quantiloom {
 
 static constexpr u32 kMaxPipelineRayRecursionDepth = 1;
 
-// ============================================================================
-// Helper: Get Maximum Texture Count
-// ============================================================================
-// Dynamic texture limit based on device capabilities
-// Returns 1024 if descriptor indexing available, 32 otherwise
-// ============================================================================
-
-static u32 GetMaxTexturesForDevice(const VulkanContext& ctx) {
-    return ctx.GetCapabilities().hasDescriptorIndexing ? 1024 : 32;
-}
-
 // A shader as the gpu:: kernel factories take it: the words LoadSPIRV read, as
 // bytes, named after the file.
 static gpu::ShaderCode ToShaderCode(const std::string& path, const std::vector<u32>& words) {
@@ -60,29 +49,43 @@ static gpu::ShaderCode ToShaderCode(const std::string& path, const std::vector<u
 
 // A whole-buffer write of a storage buffer binding, with the kind its row in
 // RtBindings.hpp declares (read-only or read-write; both are storage buffers).
-static gpu::BindingWrite RtBufferWrite(u32 binding, const GpuBuffer& buffer) {
-    return gpu::BindingWrite::Buffer(binding, rendercore::kRtBindingTemplate[binding].kind,
-                                     gpu::vulkan::Ref(buffer));
+static gpu::BindingWrite RtBufferWrite(u32 binding, gpu::BufferRef buffer) {
+    return gpu::BindingWrite::Buffer(binding, rendercore::kRtBindingTemplate[binding].kind, buffer);
 }
 
 static void WriteStorageImage(gpu::Device& device, gpu::BindGroup set, u32 binding,
-                              const GpuImage& image) {
-    const gpu::BindingWrite writes[] = {
-        gpu::BindingWrite::StorageTexture(binding, gpu::vulkan::Ref(image))};
+                              gpu::TextureRef image) {
+    const gpu::BindingWrite writes[] = {gpu::BindingWrite::StorageTexture(binding, image)};
     device.WriteBindGroup(set, writes);
 }
 
 static void WriteStorageBuffer(gpu::Device& device, gpu::BindGroup set, u32 binding,
-                               const GpuBuffer& buffer) {
+                               gpu::BufferRef buffer) {
     const gpu::BindingWrite writes[] = {RtBufferWrite(binding, buffer)};
     device.WriteBindGroup(set, writes);
+}
+
+// A one-texel storage image, the shape of every fallback the pipeline binds.
+static gpu::TextureDesc FallbackStorageImage(gpu::Format format) {
+    gpu::TextureDesc desc;
+    desc.width = 1;
+    desc.height = 1;
+    desc.format = format;
+    desc.usage = gpu::TextureUsage::Storage | gpu::TextureUsage::TransferDst;
+    desc.memory = gpu::MemoryClass::DeviceLocal;
+    return desc;
+}
+
+// A host-written storage buffer, which is what every fallback and staging block here is.
+static gpu::BufferDesc HostStorage(u64 bytes, gpu::BufferUsage extra = gpu::BufferUsage::None) {
+    return gpu::BufferDesc{bytes, gpu::BufferUsage::Storage | extra, gpu::MemoryClass::Upload, 0};
 }
 
 // ============================================================================
 // Pipeline Cache Static Methods
 // ============================================================================
 
-std::unique_ptr<gpu::PipelineCache> RayTracingPipeline::LoadPipelineCache(VulkanContext& context,
+std::unique_ptr<gpu::PipelineCache> RayTracingPipeline::LoadPipelineCache(gpu::Device& device,
                                                                        const std::string& cachePath) {
     // Try to load existing cache from disk
     std::vector<char> cacheData;
@@ -101,7 +104,7 @@ std::unique_ptr<gpu::PipelineCache> RayTracingPipeline::LoadPipelineCache(Vulkan
 
     // Data the driver rejects (corrupted or incompatible) gets a warning and an
     // empty cache instead; the error is only that the empty one failed too.
-    auto cache = gpu::vulkan::AdoptContext(context)->CreatePipelineCache(
+    auto cache = device.CreatePipelineCache(
         std::as_bytes(std::span<const char>(cacheData)));
     if (!cache.has_value()) {
         QL_LOG_ERROR("{}", cache.error());
@@ -147,14 +150,13 @@ void RayTracingPipeline::DestroyPipelineCache(std::unique_ptr<gpu::PipelineCache
 // ============================================================================
 
 RayTracingPipeline::RayTracingPipeline(
-    VulkanContext& context,
+    gpu::Device& device,
     const std::string& raygenPath,
     const std::string& closestHitPath,
     const std::string& missPath,
     const std::string& anyHitPath,
     const gpu::PipelineCache* pipelineCache)
-    : m_context(context)
-    , m_gpu(gpu::vulkan::AdoptContext(context))
+    : m_device(device)
     , m_raygenPath(raygenPath)
     , m_closestHitPath(closestHitPath)
     , m_missPath(missPath)
@@ -178,7 +180,7 @@ RayTracingPipeline::RayTracingPipeline(
     // raygen-driven integrator needs, so this only trips on a device that
     // reports less than the specification allows -- and then names itself here
     // rather than as a device loss somewhere unrelated.
-    const u32 maxRecursionDepth = m_gpu->Info().maxTraceRecursionDepth;
+    const u32 maxRecursionDepth = m_device.Info().maxTraceRecursionDepth;
     if (maxRecursionDepth < kMaxPipelineRayRecursionDepth) {
         throw std::runtime_error(
             "Ray tracing device supports a recursion depth of only " +
@@ -188,8 +190,9 @@ RayTracingPipeline::RayTracingPipeline(
             " (see src/shaders/path_driver.hlsli)");
     }
 
-    // Initialize dynamic texture limit based on device capabilities
-    m_maxTextures = GetMaxTexturesForDevice(m_context);
+    // Initialize dynamic texture limit based on device capabilities:
+    // 1024 with descriptor indexing, 32 otherwise
+    m_maxTextures = m_device.Info().maxBindlessTextures;
     QL_LOG_INFO("Texture limit: {} textures", m_maxTextures);
 
     // Create pipeline in order with exception safety
@@ -202,68 +205,52 @@ RayTracingPipeline::RayTracingPipeline(
         // Bindings 28/29 have descriptorCount 1 without PARTIALLY_BOUND. Even
         // an old RGB scene therefore needs real descriptors until camera mode
         // supplies its full-resolution image and encoded response table.
-        m_cameraFallbackImage = std::make_unique<GpuImage>(
-            m_context.GetAllocator(), m_context.GetDevice(), 1u, 1u, VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY);
-        CommandHelper::TransitionImageLayoutImmediate(
-            m_context, m_cameraFallbackImage->GetImage(), VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-        m_cameraFallbackDepth = std::make_unique<GpuImage>(
-            m_context.GetAllocator(), m_context.GetDevice(), 1u, 1u, VK_FORMAT_R32_SFLOAT,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY);
-        CommandHelper::TransitionImageLayoutImmediate(
-            m_context, m_cameraFallbackDepth->GetImage(), VK_FORMAT_R32_SFLOAT,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-        m_cameraFallbackResponse = std::make_unique<GpuBuffer>(m_context.GetAllocator(), 64u,
-                                                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                                               VMA_MEMORY_USAGE_CPU_TO_GPU);
+        m_cameraFallbackImage =
+            CreateTextureOrThrow(m_device, FallbackStorageImage(gpu::Format::RGBA32Float));
+        rendercore::LegacyTransitionImmediate(m_device, m_cameraFallbackImage->Ref(),
+                                              rendercore::Layout::Undefined,
+                                              rendercore::Layout::General);
+        m_cameraFallbackDepth =
+            CreateTextureOrThrow(m_device, FallbackStorageImage(gpu::Format::R32Float));
+        rendercore::LegacyTransitionImmediate(m_device, m_cameraFallbackDepth->Ref(),
+                                              rendercore::Layout::Undefined,
+                                              rendercore::Layout::General);
+        m_cameraFallbackResponse = CreateBufferOrThrow(m_device, HostStorage(64u));
         const SpectralCurveGPU emptyCurve{};
-        m_spectralFallback = std::make_unique<GpuBuffer>(
-            m_context.GetAllocator(), sizeof(emptyCurve), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        m_spectralFallback = CreateBufferOrThrow(m_device, HostStorage(sizeof(emptyCurve)));
         m_spectralFallback->Upload(&emptyCurve, sizeof(emptyCurve));
         const ComplexRefractiveIndexGPU emptyCri{};
-        m_criFallback = std::make_unique<GpuBuffer>(m_context.GetAllocator(), sizeof(emptyCri),
-                                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                                    VMA_MEMORY_USAGE_CPU_TO_GPU);
+        m_criFallback = CreateBufferOrThrow(m_device, HostStorage(sizeof(emptyCri)));
         m_criFallback->Upload(&emptyCri, sizeof(emptyCri));
         const u32 disabledHeader[16] = {};
         m_cameraFallbackResponse->Upload(disabledHeader, sizeof(disabledHeader));
         for (u32 i = 0; i < kProjectionSetCount; ++i) {
-            m_projectionBuffers[i] = std::make_unique<GpuBuffer>(
-                m_context.GetAllocator(), 64u,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                VMA_MEMORY_USAGE_CPU_TO_GPU);
+            m_projectionBuffers[i] =
+                CreateBufferOrThrow(m_device, HostStorage(64u, gpu::BufferUsage::TransferDst));
             SetCameraProjection(nullptr, i);
         }
         SetFusionTransport({rendercore::FusionTransportGpu{}});
         BeginFusionRecording(0, 0, 0, 0);
         SetFusionProbes({});
-        m_cameraFallbackAtmosHeader = std::make_unique<GpuBuffer>(
-            m_context.GetAllocator(), 80u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        m_cameraFallbackAtmosHeader = CreateBufferOrThrow(m_device, HostStorage(80u));
         const u32 disabledAtmosHeader[20] = {};
         m_cameraFallbackAtmosHeader->Upload(disabledAtmosHeader, sizeof(disabledAtmosHeader));
-        m_cameraFallbackAtmosData = std::make_unique<GpuBuffer>(
-            m_context.GetAllocator(), 2048u * sizeof(f32), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        m_cameraFallbackAtmosData = CreateBufferOrThrow(m_device, HostStorage(2048u * sizeof(f32)));
         const std::vector<f32> disabledAtmosData(2048u, 0.0f);
         m_cameraFallbackAtmosData->Upload(disabledAtmosData.data(),
                                           disabledAtmosData.size() * sizeof(f32));
         for (gpu::BindGroup set :
              {m_descriptorSet, m_cameraDescriptorSet, m_observerDescriptorSet}) {
-            WriteStorageImage(*m_gpu, set, 28u, *m_cameraFallbackImage);
-            WriteStorageBuffer(*m_gpu, set, 29u, *m_cameraFallbackResponse);
-            WriteStorageBuffer(*m_gpu, set, 17u, *m_cameraFallbackAtmosHeader);
-            WriteStorageBuffer(*m_gpu, set, 20u, *m_cameraFallbackAtmosData);
+            WriteStorageImage(m_device, set, 28u, m_cameraFallbackImage->Ref());
+            WriteStorageBuffer(m_device, set, 29u, m_cameraFallbackResponse->Ref());
+            WriteStorageBuffer(m_device, set, 17u, m_cameraFallbackAtmosHeader->Ref());
+            WriteStorageBuffer(m_device, set, 20u, m_cameraFallbackAtmosData->Ref());
         }
         for (gpu::BindGroup set : {m_cameraDescriptorSet, m_observerDescriptorSet}) {
-            WriteStorageImage(*m_gpu, set, 0u, *m_cameraFallbackImage);
-            WriteStorageImage(*m_gpu, set, 22u, *m_cameraFallbackDepth);
+            WriteStorageImage(m_device, set, 0u, m_cameraFallbackImage->Ref());
+            WriteStorageImage(m_device, set, 22u, m_cameraFallbackDepth->Ref());
         }
-        WriteStorageImage(*m_gpu, m_descriptorSet, 22u, *m_cameraFallbackDepth);
+        WriteStorageImage(m_device, m_descriptorSet, 22u, m_cameraFallbackDepth->Ref());
 
         QL_LOG_INFO("Ray Tracing pipeline created successfully");
     }
@@ -304,7 +291,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
         if (slot.count == rendercore::QL_BINDLESS) slot.count = m_maxTextures;
     }
 
-    auto layout = m_gpu->CreateBindingLayout(gpu::BindingLayoutDesc{0, slots});
+    auto layout = m_device.CreateBindingLayout(gpu::BindingLayoutDesc{0, slots});
     if (!layout.has_value()) {
         throw std::runtime_error("Failed to create descriptor set layout");
     }
@@ -314,7 +301,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // appearance, three sets' worth: storage images 12 (bindings 0, 22, 28, 31),
     // acceleration structures 3, storage buffers 81 (27 per set), sampled images
     // and samplers 3 * (m_maxTextures + 2) each.
-    auto pool = m_gpu->CreateBindGroupPool(*m_bindingLayout, 3);
+    auto pool = m_device.CreateBindGroupPool(*m_bindingLayout, 3);
     if (!pool.has_value()) {
         throw std::runtime_error("Failed to create descriptor pool");
     }
@@ -346,7 +333,7 @@ void RayTracingPipeline::CreatePipelineLayout() {
                                   gpu::ShaderStages::Miss | gpu::ShaderStages::AnyHit |
                                   gpu::ShaderStages::Compute;
 
-    auto layout = m_gpu->CreateKernelLayout(desc);
+    auto layout = m_device.CreateKernelLayout(desc);
     if (!layout.has_value()) {
         throw std::runtime_error("Failed to create pipeline layout");
     }
@@ -439,7 +426,7 @@ std::unique_ptr<gpu::TraceKernel> RayTracingPipeline::CreatePipelineVariant(cons
     QL_LOG_INFO("  [CreatePipelineVariant] spectralMode={}, debugEnabled={}", spec.spectralMode, spec.debugEnabled);
     Log::Flush();
 
-    auto kernel = m_gpu->CreateTraceKernel(desc);
+    auto kernel = m_device.CreateTraceKernel(desc);
     if (!kernel.has_value()) {
         throw std::runtime_error(kernel.error());
     }
@@ -467,28 +454,28 @@ void RayTracingPipeline::SetSpecConstants(u32 spectralMode, bool debugEnabled) {
 
 void RayTracingPipeline::UpdateSharedDescriptorSets(std::span<const gpu::BindingWrite> writes) const {
     for (gpu::BindGroup target : {m_descriptorSet, m_cameraDescriptorSet, m_observerDescriptorSet}) {
-        m_gpu->WriteBindGroup(target, writes);
+        m_device.WriteBindGroup(target, writes);
     }
 }
 
-void RayTracingPipeline::BindOutputImage(const GpuImage& image) const {
-    WriteStorageImage(*m_gpu, m_descriptorSet, 0u, image);
+void RayTracingPipeline::BindOutputImage(gpu::TextureRef image) const {
+    WriteStorageImage(m_device, m_descriptorSet, 0u, image);
 }
 
-void RayTracingPipeline::BindDepthImage(const GpuImage& image) const {
-    WriteStorageImage(*m_gpu, m_descriptorSet, 22u, image);
+void RayTracingPipeline::BindDepthImage(gpu::TextureRef image) const {
+    WriteStorageImage(m_device, m_descriptorSet, 22u, image);
 }
 
-void RayTracingPipeline::BindCameraMeasurementImage(const GpuImage& image) const {
-    WriteStorageImage(*m_gpu, m_cameraDescriptorSet, 28u, image);
+void RayTracingPipeline::BindCameraMeasurementImage(gpu::TextureRef image) const {
+    WriteStorageImage(m_device, m_cameraDescriptorSet, 28u, image);
 }
 
-void RayTracingPipeline::BindCameraResponseBuffer(const GpuBuffer& buffer) const {
-    WriteStorageBuffer(*m_gpu, m_cameraDescriptorSet, 29u, buffer);
+void RayTracingPipeline::BindCameraResponseBuffer(gpu::BufferRef buffer) const {
+    WriteStorageBuffer(m_device, m_cameraDescriptorSet, 29u, buffer);
 }
-void RayTracingPipeline::BindCameraLightingBuffer(const GpuBuffer& buffer) const {
-    WriteStorageBuffer(*m_gpu, m_cameraDescriptorSet, 2u, buffer);
-    WriteStorageBuffer(*m_gpu, m_observerDescriptorSet, 2u, buffer);
+void RayTracingPipeline::BindCameraLightingBuffer(gpu::BufferRef buffer) const {
+    WriteStorageBuffer(m_device, m_cameraDescriptorSet, 2u, buffer);
+    WriteStorageBuffer(m_device, m_observerDescriptorSet, 2u, buffer);
 }
 
 void RayTracingPipeline::SetCameraProjection(const camera::CameraProjection* p, u32 set,
@@ -511,23 +498,21 @@ void RayTracingPipeline::SetCameraProjection(const camera::CameraProjection* p, 
     // A submitted frame may still be reading this buffer; with an upload
     // queue attached the write is recorded into the next submission instead.
     if (m_uploadQueue)
-        m_uploadQueue->Enqueue(*m_projectionBuffers[set], 0, values.data(), sizeof(values));
+        m_uploadQueue->Enqueue(m_projectionBuffers[set]->Ref(), 0, values.data(), sizeof(values));
     else
         m_projectionBuffers[set]->Upload(values.data(), sizeof(values));
     const gpu::BindGroup sets[] = {m_descriptorSet, m_cameraDescriptorSet,
                                    m_observerDescriptorSet};
-    WriteStorageBuffer(*m_gpu, sets[set], 32u, *m_projectionBuffers[set]);
+    WriteStorageBuffer(m_device, sets[set], 32u, m_projectionBuffers[set]->Ref());
 }
 
 void RayTracingPipeline::SetFusionTransport(const Vector<rendercore::FusionTransportGpu>& records) {
     const auto size = std::max<size_t>(1, records.size()) * sizeof(rendercore::FusionTransportGpu);
-    auto replacement = std::make_unique<GpuBuffer>(m_context.GetAllocator(), size,
-                                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                                   VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto replacement = CreateBufferOrThrow(m_device, HostStorage(size));
     const rendercore::FusionTransportGpu disabled{};
     replacement->Upload(records.empty() ? &disabled : records.data(), size);
     for (auto set : {m_descriptorSet, m_cameraDescriptorSet, m_observerDescriptorSet})
-        WriteStorageBuffer(*m_gpu, set, 35u, *replacement);
+        WriteStorageBuffer(m_device, set, 35u, replacement->Ref());
     m_fusionTransportBuffer = std::move(replacement);
 }
 
@@ -553,21 +538,20 @@ void RayTracingPipeline::BeginFusionRecording(u32 width, u32 height, u32 spp, u3
     const size_t size =
         termsOffset + (aggregate ? static_cast<size_t>(count) * slots * rendercore::kFusionTermColumnBytes
                                  : 0);
-    if (size > m_context.GetDeviceProperties().limits.maxStorageBufferRange)
+    if (size > m_device.Info().maxStorageBufferRange)
         throw std::runtime_error(
             "fusion record buffer exceeds device storage range; lower fusionMaxRecordedRays");
     if (m_initialFusionMedia.size() > rendercore::kFusionMaxInitialMedia)
         throw std::runtime_error("invalid initial medium count");
-    if (!m_fusionRecordBuffer || m_fusionRecordBuffer->GetSize() < size) {
+    if (!m_fusionRecordBuffer || m_fusionRecordBuffer->Size() < size) {
         // Grow-only: a wavelength sweep that shrinks the footprint (fewer
         // recorded rays, no aggregate image) reuses the allocation instead
         // of freeing and remapping ~100 MB per band.
-        auto replacement = std::make_unique<GpuBuffer>(m_context.GetAllocator(), size,
-                                                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                                           VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                                       VMA_MEMORY_USAGE_GPU_TO_CPU);
+        auto replacement = CreateBufferOrThrow(
+            m_device, gpu::BufferDesc{size, gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
+                                      gpu::MemoryClass::Readback, 0});
         for (auto set : {m_descriptorSet, m_cameraDescriptorSet, m_observerDescriptorSet})
-            WriteStorageBuffer(*m_gpu, set, 36u, *replacement);
+            WriteStorageBuffer(m_device, set, 36u, replacement->Ref());
         m_fusionRecordBuffer = std::move(replacement);
     }
     m_fusionRecordSize = size;
@@ -602,7 +586,7 @@ void RayTracingPipeline::RecordFusionInit(gpu::CommandList& list) const {
     // Ray tracing and compute shaders read and write the records.
     constexpr gpu::Access kShaderAccess = gpu::Access::RayTraceRead | gpu::Access::RayTraceWrite |
                                           gpu::Access::ComputeRead | gpu::Access::ComputeWrite;
-    const gpu::BufferRef dst = gpu::vulkan::Ref(*m_fusionRecordBuffer);
+    const gpu::BufferRef dst = m_fusionRecordBuffer->Ref();
     list.Barrier(gpu::BufferBarrier{dst, kShaderAccess, gpu::Access::TransferWrite});
     list.UpdateBuffer(dst, 0, std::as_bytes(std::span(m_fusionHeader)));
     if (m_pendingFusionZero)
@@ -633,8 +617,8 @@ void RayTracingPipeline::SetFusionInitialMedia(const Vector<u32>& media) {
 Vector<u8> RayTracingPipeline::ReadFusionRecording() {
     if (!m_fusionRecordBuffer || m_fusionRecordSize == 0)
         return {};
-    m_gpu->ExecuteImmediate([&](gpu::CommandList& list) {
-        list.Barrier(gpu::BufferBarrier{gpu::vulkan::Ref(*m_fusionRecordBuffer),
+    m_device.ExecuteImmediate([&](gpu::CommandList& list) {
+        list.Barrier(gpu::BufferBarrier{m_fusionRecordBuffer->Ref(),
                                         gpu::Access::RayTraceWrite | gpu::Access::TransferWrite,
                                         gpu::Access::HostRead});
     });
@@ -649,13 +633,11 @@ Vector<u8> RayTracingPipeline::ReadFusionRecording() {
 
 void RayTracingPipeline::SetFusionProbes(const Vector<ProbeRay>& probes) {
     const size_t size = std::max<size_t>(1, probes.size()) * sizeof(ProbeRay);
-    auto buffer = std::make_unique<GpuBuffer>(m_context.GetAllocator(), size,
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                              VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto buffer = CreateBufferOrThrow(m_device, HostStorage(size));
     const ProbeRay disabled{};
     buffer->Upload(probes.empty() ? &disabled : probes.data(), size);
     for (auto set : {m_descriptorSet, m_cameraDescriptorSet, m_observerDescriptorSet})
-        WriteStorageBuffer(*m_gpu, set, 37u, *buffer);
+        WriteStorageBuffer(m_device, set, 37u, buffer->Ref());
     m_fusionProbeBuffer = std::move(buffer);
     // Header word 10 carries the probe count; it lands with the next trace.
     m_fusionHeader[rendercore::kFusionProbeCountWord] = static_cast<u32>(probes.size());
@@ -675,7 +657,7 @@ RayTracingPipeline::CapturePrimaryGeometry(u32 width, u32 height,
         gpu::ComputeKernelDesc desc;
         desc.code = &code;
         desc.layout = m_kernelLayout.get();
-        auto kernel = m_gpu->CreateComputeKernel(desc);
+        auto kernel = m_device.CreateComputeKernel(desc);
         if (!kernel.has_value())
             throw std::runtime_error("cannot create geometry capture pipeline");
         m_geometryKernel = std::move(kernel.value());
@@ -683,70 +665,69 @@ RayTracingPipeline::CapturePrimaryGeometry(u32 width, u32 height,
     const size_t count = Image::CheckedElementCount(width, height, 1);
     if (queryPixels && queryPixels->size() != count)
         throw std::invalid_argument("geometry query count mismatch");
-    std::unique_ptr<GpuBuffer> pixels;
+    std::unique_ptr<gpu::Buffer> pixels;
     if (queryPixels) {
-        pixels = std::make_unique<GpuBuffer>(m_context.GetAllocator(), count * sizeof(glm::vec2),
-                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                             VMA_MEMORY_USAGE_CPU_TO_GPU);
+        pixels = CreateBufferOrThrow(m_device, HostStorage(count * sizeof(glm::vec2)));
         pixels->Upload(queryPixels->data(), count * sizeof(glm::vec2));
-        WriteStorageBuffer(*m_gpu, m_descriptorSet, 34u, *pixels);
+        WriteStorageBuffer(m_device, m_descriptorSet, 34u, pixels->Ref());
     }
-    GpuBuffer output(m_context.GetAllocator(), count * sizeof(GeometryHit),
-                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
-    WriteStorageBuffer(*m_gpu, m_descriptorSet, 33u, output);
+    const std::unique_ptr<gpu::Buffer> output = CreateBufferOrThrow(
+        m_device, gpu::BufferDesc{count * sizeof(GeometryHit), gpu::BufferUsage::Storage,
+                                  gpu::MemoryClass::Readback, 0});
+    WriteStorageBuffer(m_device, m_descriptorSet, 33u, output->Ref());
     auto pc = m_pushConstants;
     pc.cameraAndSampling.sampleIndex = width;
     pc.cameraAndSampling.totalSamples = height;
     pc.cameraAndSampling.frameIndex = queryPixels ? 1u : 0u;
-    m_gpu->ExecuteImmediate([&](gpu::CommandList& list) {
+    m_device.ExecuteImmediate([&](gpu::CommandList& list) {
         list.SetKernel(*m_geometryKernel);
         list.SetBindGroup(*m_kernelLayout, 0, m_descriptorSet);
         list.PushConstants(*m_kernelLayout, pc);
         list.Dispatch((width + 7) / 8, (height + 7) / 8, 1);
-        list.Barrier(gpu::BufferBarrier{gpu::vulkan::Ref(output), gpu::Access::ComputeWrite,
+        list.Barrier(gpu::BufferBarrier{output->Ref(), gpu::Access::ComputeWrite,
                                         gpu::Access::HostRead});
     });
     Vector<GeometryHit> hits(count);
-    const auto* data = output.MapRead();
+    const auto* data = output->MapRead();
     if (!data)
         throw std::runtime_error("cannot read geometry capture buffer");
     std::memcpy(hits.data(), data, count * sizeof(GeometryHit));
-    output.Unmap();
+    output->Unmap();
     return hits;
 }
 
-void RayTracingPipeline::BindCameraDynamicCounterBuffer(const GpuBuffer& buffer) const {
-    WriteStorageBuffer(*m_gpu, m_cameraDescriptorSet, 30u, buffer);
+void RayTracingPipeline::BindCameraDynamicCounterBuffer(gpu::BufferRef buffer) const {
+    WriteStorageBuffer(m_device, m_cameraDescriptorSet, 30u, buffer);
 }
 
-void RayTracingPipeline::BindCameraMeasurementDepthImage(const GpuImage& image) const {
-    WriteStorageImage(*m_gpu, m_cameraDescriptorSet, 31u, image);
+void RayTracingPipeline::BindCameraMeasurementDepthImage(gpu::TextureRef image) const {
+    WriteStorageImage(m_device, m_cameraDescriptorSet, 31u, image);
 }
 
-void RayTracingPipeline::BindCameraDepthImage(const GpuImage& image) const {
-    WriteStorageImage(*m_gpu, m_cameraDescriptorSet, 22u, image);
+void RayTracingPipeline::BindCameraDepthImage(gpu::TextureRef image) const {
+    WriteStorageImage(m_device, m_cameraDescriptorSet, 22u, image);
 }
 
-void RayTracingPipeline::BindCameraObserverOutputImage(const GpuImage& image) const {
-    WriteStorageImage(*m_gpu, m_observerDescriptorSet, 0u, image);
+void RayTracingPipeline::BindCameraObserverOutputImage(gpu::TextureRef image) const {
+    WriteStorageImage(m_device, m_observerDescriptorSet, 0u, image);
 }
 
-void RayTracingPipeline::BindCameraObserverDepthImage(const GpuImage& image) const {
-    WriteStorageImage(*m_gpu, m_observerDescriptorSet, 22u, image);
+void RayTracingPipeline::BindCameraObserverDepthImage(gpu::TextureRef image) const {
+    WriteStorageImage(m_device, m_observerDescriptorSet, 22u, image);
 }
 
-void RayTracingPipeline::BindAccelerationStructure(VkAccelerationStructureKHR tlas) const {
-    const gpu::BindingWrite writes[] = {gpu::BindingWrite::Scene(1u, gpu::vulkan::Ref(tlas))};
+void RayTracingPipeline::BindAccelerationStructure(gpu::RtSceneRef tlas) const {
+    const gpu::BindingWrite writes[] = {gpu::BindingWrite::Scene(1u, tlas)};
     UpdateSharedDescriptorSets(writes);
 }
 
-void RayTracingPipeline::BindLUTBuffer(const GpuBuffer& buffer) const {
+void RayTracingPipeline::BindLUTBuffer(gpu::BufferRef buffer) const {
     const gpu::BindingWrite writes[] = {RtBufferWrite(2u, buffer)};
     UpdateSharedDescriptorSets(writes);
 }
 
-void RayTracingPipeline::BindGeometryBuffers(const GpuBuffer &vertexBuffer, const GpuBuffer &indexBuffer,
-                                             const GpuBuffer *uvBuffer) const {
+void RayTracingPipeline::BindGeometryBuffers(gpu::BufferRef vertexBuffer, gpu::BufferRef indexBuffer,
+                                             gpu::BufferRef uvBuffer) const {
     std::vector<gpu::BindingWrite> writes;
     writes.reserve(3);
 
@@ -754,8 +735,8 @@ void RayTracingPipeline::BindGeometryBuffers(const GpuBuffer &vertexBuffer, cons
     writes.push_back(RtBufferWrite(4u, indexBuffer));   // Binding 4: Index buffer
 
     // Binding 8: UV buffer (optional)
-    if (uvBuffer) {
-        writes.push_back(RtBufferWrite(8u, *uvBuffer));
+    if (uvBuffer.IsValid()) {
+        writes.push_back(RtBufferWrite(8u, uvBuffer));
         QL_LOG_DEBUG("  [DEBUG] Bound UV buffer to binding 8");
     } else {
         QL_LOG_DEBUG("  [DEBUG] No UV buffer provided, skipping binding 8");
@@ -764,38 +745,38 @@ void RayTracingPipeline::BindGeometryBuffers(const GpuBuffer &vertexBuffer, cons
     UpdateSharedDescriptorSets(writes);
 }
 
-void RayTracingPipeline::BindMaterialBuffer(const GpuBuffer& buffer) const {
+void RayTracingPipeline::BindMaterialBuffer(gpu::BufferRef buffer) const {
     const gpu::BindingWrite writes[] = {RtBufferWrite(5u, buffer)};
     UpdateSharedDescriptorSets(writes);
 }
 
-void RayTracingPipeline::BindTangentBuffer(const GpuBuffer& buffer) const {
+void RayTracingPipeline::BindTangentBuffer(gpu::BufferRef buffer) const {
     const gpu::BindingWrite writes[] = {RtBufferWrite(9u, buffer)};
     UpdateSharedDescriptorSets(writes);
     QL_LOG_DEBUG("  [DEBUG] Bound tangent buffer to binding 9");
 }
 
-void RayTracingPipeline::BindNormalBuffer(const GpuBuffer& buffer) const {
+void RayTracingPipeline::BindNormalBuffer(gpu::BufferRef buffer) const {
     const gpu::BindingWrite writes[] = {RtBufferWrite(16u, buffer)};
     UpdateSharedDescriptorSets(writes);
     QL_LOG_DEBUG("  [DEBUG] Bound normal buffer to binding 16");
 }
 
-void RayTracingPipeline::BindTextures(const std::vector<VkImageView>& imageViews,
-                                       const std::vector<VkSampler>& samplers) const {
-    if (imageViews.size() != samplers.size()) {
+void RayTracingPipeline::BindTextures(std::span<const gpu::TextureRef> textures,
+                                       std::span<const gpu::SamplerRef> samplers) const {
+    if (textures.size() != samplers.size()) {
         QL_LOG_ERROR("Texture binding failed: imageViews.size() ({}) != samplers.size() ({})",
-                     imageViews.size(), samplers.size());
+                     textures.size(), samplers.size());
         throw std::runtime_error("Mismatched texture and sampler array sizes");
     }
 
-    if (imageViews.empty()) {
+    if (textures.empty()) {
         m_pushConstants.textureCount = 0;
         QL_LOG_WARN("No textures to bind (TextureManager should provide at least a dummy texture)");
         return;
     }
 
-    u32 textureCount = static_cast<u32>(imageViews.size());
+    u32 textureCount = static_cast<u32>(textures.size());
 
     // Validate texture count against device capability limit
     if (textureCount > m_maxTextures) {
@@ -807,40 +788,34 @@ void RayTracingPipeline::BindTextures(const std::vector<VkImageView>& imageViews
     m_pushConstants.textureCount = textureCount;
     QL_LOG_INFO("Binding {} textures to descriptor set", textureCount);
 
-    // Sampled images in SHADER_READ_ONLY_OPTIMAL, samplers separate.
-    std::vector<gpu::TextureRef> textures;
-    textures.reserve(textureCount);
-    for (VkImageView view : imageViews) textures.push_back(gpu::vulkan::SampledRef(view));
-    std::vector<gpu::SamplerRef> samplerRefs;
-    samplerRefs.reserve(textureCount);
-    for (VkSampler sampler : samplers) samplerRefs.push_back(gpu::vulkan::Ref(sampler));
-
+    // Sampled images in the layout their refs name (shader-read-only for
+    // TextureManager's), samplers separate.
     // Binding 6: texture array, binding 7: sampler array, from element 0
     const gpu::BindingWrite writes[] = {gpu::BindingWrite::SampledTextures(6u, textures),
-                                        gpu::BindingWrite::Samplers(7u, samplerRefs)};
+                                        gpu::BindingWrite::Samplers(7u, samplers)};
     UpdateSharedDescriptorSets(writes);
 }
 
-void RayTracingPipeline::BindPrefilteredEnvMap(VkImageView imageView, VkSampler sampler) const {
+void RayTracingPipeline::BindPrefilteredEnvMap(gpu::TextureRef texture, gpu::SamplerRef sampler) const {
     QL_LOG_INFO("Binding prefiltered environment map to descriptor set (bindings 10, 21)");
 
     // Its own sampler rather than the one at binding 12: that one clamps maxLod to
     // 0, which pinned every environment lookup to mip 0 and left the prefiltered
     // chain unreachable.
     const gpu::BindingWrite writes[] = {
-        gpu::BindingWrite::SampledTexture(10u, gpu::vulkan::SampledRef(imageView)),  // prefilteredEnvMap (TextureCube)
-        gpu::BindingWrite::Sampler(21u, gpu::vulkan::Ref(sampler)),                  // envSampler
+        gpu::BindingWrite::SampledTexture(10u, texture),  // prefilteredEnvMap (TextureCube)
+        gpu::BindingWrite::Sampler(21u, sampler),         // envSampler
     };
     UpdateSharedDescriptorSets(writes);
 }
 
-void RayTracingPipeline::BindBRDFLut(VkImageView imageView, VkSampler sampler) const {
+void RayTracingPipeline::BindBRDFLut(gpu::TextureRef texture, gpu::SamplerRef sampler) const {
     QL_LOG_INFO("Binding BRDF integration LUT to descriptor set (bindings 11, 12)");
 
     // Binding 11: BRDF LUT texture; binding 12: IBL sampler (shared by prefiltered env and BRDF LUT)
     const gpu::BindingWrite writes[] = {
-        gpu::BindingWrite::SampledTexture(11u, gpu::vulkan::SampledRef(imageView)),
-        gpu::BindingWrite::Sampler(12u, gpu::vulkan::Ref(sampler)),
+        gpu::BindingWrite::SampledTexture(11u, texture),
+        gpu::BindingWrite::Sampler(12u, sampler),
     };
     UpdateSharedDescriptorSets(writes);
 }
@@ -849,15 +824,15 @@ void RayTracingPipeline::BindBRDFLut(VkImageView imageView, VkSampler sampler) c
 // Spectral Curves Buffer Binding
 // ============================================================================
 
-void RayTracingPipeline::BindSpectralCurvesBuffer(const GpuBuffer* buffer) const {
-    if (buffer == nullptr)
-        buffer = m_spectralFallback.get();
+void RayTracingPipeline::BindSpectralCurvesBuffer(gpu::BufferRef buffer) const {
+    if (!buffer.IsValid())
+        buffer = m_spectralFallback->Ref();
 
     QL_LOG_INFO("Binding spectral curves buffer to descriptor set (binding 13)");
-    QL_LOG_INFO("  Buffer size: {} bytes", buffer->GetSize());
-    QL_LOG_INFO("  Expected curves: ~{}", buffer->GetSize() / 272);  // 272 bytes per SpectralCurveGPU
+    QL_LOG_INFO("  Buffer size: {} bytes", buffer.size);
+    QL_LOG_INFO("  Expected curves: ~{}", buffer.size / 272);  // 272 bytes per SpectralCurveGPU
 
-    const gpu::BindingWrite writes[] = {RtBufferWrite(13u, *buffer)};
+    const gpu::BindingWrite writes[] = {RtBufferWrite(13u, buffer)};
     UpdateSharedDescriptorSets(writes);
 }
 
@@ -865,15 +840,15 @@ void RayTracingPipeline::BindSpectralCurvesBuffer(const GpuBuffer* buffer) const
 // Complex Refractive Index Buffer Binding
 // ============================================================================
 
-void RayTracingPipeline::BindComplexRefractiveIndexBuffer(const GpuBuffer* buffer) const {
-    if (buffer == nullptr)
-        buffer = m_criFallback.get();
+void RayTracingPipeline::BindComplexRefractiveIndexBuffer(gpu::BufferRef buffer) const {
+    if (!buffer.IsValid())
+        buffer = m_criFallback->Ref();
 
     QL_LOG_INFO("Binding complex refractive index buffer to descriptor set (binding 14)");
-    QL_LOG_INFO("  Buffer size: {} bytes", buffer->GetSize());
-    QL_LOG_INFO("  Expected entries: ~{}", buffer->GetSize() / 528);  // 528 bytes per ComplexRefractiveIndexGPU
+    QL_LOG_INFO("  Buffer size: {} bytes", buffer.size);
+    QL_LOG_INFO("  Expected entries: ~{}", buffer.size / 528);  // 528 bytes per ComplexRefractiveIndexGPU
 
-    const gpu::BindingWrite writes[] = {RtBufferWrite(14u, *buffer)};
+    const gpu::BindingWrite writes[] = {RtBufferWrite(14u, buffer)};
     UpdateSharedDescriptorSets(writes);
 }
 
@@ -881,17 +856,17 @@ void RayTracingPipeline::BindComplexRefractiveIndexBuffer(const GpuBuffer* buffe
 // Solar Spectral LUT Buffer Binding
 // ============================================================================
 
-void RayTracingPipeline::BindSolarSpectralLUT(const GpuBuffer* buffer) const {
-    if (buffer == nullptr) {
+void RayTracingPipeline::BindSolarSpectralLUT(gpu::BufferRef buffer) const {
+    if (!buffer.IsValid()) {
         QL_LOG_INFO("Solar spectral LUT buffer is null - will use LightingParams RGB fallback");
         // Note: Shader must check if SolarSpectralLUT is valid before use
         return;
     }
 
     QL_LOG_INFO("Binding solar spectral LUT buffer to descriptor set (binding 15)");
-    QL_LOG_INFO("  Buffer size: {} bytes (expected: 544)", buffer->GetSize());
+    QL_LOG_INFO("  Buffer size: {} bytes (expected: 544)", buffer.size);
 
-    const gpu::BindingWrite writes[] = {RtBufferWrite(15u, *buffer)};
+    const gpu::BindingWrite writes[] = {RtBufferWrite(15u, buffer)};
     UpdateSharedDescriptorSets(writes);
 }
 
@@ -899,75 +874,75 @@ void RayTracingPipeline::BindSolarSpectralLUT(const GpuBuffer* buffer) const {
 // Bind NN Atmosphere Buffers (Bindings 17 + 20)
 // ============================================================================
 
-void RayTracingPipeline::BindAtmosphereNN(const GpuBuffer* header,
-                                          const GpuBuffer* data) const {
+void RayTracingPipeline::BindAtmosphereNN(gpu::BufferRef header,
+                                          gpu::BufferRef data) const {
     // The viewport LUT may change while camera and observer traces already
     // recorded in a command buffer still use their own fixed descriptors.
-    WriteStorageBuffer(*m_gpu, m_descriptorSet, 17u,
-                       header ? *header : *m_cameraFallbackAtmosHeader);
-    WriteStorageBuffer(*m_gpu, m_descriptorSet, 20u,
-                       data ? *data : *m_cameraFallbackAtmosData);
+    WriteStorageBuffer(m_device, m_descriptorSet, 17u,
+                       header.IsValid() ? header : m_cameraFallbackAtmosHeader->Ref());
+    WriteStorageBuffer(m_device, m_descriptorSet, 20u,
+                       data.IsValid() ? data : m_cameraFallbackAtmosData->Ref());
 }
 
-void RayTracingPipeline::BindCameraAtmosphereNN(const GpuBuffer* header,
-                                                const GpuBuffer* data) const {
-    WriteStorageBuffer(*m_gpu, m_cameraDescriptorSet, 17u,
-                       header ? *header : *m_cameraFallbackAtmosHeader);
-    WriteStorageBuffer(*m_gpu, m_cameraDescriptorSet, 20u,
-                       data ? *data : *m_cameraFallbackAtmosData);
+void RayTracingPipeline::BindCameraAtmosphereNN(gpu::BufferRef header,
+                                                gpu::BufferRef data) const {
+    WriteStorageBuffer(m_device, m_cameraDescriptorSet, 17u,
+                       header.IsValid() ? header : m_cameraFallbackAtmosHeader->Ref());
+    WriteStorageBuffer(m_device, m_cameraDescriptorSet, 20u,
+                       data.IsValid() ? data : m_cameraFallbackAtmosData->Ref());
 }
 
-void RayTracingPipeline::BindCameraObserverAtmosphereNN(const GpuBuffer* header,
-                                                        const GpuBuffer* data) const {
-    WriteStorageBuffer(*m_gpu, m_observerDescriptorSet, 17u,
-                       header ? *header : *m_cameraFallbackAtmosHeader);
-    WriteStorageBuffer(*m_gpu, m_observerDescriptorSet, 20u,
-                       data ? *data : *m_cameraFallbackAtmosData);
+void RayTracingPipeline::BindCameraObserverAtmosphereNN(gpu::BufferRef header,
+                                                        gpu::BufferRef data) const {
+    WriteStorageBuffer(m_device, m_observerDescriptorSet, 17u,
+                       header.IsValid() ? header : m_cameraFallbackAtmosHeader->Ref());
+    WriteStorageBuffer(m_device, m_observerDescriptorSet, 20u,
+                       data.IsValid() ? data : m_cameraFallbackAtmosData->Ref());
 }
 
-void RayTracingPipeline::BindInstanceGeometryBuffer(const GpuBuffer& buffer) const {
+void RayTracingPipeline::BindInstanceGeometryBuffer(gpu::BufferRef buffer) const {
     QL_LOG_DEBUG("Binding instance geometry buffer to descriptor set (binding 18)");
 
     const gpu::BindingWrite writes[] = {RtBufferWrite(18u, buffer)};
     UpdateSharedDescriptorSets(writes);
 }
 
-void RayTracingPipeline::BindEmissiveTriangleBuffer(const GpuBuffer& buffer) const {
+void RayTracingPipeline::BindEmissiveTriangleBuffer(gpu::BufferRef buffer) const {
     QL_LOG_DEBUG("Binding emissive triangle buffer to descriptor set (binding 23)");
 
     const gpu::BindingWrite writes[] = {RtBufferWrite(23u, buffer)};
     UpdateSharedDescriptorSets(writes);
 }
 
-void RayTracingPipeline::BindThermalSunResponseBuffer(const GpuBuffer& buffer) const {
+void RayTracingPipeline::BindThermalSunResponseBuffer(gpu::BufferRef buffer) const {
     QL_LOG_DEBUG("Binding thermal sun response buffer to descriptor set (binding 26)");
 
     const gpu::BindingWrite writes[] = {RtBufferWrite(26u, buffer)};
     UpdateSharedDescriptorSets(writes);
 }
 
-void RayTracingPipeline::BindThermalTangentBuffer(const GpuBuffer& buffer) const {
+void RayTracingPipeline::BindThermalTangentBuffer(gpu::BufferRef buffer) const {
     QL_LOG_DEBUG("Binding thermal parameter tangent buffer to descriptor set (binding 27)");
 
     const gpu::BindingWrite writes[] = {RtBufferWrite(27u, buffer)};
     UpdateSharedDescriptorSets(writes);
 }
 
-void RayTracingPipeline::BindThermalTemperatureBuffer(const GpuBuffer& buffer) const {
+void RayTracingPipeline::BindThermalTemperatureBuffer(gpu::BufferRef buffer) const {
     QL_LOG_DEBUG("Binding thermal temperature buffer to descriptor set (binding 24)");
 
     const gpu::BindingWrite writes[] = {RtBufferWrite(24u, buffer)};
     UpdateSharedDescriptorSets(writes);
 }
 
-void RayTracingPipeline::BindCIE_CMF_LUT(const GpuBuffer& buffer) const {
+void RayTracingPipeline::BindCIE_CMF_LUT(gpu::BufferRef buffer) const {
     QL_LOG_DEBUG("Binding CIE CMF LUT buffer to descriptor set (binding 19)");
 
     const gpu::BindingWrite writes[] = {RtBufferWrite(19u, buffer)};
     UpdateSharedDescriptorSets(writes);
 }
 
-void RayTracingPipeline::BindRgbToSpectrumTable(const GpuBuffer& buffer) const {
+void RayTracingPipeline::BindRgbToSpectrumTable(gpu::BufferRef buffer) const {
     QL_LOG_DEBUG("Binding RGB->spectrum coefficient table to descriptor set (binding 25)");
 
     const gpu::BindingWrite writes[] = {RtBufferWrite(25u, buffer)};
@@ -983,10 +958,9 @@ void RayTracingPipeline::UpdateDescriptorSets() {
 // Rendering
 // ============================================================================
 
-void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u32 height, const bool finalDispatch) const {
-    // The trace goes through the kernel's own entry point and SBT regions, so a
-    // plain wrapped list records it.
-    auto list = gpu::vulkan::Wrap(cmd);
+void RayTracingPipeline::TraceRays(gpu::CommandList& list, const u32 width, const u32 height, const bool finalDispatch) const {
+    // The trace goes through the kernel's own entry point and SBT regions, so any
+    // list records it, a plain wrapped one included.
 
     // An armed record init -- header update plus zero fill -- lands in this
     // submission before the trace that reads it.

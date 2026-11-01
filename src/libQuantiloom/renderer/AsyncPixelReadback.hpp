@@ -12,7 +12,6 @@
 #include "gpu/Resources.hpp"
 #include "gpu/Sync.hpp"
 #include "renderer/PixelReading.hpp"
-#include <vulkan/vulkan.h>
 #include <array>
 #include <memory>
 
@@ -29,9 +28,10 @@ public:
     AsyncPixelReadback(const AsyncPixelReadback&) = delete;
     AsyncPixelReadback& operator=(const AsyncPixelReadback&) = delete;
 
-    /// Record and submit a one-pixel copy of `image` into a free slot. Returns
-    /// false only when every slot has an outstanding copy.
-    bool Submit(VkImage image, u32 renderX, u32 renderY, const PixelReading& reading);
+    /// Record and submit a one-pixel copy of `image` -- the accumulation, a
+    /// storage texture kept in the General layout, one mip, one layer -- into
+    /// a free slot. Returns false only when every slot has an outstanding copy.
+    bool Submit(gpu::TextureRef image, u32 renderX, u32 renderY, const PixelReading& reading);
 
     /// Return the newest completed copy that belongs to `generation` /
     /// `acquisition`, without waiting for any fence.

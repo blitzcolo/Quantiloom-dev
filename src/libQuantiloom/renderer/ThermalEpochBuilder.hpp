@@ -41,7 +41,10 @@
 #include "thermal/ThermalTypes.hpp"
 
 #include <functional>
-#include <vulkan/vulkan.h>
+
+namespace quantiloom::gpu {
+class Device;
+}
 
 namespace quantiloom::rendercore {
 
@@ -58,9 +61,9 @@ public:
     virtual ~EpochGeometryHost() = default;
 
     /// Put the scene at @p t_s and return the acceleration structure to trace
-    /// against. VK_NULL_HANDLE means the host could not, and the builder falls
+    /// against. An empty ref means the host could not, and the builder falls
     /// back to an open-sky exchange for that epoch.
-    virtual VkAccelerationStructureKHR ApplyEpoch(f64 t_s) = 0;
+    virtual gpu::RtSceneRef ApplyEpoch(f64 t_s) = 0;
 
     /// Put the scene back where the host had it.
     virtual void Restore() = 0;
@@ -93,7 +96,7 @@ struct EpochBuildInput {
     /// Called just before each epoch is measured, with its index and how many
     /// there are. The build is synchronous and on the caller's thread, so
     /// this is how a host says "building epoch 3 of 24" while it waits. It
-    /// must not touch the scene or the context it was called from.
+    /// must not touch the scene or the device it was called from.
     std::function<void(u32 epoch, u32 count)> onEpoch;
 };
 
@@ -119,7 +122,7 @@ Vector<f32> ComputeMaterialCoverage(const Scene& scene);
  *                       one epoch's answer is every epoch's.
  */
 thermal::ThermalGeometrySchedule BuildThermalGeometrySchedule(
-    VulkanContext& context, EpochGeometryHost& host, const Scene& scene,
+    gpu::Device& device, EpochGeometryHost& host, const Scene& scene,
     const EpochBuildInput& input, thermal::ThermalMesh* epoch0MeshOut = nullptr);
 
 }  // namespace quantiloom::rendercore

@@ -14,7 +14,8 @@
 
 #include "support/VulkanTestDevice.hpp"
 
-#include "renderer/CommandHelper.hpp"
+#include "gpu/Device.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/DeferredBufferUploads.hpp"
 #include "renderer/GpuBuffer.hpp"
 #include "renderer/VulkanContext.hpp"
@@ -62,10 +63,10 @@ TEST_F(VulkanDeviceTest, DeferredUploadWritesRecordedBytes) {
     std::iota(payload.begin(), payload.end(), u8{7});
 
     DeferredBufferUploads uploads;
-    uploads.Enqueue(target, 0, payload.data(), payload.size());
+    uploads.Enqueue(gpu::vulkan::Ref(target), 0, payload.data(), payload.size());
     EXPECT_FALSE(uploads.Empty());
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        uploads.Record(cmd);
+    GpuDevice().ExecuteImmediate([&](gpu::CommandList& list) {
+        uploads.Record(list);
     });
     EXPECT_TRUE(uploads.Empty());
     EXPECT_EQ(ReadBytes(target, 0, 64), payload);
@@ -79,10 +80,10 @@ TEST_F(VulkanDeviceTest, DeferredUploadCoalescesSameRange) {
     const std::vector<u8> second(16, u8{0x5C});
 
     DeferredBufferUploads uploads;
-    uploads.Enqueue(target, 0, first.data(), first.size());
-    uploads.Enqueue(target, 0, second.data(), second.size());
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        uploads.Record(cmd);
+    uploads.Enqueue(gpu::vulkan::Ref(target), 0, first.data(), first.size());
+    uploads.Enqueue(gpu::vulkan::Ref(target), 0, second.data(), second.size());
+    GpuDevice().ExecuteImmediate([&](gpu::CommandList& list) {
+        uploads.Record(list);
     });
     EXPECT_EQ(ReadBytes(target, 0, 16), second);
 }
@@ -96,9 +97,9 @@ TEST_F(VulkanDeviceTest, DeferredUploadHonoursOffset) {
     const std::vector<u8> payload{1, 2, 3, 4};
 
     DeferredBufferUploads uploads;
-    uploads.Enqueue(target, 8, payload.data(), payload.size());
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        uploads.Record(cmd);
+    uploads.Enqueue(gpu::vulkan::Ref(target), 8, payload.data(), payload.size());
+    GpuDevice().ExecuteImmediate([&](gpu::CommandList& list) {
+        uploads.Record(list);
     });
 
     const std::vector<u8> contents = ReadBytes(target, 0, 32);
@@ -120,9 +121,9 @@ TEST_F(VulkanDeviceTest, DeferredUploadChunksPast64KiB) {
     }
 
     DeferredBufferUploads uploads;
-    uploads.Enqueue(target, 0, payload.data(), payload.size());
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        uploads.Record(cmd);
+    uploads.Enqueue(gpu::vulkan::Ref(target), 0, payload.data(), payload.size());
+    GpuDevice().ExecuteImmediate([&](gpu::CommandList& list) {
+        uploads.Record(list);
     });
     EXPECT_EQ(ReadBytes(target, 0, bytes), payload);
 }
@@ -137,10 +138,10 @@ TEST_F(VulkanDeviceTest, DeferredUploadDistinctRangesAllLand) {
     const std::vector<u8> wide(64, u8{0x22});
 
     DeferredBufferUploads uploads;
-    uploads.Enqueue(target, 0, narrow.data(), narrow.size());
-    uploads.Enqueue(target, 0, wide.data(), wide.size());
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        uploads.Record(cmd);
+    uploads.Enqueue(gpu::vulkan::Ref(target), 0, narrow.data(), narrow.size());
+    uploads.Enqueue(gpu::vulkan::Ref(target), 0, wide.data(), wide.size());
+    GpuDevice().ExecuteImmediate([&](gpu::CommandList& list) {
+        uploads.Record(list);
     });
     EXPECT_EQ(ReadBytes(target, 0, 64), wide);
 }
