@@ -12,9 +12,8 @@
 #include <gtest/gtest.h>
 
 #include "renderer/ExternalRenderContext.hpp"
-#include "gpu/vulkan/VulkanContext.hpp"
 #include "support/GpuInteropTestUtils.hpp"
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -28,16 +27,16 @@ namespace {
 
 constexpr u32 kSize = 64;
 
-class TlasRefitTest : public quantiloom::testing::VulkanDeviceTest {
+class TlasRefitTest : public quantiloom::testing::GpuDeviceTest {
 protected:
     void SetUp() override {
-        VulkanDeviceTest::SetUp();
+        GpuDeviceTest::SetUp();
         if (::testing::Test::IsSkipped()) return;
 
         testDir = std::filesystem::temp_directory_path() / "quantiloom_tlas_refit";
         std::filesystem::create_directories(testDir);
 
-        auto* shared = quantiloom::testing::SharedVulkanDevice();
+        auto* shared = quantiloom::testing::SharedGpuDevice(Backend());
         ASSERT_NE(shared, nullptr);
 
         ExternalRenderContext::InitParams params{};
@@ -75,12 +74,13 @@ protected:
         if (!testDir.empty() && std::filesystem::exists(testDir)) {
             std::filesystem::remove_all(testDir);
         }
-        VulkanDeviceTest::TearDown();
+        GpuDeviceTest::TearDown();
     }
 
     std::filesystem::path testDir;
     std::unique_ptr<ExternalRenderContext> context;
 };
+QL_INSTANTIATE_GPU_SUITE(TlasRefitTest);
 
 bool CornellBoxAvailable() {
     const std::filesystem::path root(QUANTILOOM_SOURCE_ROOT);
@@ -89,7 +89,7 @@ bool CornellBoxAvailable() {
 
 }  // namespace
 
-TEST_F(TlasRefitTest, RefitMovesGeometryAndMovesItBack) {
+TEST_P(TlasRefitTest, RefitMovesGeometryAndMovesItBack) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     // Baseline: the center pixel sees the box

@@ -11,7 +11,7 @@
 
 #include <gtest/gtest.h>
 
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
 
 #include "gpu/GpuTypes.hpp"
 #include "renderer/RenderCore.hpp"
@@ -19,7 +19,7 @@
 #include <filesystem>
 
 using namespace quantiloom;
-using quantiloom::testing::VulkanDeviceTest;
+using quantiloom::testing::GpuDeviceTest;
 
 namespace {
 
@@ -39,9 +39,9 @@ std::string TempCachePath(const char* name) {
 
 }  // namespace
 
-TEST_F(VulkanDeviceTest, BrdfLutUploadsAndOwnsItsSampler) {
+TEST_P(GpuDeviceTest, BrdfLutUploadsAndOwnsItsSampler) {
     const auto cache = TempCachePath("quantiloom_brdf_lut_upload.bin");
-    auto lut = rendercore::BrdfLut::Create(GpuDevice(), cache, TinyConfig());
+    auto lut = rendercore::BrdfLut::Create(Gpu(), cache, TinyConfig());
 
     ASSERT_TRUE(lut.IsValid());
     EXPECT_TRUE(lut.View().IsValid());
@@ -51,9 +51,9 @@ TEST_F(VulkanDeviceTest, BrdfLutUploadsAndOwnsItsSampler) {
 // The image used to be created at a hardcoded 512 while the generator read the
 // resolution from the config, so a non-default resolution would have uploaded into a
 // mismatched image. Both call sites had that shape.
-TEST_F(VulkanDeviceTest, BrdfLutSizesTheImageFromTheConfig) {
+TEST_P(GpuDeviceTest, BrdfLutSizesTheImageFromTheConfig) {
     const auto cache = TempCachePath("quantiloom_brdf_lut_resolution.bin");
-    auto lut = rendercore::BrdfLut::Create(GpuDevice(), cache, TinyConfig());
+    auto lut = rendercore::BrdfLut::Create(Gpu(), cache, TinyConfig());
 
     ASSERT_TRUE(lut.IsValid());
     EXPECT_EQ(lut.Resolution(), 16u);
@@ -61,25 +61,25 @@ TEST_F(VulkanDeviceTest, BrdfLutSizesTheImageFromTheConfig) {
 
 // Generation costs seconds at the shipped resolution, so the cache is what keeps
 // start-up bearable. Create() must write one when it finds none, and read it back.
-TEST_F(VulkanDeviceTest, BrdfLutWritesAndReusesItsCache) {
+TEST_P(GpuDeviceTest, BrdfLutWritesAndReusesItsCache) {
     const auto cache = TempCachePath("quantiloom_brdf_lut_cache.bin");
     ASSERT_FALSE(std::filesystem::exists(cache));
 
-    { auto first = rendercore::BrdfLut::Create(GpuDevice(), cache, TinyConfig());
+    { auto first = rendercore::BrdfLut::Create(Gpu(), cache, TinyConfig());
       ASSERT_TRUE(first.IsValid()); }
 
     ASSERT_TRUE(std::filesystem::exists(cache));
     EXPECT_TRUE(BRDFLutGenerator::LoadFromBinary(cache, nullptr).has_value());
 
-    auto second = rendercore::BrdfLut::Create(GpuDevice(), cache, TinyConfig());
+    auto second = rendercore::BrdfLut::Create(Gpu(), cache, TinyConfig());
     EXPECT_TRUE(second.IsValid());
 }
 
 // Owning the sampler is the point of the type: both call sites tracked it by hand,
 // and one of them ignored the create result. Moving must not double-destroy it.
-TEST_F(VulkanDeviceTest, BrdfLutSurvivesAMove) {
+TEST_P(GpuDeviceTest, BrdfLutSurvivesAMove) {
     const auto cache = TempCachePath("quantiloom_brdf_lut_move.bin");
-    auto lut = rendercore::BrdfLut::Create(GpuDevice(), cache, TinyConfig());
+    auto lut = rendercore::BrdfLut::Create(Gpu(), cache, TinyConfig());
     ASSERT_TRUE(lut.IsValid());
 
     const gpu::SamplerRef sampler = lut.Sampler();

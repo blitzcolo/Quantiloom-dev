@@ -11,9 +11,8 @@
 #include <gtest/gtest.h>
 
 #include "renderer/ExternalRenderContext.hpp"
-#include "gpu/vulkan/VulkanContext.hpp"
 #include "support/GpuInteropTestUtils.hpp"
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -22,16 +21,16 @@ using namespace quantiloom;
 
 namespace {
 
-class ApplyConfigTest : public quantiloom::testing::VulkanDeviceTest {
+class ApplyConfigTest : public quantiloom::testing::GpuDeviceTest {
 protected:
     void SetUp() override {
-        VulkanDeviceTest::SetUp();
+        GpuDeviceTest::SetUp();
         if (::testing::Test::IsSkipped()) return;
 
         testDir = std::filesystem::temp_directory_path() / "quantiloom_apply_config";
         std::filesystem::create_directories(testDir);
 
-        auto* shared = quantiloom::testing::SharedVulkanDevice();
+        auto* shared = quantiloom::testing::SharedGpuDevice(Backend());
         ASSERT_NE(shared, nullptr);
 
         ExternalRenderContext::InitParams params{};
@@ -50,7 +49,7 @@ protected:
         if (!testDir.empty() && std::filesystem::exists(testDir)) {
             std::filesystem::remove_all(testDir);
         }
-        VulkanDeviceTest::TearDown();
+        GpuDeviceTest::TearDown();
     }
 
     /// A config naming a scene that is committed in-repo, so this needs no
@@ -84,6 +83,7 @@ protected:
     std::filesystem::path testDir;
     std::unique_ptr<ExternalRenderContext> context;
 };
+QL_INSTANTIATE_GPU_SUITE(ApplyConfigTest);
 
 /// The scene the fixture names has to exist for any of this to mean anything.
 bool CornellBoxAvailable() {
@@ -93,7 +93,7 @@ bool CornellBoxAvailable() {
 
 }  // namespace
 
-TEST_F(ApplyConfigTest, AppliesSpectralStateAndReportsWhatItLoaded) {
+TEST_P(ApplyConfigTest, AppliesSpectralStateAndReportsWhatItLoaded) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     auto config = WriteConfig("mode = \"lwir_fused\"\n");
@@ -112,7 +112,7 @@ TEST_F(ApplyConfigTest, AppliesSpectralStateAndReportsWhatItLoaded) {
     EXPECT_FLOAT_EQ(context->GetWavelength(), 10000.0f);  // band centre, not 550
 }
 
-TEST_F(ApplyConfigTest, ShadowRaysReachTheLightingParams) {
+TEST_P(ApplyConfigTest, ShadowRaysReachTheLightingParams) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     auto config = WriteConfig("");
@@ -123,7 +123,7 @@ TEST_F(ApplyConfigTest, ShadowRaysReachTheLightingParams) {
     EXPECT_EQ(context->GetLightingParams().enableShadowRays, 1u);
 }
 
-TEST_F(ApplyConfigTest, ResolutionIsEchoedRatherThanApplied) {
+TEST_P(ApplyConfigTest, ResolutionIsEchoedRatherThanApplied) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     auto config = WriteConfig("");
@@ -138,7 +138,7 @@ TEST_F(ApplyConfigTest, ResolutionIsEchoedRatherThanApplied) {
     EXPECT_FLOAT_EQ(context->GetCamera().GetAspectRatio(), 1.0f);
 }
 
-TEST_F(ApplyConfigTest, TheConfigCameraOverridesTheSceneFilesOwn) {
+TEST_P(ApplyConfigTest, TheConfigCameraOverridesTheSceneFilesOwn) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     auto config = WriteConfig("");
@@ -150,7 +150,7 @@ TEST_F(ApplyConfigTest, TheConfigCameraOverridesTheSceneFilesOwn) {
     EXPECT_FLOAT_EQ(context->GetCamera().GetLookAt().y, 1.0f);
 }
 
-TEST_F(ApplyConfigTest, MultispectralWarnsAndPreviewsInRgb) {
+TEST_P(ApplyConfigTest, MultispectralWarnsAndPreviewsInRgb) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     auto config = WriteConfig("mode = \"multispectral\"\n");
@@ -174,7 +174,7 @@ TEST_F(ApplyConfigTest, MultispectralWarnsAndPreviewsInRgb) {
 // Environment map
 // ============================================================================
 
-TEST_F(ApplyConfigTest, AMissingEnvironmentMapDisablesIblRatherThanFakingASky) {
+TEST_P(ApplyConfigTest, AMissingEnvironmentMapDisablesIblRatherThanFakingASky) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     auto config = WriteConfig("", "", "environment_map = \"no_such_map.exr\"\n");
@@ -201,7 +201,7 @@ TEST_F(ApplyConfigTest, AMissingEnvironmentMapDisablesIblRatherThanFakingASky) {
     EXPECT_FALSE(context->HasEnvironmentMap());
 }
 
-TEST_F(ApplyConfigTest, AConfigWithoutAMapDoesNotWarnAboutOne) {
+TEST_P(ApplyConfigTest, AConfigWithoutAMapDoesNotWarnAboutOne) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     // renderer.environment_map_enabled defaults to true, and this used to mean
@@ -217,7 +217,7 @@ TEST_F(ApplyConfigTest, AConfigWithoutAMapDoesNotWarnAboutOne) {
     EXPECT_FALSE(context->HasEnvironmentMap());
 }
 
-TEST_F(ApplyConfigTest, ApplyingTwiceIsHowADocumentIsReplayed) {
+TEST_P(ApplyConfigTest, ApplyingTwiceIsHowADocumentIsReplayed) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     auto config = WriteConfig("mode = \"vis_fused\"\n", "solar_lut = \"equal_energy\"\n");
@@ -236,7 +236,7 @@ TEST_F(ApplyConfigTest, ApplyingTwiceIsHowADocumentIsReplayed) {
 // Illuminant
 // ============================================================================
 
-TEST_F(ApplyConfigTest, AConfigNamingNoIlluminantDoesNotInheritThePreviousOne) {
+TEST_P(ApplyConfigTest, AConfigNamingNoIlluminantDoesNotInheritThePreviousOne) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     // A host keeps one context across documents. The first names a spectrum...
@@ -253,7 +253,7 @@ TEST_F(ApplyConfigTest, AConfigNamingNoIlluminantDoesNotInheritThePreviousOne) {
     EXPECT_FALSE(context->HasSolarSpectralLUT());
 }
 
-TEST_F(ApplyConfigTest, ClearingTheIlluminantUnbindsOneAHostSet) {
+TEST_P(ApplyConfigTest, ClearingTheIlluminantUnbindsOneAHostSet) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     ASSERT_TRUE(context->ApplyConfig(WriteConfig("mode = \"vis_fused\"\n")).ok());

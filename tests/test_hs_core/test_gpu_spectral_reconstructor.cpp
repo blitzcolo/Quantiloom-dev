@@ -17,7 +17,7 @@
 #include "hs_core/SpectralReconstructor.hpp"
 #include "core/SpectralCube.hpp"
 #include <cmath>
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
 // The push constants the shader and GpuSpectralReconstructor.cpp share.
 #include "../../src/shaders/ql_shared_compute.hlsli"
 
@@ -417,7 +417,8 @@ TEST(GpuReconstructorEdgeCaseTest, SmallNonPowerOfTwo) {
 
 namespace {
 
-class GpuSpectralReconstructorGpuTest : public quantiloom::testing::VulkanDeviceTest {};
+class GpuSpectralReconstructorGpuTest : public quantiloom::testing::GpuDeviceTest {};
+QL_INSTANTIATE_GPU_SUITE(GpuSpectralReconstructorGpuTest);
 
 SpectralCube MakeSparseCube(u32 width, u32 height, const std::vector<f32>& wavelengths) {
     SpectralCube cube(width, height, static_cast<u32>(wavelengths.size()), wavelengths.front(), wavelengths.back());
@@ -443,8 +444,8 @@ std::vector<f32> Linspace(f32 first, f32 last, u32 count) {
 
 }  // namespace
 
-TEST_F(GpuSpectralReconstructorGpuTest, RenderedBandsAreCopiedExactly) {
-    GpuSpectralReconstructor reconstructor(GpuDevice());
+TEST_P(GpuSpectralReconstructorGpuTest, RenderedBandsAreCopiedExactly) {
+    GpuSpectralReconstructor reconstructor(Gpu());
     if (reconstructor.Initialize() != GpuReconstructorStatus::Success) {
         GTEST_SKIP() << "spectral_reconstruct shader unavailable";
     }
@@ -466,8 +467,8 @@ TEST_F(GpuSpectralReconstructorGpuTest, RenderedBandsAreCopiedExactly) {
     }
 }
 
-TEST_F(GpuSpectralReconstructorGpuTest, EveryMethodReproducesAConstantAlongLambda) {
-    GpuSpectralReconstructor reconstructor(GpuDevice());
+TEST_P(GpuSpectralReconstructorGpuTest, EveryMethodReproducesAConstantAlongLambda) {
+    GpuSpectralReconstructor reconstructor(Gpu());
     if (reconstructor.Initialize() != GpuReconstructorStatus::Success) {
         GTEST_SKIP() << "spectral_reconstruct shader unavailable";
     }
@@ -497,8 +498,8 @@ TEST_F(GpuSpectralReconstructorGpuTest, EveryMethodReproducesAConstantAlongLambd
     }
 }
 
-TEST_F(GpuSpectralReconstructorGpuTest, EveryMethodTracksASmoothSpectrum) {
-    GpuSpectralReconstructor reconstructor(GpuDevice());
+TEST_P(GpuSpectralReconstructorGpuTest, EveryMethodTracksASmoothSpectrum) {
+    GpuSpectralReconstructor reconstructor(Gpu());
     if (reconstructor.Initialize() != GpuReconstructorStatus::Success) {
         GTEST_SKIP() << "spectral_reconstruct shader unavailable";
     }

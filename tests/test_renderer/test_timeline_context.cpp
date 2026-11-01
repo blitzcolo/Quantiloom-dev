@@ -13,9 +13,8 @@
 #include <gtest/gtest.h>
 
 #include "renderer/ExternalRenderContext.hpp"
-#include "gpu/vulkan/VulkanContext.hpp"
 #include "support/GpuInteropTestUtils.hpp"
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -37,10 +36,10 @@ std::filesystem::path CubePath() {
 /// Two instances of the same file: one still, one driven along +X at 3 m/s.
 /// The trajectory is a linear engine because it is the one form with an
 /// answer that can be written down exactly.
-class TimelineContextTest : public quantiloom::testing::VulkanDeviceTest {
+class TimelineContextTest : public quantiloom::testing::GpuDeviceTest {
 protected:
     void SetUp() override {
-        VulkanDeviceTest::SetUp();
+        GpuDeviceTest::SetUp();
         if (::testing::Test::IsSkipped()) return;
         if (!std::filesystem::exists(CubePath())) {
             GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
@@ -49,7 +48,7 @@ protected:
         testDir = std::filesystem::temp_directory_path() / "quantiloom_timeline_context";
         std::filesystem::create_directories(testDir);
 
-        auto* shared = quantiloom::testing::SharedVulkanDevice();
+        auto* shared = quantiloom::testing::SharedGpuDevice(Backend());
         ASSERT_NE(shared, nullptr);
 
         ExternalRenderContext::InitParams params{};
@@ -93,7 +92,7 @@ protected:
         if (!testDir.empty() && std::filesystem::exists(testDir)) {
             std::filesystem::remove_all(testDir);
         }
-        VulkanDeviceTest::TearDown();
+        GpuDeviceTest::TearDown();
     }
 
     /// The first node the "mover" model brought. Node names carry the model
@@ -118,16 +117,17 @@ protected:
     std::unique_ptr<ExternalRenderContext> context;
     ConfigApplyReport applyReport;
 };
+QL_INSTANTIATE_GPU_SUITE(TimelineContextTest);
 
 }  // namespace
 
-TEST_F(TimelineContextTest, TheReportSaysWhatTheConfigBrought) {
+TEST_P(TimelineContextTest, TheReportSaysWhatTheConfigBrought) {
     EXPECT_TRUE(applyReport.timelinePresent);
     EXPECT_EQ(applyReport.modelsLoaded, 2u);
     EXPECT_EQ(applyReport.motionTracks, 1u);
 }
 
-TEST_F(TimelineContextTest, BothModelsAreInTheSameScene) {
+TEST_P(TimelineContextTest, BothModelsAreInTheSameScene) {
     const Scene* scene = context->GetScene();
     ASSERT_NE(scene, nullptr);
 
@@ -143,7 +143,7 @@ TEST_F(TimelineContextTest, BothModelsAreInTheSameScene) {
     EXPECT_TRUE(hasMover);
 }
 
-TEST_F(TimelineContextTest, TheInfoDescribesTheClockTheConfigDeclared) {
+TEST_P(TimelineContextTest, TheInfoDescribesTheClockTheConfigDeclared) {
     const TimelineInfo info = context->GetTimelineInfo();
     EXPECT_TRUE(info.present);
     EXPECT_DOUBLE_EQ(info.start_s, 0.0);
@@ -154,7 +154,7 @@ TEST_F(TimelineContextTest, TheInfoDescribesTheClockTheConfigDeclared) {
     EXPECT_EQ(info.TickCount(), 81);  // 0 s to 4 s inclusive, twenty a second
 }
 
-TEST_F(TimelineContextTest, ScrubbingMovesOnlyTheAnimatedModel) {
+TEST_P(TimelineContextTest, ScrubbingMovesOnlyTheAnimatedModel) {
     const Scene* scene = context->GetScene();
     const u32 mover = MoverNode();
     const u32 still = StillNode();
@@ -169,7 +169,7 @@ TEST_F(TimelineContextTest, ScrubbingMovesOnlyTheAnimatedModel) {
     EXPECT_EQ(scene->nodes[still].transform, stillAtZero);
 }
 
-TEST_F(TimelineContextTest, ScrubbingBackReturnsToTheSamePose) {
+TEST_P(TimelineContextTest, ScrubbingBackReturnsToTheSamePose) {
     const Scene* scene = context->GetScene();
     const u32 mover = MoverNode();
     const glm::mat4 atZero = scene->nodes[mover].transform;
@@ -179,7 +179,7 @@ TEST_F(TimelineContextTest, ScrubbingBackReturnsToTheSamePose) {
     EXPECT_EQ(scene->nodes[mover].transform, atZero);
 }
 
-TEST_F(TimelineContextTest, ScrubbingToTheSameInstantIsIdempotent) {
+TEST_P(TimelineContextTest, ScrubbingToTheSameInstantIsIdempotent) {
     const Scene* scene = context->GetScene();
     const u32 mover = MoverNode();
 
@@ -189,7 +189,7 @@ TEST_F(TimelineContextTest, ScrubbingToTheSameInstantIsIdempotent) {
     EXPECT_EQ(scene->nodes[mover].transform, once);
 }
 
-TEST_F(TimelineContextTest, AGizmoEditAtOneInstantSurvivesEveryOther) {
+TEST_P(TimelineContextTest, AGizmoEditAtOneInstantSurvivesEveryOther) {
     const Scene* scene = context->GetScene();
     const u32 mover = MoverNode();
 
@@ -212,7 +212,7 @@ TEST_F(TimelineContextTest, AGizmoEditAtOneInstantSurvivesEveryOther) {
     EXPECT_FLOAT_EQ(scene->nodes[mover].transform[3][0], atTwo[3][0]);
 }
 
-TEST_F(TimelineContextTest, TheRestPoseIsWhatADocumentWouldRecord) {
+TEST_P(TimelineContextTest, TheRestPoseIsWhatADocumentWouldRecord) {
     const Scene* scene = context->GetScene();
     const u32 mover = MoverNode();
     const u32 still = StillNode();

@@ -28,7 +28,7 @@
 #
 # Running:
 #   ./build/tests/Release/libquantiloom_tests.exe --gtest_brief=1
-#   ./build/tests/Release/libquantiloom_tests.exe --gtest_filter='MaterialTest.*'
+#   ./build/tests/Release/libquantiloom_tests.exe --gtest_filter='*MaterialTest.*'
 #
 #   The binary reruns in ~3 s without rebuilding. Use --gtest_filter to select
 #   cases: add_test below registers the whole suite as ONE aggregate test
@@ -305,8 +305,9 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_gpu_clahe.cpp
 )
 
-# Shared test infrastructure (headless Vulkan device, created on first use)
+# Shared test infrastructure (one headless device per backend, created on first use)
 set(TEST_SUPPORT_SOURCES
+    support/GpuTestDevice.cpp
     support/VulkanTestDevice.cpp
 )
 
@@ -686,35 +687,35 @@ add_custom_target(test_core
 
 # Run only scene tests
 add_custom_target(test_scene
-    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=MaterialTest.*:CameraTest.*
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=*MaterialTest.*:*CameraTest.*
     DEPENDS libquantiloom_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
 # Run only IO tests
 add_custom_target(test_io
-    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=ImageIOTest.*
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=*ImageIOTest.*
     DEPENDS libquantiloom_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
 # Run only renderer tests (non-Vulkan)
 add_custom_target(test_renderer
-    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=BRDFLutGeneratorTest.*:LightingParamsTest.*:AccelerationStructureTest.*:ComputeMigrationAB.*:GpuClaheTest.*:GpuMappingTest.*:GpuBindingLayoutTest.*:GpuShaderLibraryTest.*:GpuVulkanTest.*
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=*BRDFLutGeneratorTest.*:*LightingParamsTest.*:*AccelerationStructureTest.*:*ComputeMigrationAB.*:*GpuClaheTest.*:*GpuMappingTest.*:*GpuBindingLayoutTest.*:*GpuShaderLibraryTest.*:*GpuBackendTest.*
     DEPENDS libquantiloom_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
 # Run only postprocess tests (sensor simulation, fusion)
 add_custom_target(test_postprocess
-    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=CameraPhysicsTest.*:CpuCameraPipelineTest.*:CameraConfigIOTest.*:CameraGpuTest.*:CameraResponseGpuTest.*:GenericSensorTest.*:MultibandFusionTest.*:GPUSensorMathTest.*:SensorParamsTest.*:SensorConfigTest.*:SensorChainOrderTest.*
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=*CameraPhysicsTest.*:*CpuCameraPipelineTest.*:*CameraConfigIOTest.*:*CameraGpuTest.*:*CameraResponseGpuTest.*:*GenericSensorTest.*:*MultibandFusionTest.*:*GPUSensorMathTest.*:*SensorParamsTest.*:*SensorConfigTest.*:*SensorChainOrderTest.*
     DEPENDS libquantiloom_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
 # Run only hyperspectral core tests
 add_custom_target(test_hs_core
-    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=HyperspectralConfigTest.*:SpectralCubeIOTest.*:SpectralFeatureTypeTest.*:SpectralFeatureTest.*:SpectralAnalysisParamsTest.*:SpectralAnalysisResultTest.*:SpectralAnalyzerTest.*:AdaptiveGridInfoTest.*:ReconstructionMappingTest.*:AdaptiveGridGeneratorTest.*:InterpolationMethodTest.*:SpectralReconstructorTest.*:BatchRenderStatusTest.*:BatchRenderProgressTest.*:BatchRenderParamsTest.*:ValidateWavelengthListTest.*:SortWavelengthsTest.*:EstimateBatchTimeTest.*:BatchRendererWorkflowTest.*:BatchRendererEdgeCaseTest.*:GpuReconstructorStatusTest.*:GpuReconstructorConfigTest.*:GpuSpectralReconstructorGpuTest.*:EstimateReconstructionMemoryTest.*:HyperspectralConfigGpuTest.*:CatmullRomReferenceTest.*:LinearInterpReferenceTest.*:WavelengthGridTest.*:SpectralCubeLayoutTest.*:ComputeShaderCompatTest.*:GpuReconstructorEdgeCaseTest.*
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=*HyperspectralConfigTest.*:*SpectralCubeIOTest.*:*SpectralFeatureTypeTest.*:*SpectralFeatureTest.*:*SpectralAnalysisParamsTest.*:*SpectralAnalysisResultTest.*:*SpectralAnalyzerTest.*:*AdaptiveGridInfoTest.*:*ReconstructionMappingTest.*:*AdaptiveGridGeneratorTest.*:*InterpolationMethodTest.*:*SpectralReconstructorTest.*:*BatchRenderStatusTest.*:*BatchRenderProgressTest.*:*BatchRenderParamsTest.*:*ValidateWavelengthListTest.*:*SortWavelengthsTest.*:*EstimateBatchTimeTest.*:*BatchRendererWorkflowTest.*:*BatchRendererEdgeCaseTest.*:*GpuReconstructorStatusTest.*:*GpuReconstructorConfigTest.*:*GpuSpectralReconstructorGpuTest.*:*EstimateReconstructionMemoryTest.*:*HyperspectralConfigGpuTest.*:*CatmullRomReferenceTest.*:*LinearInterpReferenceTest.*:*WavelengthGridTest.*:*SpectralCubeLayoutTest.*:*ComputeShaderCompatTest.*:*GpuReconstructorEdgeCaseTest.*
     DEPENDS libquantiloom_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )

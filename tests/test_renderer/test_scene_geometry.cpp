@@ -10,7 +10,7 @@
 
 #include <gtest/gtest.h>
 
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
 
 #include "gpu/Resources.hpp"
 #include "renderer/RenderCore.hpp"
@@ -19,7 +19,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 using namespace quantiloom;
-using quantiloom::testing::VulkanDeviceTest;
+using quantiloom::testing::GpuDeviceTest;
 
 namespace {
 
@@ -57,13 +57,13 @@ SceneNode MakeNode(u32 meshIndex, const glm::mat4& transform = glm::mat4(1.0f)) 
 
 }  // namespace
 
-TEST_F(VulkanDeviceTest, SceneGeometryConcatenatesPrimitivesInOrder) {
+TEST_P(GpuDeviceTest, SceneGeometryConcatenatesPrimitivesInOrder) {
     Scene scene;
     scene.meshes.push_back(MakeMesh({MakeTriangle(0, true, true, true),
                                      MakeTriangle(1, true, true, true)}));
     scene.nodes.push_back(MakeNode(0));
 
-    auto geometry = rendercore::SceneGeometry::Build(GpuDevice(), scene);
+    auto geometry = rendercore::SceneGeometry::Build(Gpu(), scene);
 
     ASSERT_TRUE(geometry.IsValid());
     EXPECT_EQ(geometry.BlasCount(), 2u);
@@ -83,14 +83,14 @@ TEST_F(VulkanDeviceTest, SceneGeometryConcatenatesPrimitivesInOrder) {
 // A primitive that supplies no normals still occupies a slice sized by its vertex
 // count, so every later primitive's normalOffset stays aligned with its vertexOffset.
 // Skipping the slice instead would shift every subsequent primitive's normals.
-TEST_F(VulkanDeviceTest, SceneGeometryReservesSlicesForAbsentAttributes) {
+TEST_P(GpuDeviceTest, SceneGeometryReservesSlicesForAbsentAttributes) {
     Scene scene;
     scene.meshes.push_back(MakeMesh({MakeTriangle(0, /*normals=*/false, /*uvs=*/false,
                                                   /*tangents=*/false),
                                      MakeTriangle(0, true, true, true)}));
     scene.nodes.push_back(MakeNode(0));
 
-    auto geometry = rendercore::SceneGeometry::Build(GpuDevice(), scene);
+    auto geometry = rendercore::SceneGeometry::Build(Gpu(), scene);
 
     ASSERT_TRUE(geometry.IsValid());
     ASSERT_EQ(geometry.Instances().size(), 2u);
@@ -104,13 +104,13 @@ TEST_F(VulkanDeviceTest, SceneGeometryReservesSlicesForAbsentAttributes) {
 
 // One BLAS per primitive, one instance per node-primitive pair. Two nodes sharing a
 // mesh must reuse its structures rather than rebuilding them.
-TEST_F(VulkanDeviceTest, SceneGeometryInstancesNodesWithoutDuplicatingBlas) {
+TEST_P(GpuDeviceTest, SceneGeometryInstancesNodesWithoutDuplicatingBlas) {
     Scene scene;
     scene.meshes.push_back(MakeMesh({MakeTriangle(0, true, true, true)}));
     scene.nodes.push_back(MakeNode(0));
     scene.nodes.push_back(MakeNode(0, glm::translate(glm::mat4(1.0f), {5.0f, 0.0f, 0.0f})));
 
-    auto geometry = rendercore::SceneGeometry::Build(GpuDevice(), scene);
+    auto geometry = rendercore::SceneGeometry::Build(Gpu(), scene);
 
     ASSERT_TRUE(geometry.IsValid());
     EXPECT_EQ(geometry.BlasCount(), 1u) << "one primitive, one structure";
@@ -122,21 +122,21 @@ TEST_F(VulkanDeviceTest, SceneGeometryInstancesNodesWithoutDuplicatingBlas) {
 // InstanceIndex() in the shader is a position in the node-then-primitive walk, so
 // Build and RebuildTlas have to agree on that order. A transform change must not
 // renumber the instances.
-TEST_F(VulkanDeviceTest, SceneGeometryKeepsInstanceOrderAcrossATlasRebuild) {
+TEST_P(GpuDeviceTest, SceneGeometryKeepsInstanceOrderAcrossATlasRebuild) {
     Scene scene;
     scene.meshes.push_back(MakeMesh({MakeTriangle(0, true, true, true),
                                      MakeTriangle(1, true, true, true)}));
     scene.nodes.push_back(MakeNode(0));
     scene.nodes.push_back(MakeNode(0));
 
-    auto geometry = rendercore::SceneGeometry::Build(GpuDevice(), scene);
+    auto geometry = rendercore::SceneGeometry::Build(Gpu(), scene);
     ASSERT_TRUE(geometry.IsValid());
 
     const auto before = geometry.Instances();
     ASSERT_EQ(before.size(), 4u) << "two nodes times two primitives";
 
     scene.nodes[1].transform = glm::translate(glm::mat4(1.0f), {0.0f, 2.0f, 0.0f});
-    geometry.RebuildTlas(GpuDevice(), scene);
+    geometry.RebuildTlas(Gpu(), scene);
 
     ASSERT_TRUE(geometry.IsValid());
     ASSERT_EQ(geometry.Instances().size(), before.size());
@@ -146,27 +146,27 @@ TEST_F(VulkanDeviceTest, SceneGeometryKeepsInstanceOrderAcrossATlasRebuild) {
     }
 }
 
-TEST_F(VulkanDeviceTest, SceneGeometryReleasesStaticBlasScratchAndKeepsTlasRefittable) {
+TEST_P(GpuDeviceTest, SceneGeometryReleasesStaticBlasScratchAndKeepsTlasRefittable) {
     Scene scene;
     scene.meshes.push_back(MakeMesh({MakeTriangle(0, true, true, true)}));
     scene.nodes.push_back(MakeNode(0));
 
-    auto geometry = rendercore::SceneGeometry::Build(GpuDevice(), scene);
+    auto geometry = rendercore::SceneGeometry::Build(Gpu(), scene);
 
     ASSERT_TRUE(geometry.IsValid());
     EXPECT_FALSE(geometry.HasResidentBlasBuildScratch())
         << "static BLAS build workspace must not remain resident after the build submission";
 
     scene.nodes[0].transform = glm::translate(glm::mat4(1.0f), {1.0f, 0.0f, 0.0f});
-    EXPECT_TRUE(geometry.RefitTlas(GpuDevice(), scene))
+    EXPECT_TRUE(geometry.RefitTlas(Gpu(), scene))
         << "the TLAS keeps its separate scratch allocation for transform updates";
 }
 
-TEST_F(VulkanDeviceTest, SceneGeometryRejectsASceneWithNoPrimitives) {
+TEST_P(GpuDeviceTest, SceneGeometryRejectsASceneWithNoPrimitives) {
     Scene scene;
     scene.meshes.push_back(Mesh{});
 
-    auto geometry = rendercore::SceneGeometry::Build(GpuDevice(), scene);
+    auto geometry = rendercore::SceneGeometry::Build(Gpu(), scene);
 
     EXPECT_FALSE(geometry.IsValid()) << "nothing to trace is not an empty TLAS";
 }
@@ -178,8 +178,8 @@ TEST_F(VulkanDeviceTest, SceneGeometryRejectsASceneWithNoPrimitives) {
 // again on every Resize, the CLI once per run -- so the format and usage are worth
 // stating once where a change to them fails loudly.
 
-TEST_F(VulkanDeviceTest, RenderTargetIsAStorageImageAtTheRequestedExtent) {
-    auto target = rendercore::CreateRenderTarget(GpuDevice(), 64, 32);
+TEST_P(GpuDeviceTest, RenderTargetIsAStorageImageAtTheRequestedExtent) {
+    auto target = rendercore::CreateRenderTarget(Gpu(), 64, 32);
 
     ASSERT_NE(target, nullptr);
     EXPECT_EQ(target->Ref().width, 64u);
@@ -190,9 +190,9 @@ TEST_F(VulkanDeviceTest, RenderTargetIsAStorageImageAtTheRequestedExtent) {
 }
 
 // Resize recreates rather than resizes, because a Vulkan image's extent is fixed.
-TEST_F(VulkanDeviceTest, RenderTargetsAtDifferentExtentsAreDistinctImages) {
-    auto first = rendercore::CreateRenderTarget(GpuDevice(), 32, 32);
-    auto second = rendercore::CreateRenderTarget(GpuDevice(), 64, 64);
+TEST_P(GpuDeviceTest, RenderTargetsAtDifferentExtentsAreDistinctImages) {
+    auto first = rendercore::CreateRenderTarget(Gpu(), 32, 32);
+    auto second = rendercore::CreateRenderTarget(Gpu(), 64, 64);
 
     ASSERT_NE(first, nullptr);
     ASSERT_NE(second, nullptr);

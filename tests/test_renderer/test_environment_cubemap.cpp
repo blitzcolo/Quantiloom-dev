@@ -11,7 +11,7 @@
 
 #include <gtest/gtest.h>
 
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
 
 #include "core/Image.hpp"
 #include "io/ImageIO.hpp"
@@ -20,7 +20,7 @@
 #include <filesystem>
 
 using namespace quantiloom;
-using quantiloom::testing::VulkanDeviceTest;
+using quantiloom::testing::GpuDeviceTest;
 
 namespace {
 
@@ -48,9 +48,9 @@ std::string WriteVerticalRampExr(const char* name) {
 
 }  // namespace
 
-TEST_F(VulkanDeviceTest, EnvironmentCubemapLoadsAnEquirectangularImage) {
+TEST_P(GpuDeviceTest, EnvironmentCubemapLoadsAnEquirectangularImage) {
     const auto path = WriteVerticalRampExr("quantiloom_env_load.exr");
-    auto env = rendercore::EnvironmentCubemap::Load(GpuDevice(), path, TinyParams());
+    auto env = rendercore::EnvironmentCubemap::Load(Gpu(), path, TinyParams());
 
     ASSERT_TRUE(env.has_value()) << (env.has_value() ? "" : env.error());
     EXPECT_TRUE(env.value().IsValid());
@@ -62,16 +62,16 @@ TEST_F(VulkanDeviceTest, EnvironmentCubemapLoadsAnEquirectangularImage) {
 // The CLI took the fallback for anything that was not an EXR, because it called
 // ReadEXR rather than ReadImage. A missing file must still be an error, not a
 // silent fallback -- that decision belongs to the caller.
-TEST_F(VulkanDeviceTest, EnvironmentCubemapReportsAMissingFile) {
+TEST_P(GpuDeviceTest, EnvironmentCubemapReportsAMissingFile) {
     auto env = rendercore::EnvironmentCubemap::Load(
-        GpuDevice(), "no_such_environment_map.exr", TinyParams());
+        Gpu(), "no_such_environment_map.exr", TinyParams());
 
     ASSERT_FALSE(env.has_value());
     EXPECT_NE(env.error().find("not found"), std::string::npos) << env.error();
 }
 
-TEST_F(VulkanDeviceTest, EnvironmentCubemapFallbackFillsEveryLevel) {
-    auto env = rendercore::EnvironmentCubemap::Fallback(GpuDevice(), TinyParams());
+TEST_P(GpuDeviceTest, EnvironmentCubemapFallbackFillsEveryLevel) {
+    auto env = rendercore::EnvironmentCubemap::Fallback(Gpu(), TinyParams());
 
     EXPECT_TRUE(env.IsValid());
     EXPECT_TRUE(env.View().IsValid());
@@ -83,9 +83,9 @@ TEST_F(VulkanDeviceTest, EnvironmentCubemapFallbackFillsEveryLevel) {
 // divide by zero on the way there: the downsample derives a stride from the previous
 // level's width, which reaches zero once the chain runs past the face. The shipped
 // 512 with 8 levels stays clear of it, which is why this never surfaced.
-TEST_F(VulkanDeviceTest, EnvironmentCubemapClampsAChainDeeperThanTheFace) {
+TEST_P(GpuDeviceTest, EnvironmentCubemapClampsAChainDeeperThanTheFace) {
     const auto path = WriteVerticalRampExr("quantiloom_env_deep_chain.exr");
-    auto env = rendercore::EnvironmentCubemap::Load(GpuDevice(), path, {4, 5});
+    auto env = rendercore::EnvironmentCubemap::Load(Gpu(), path, {4, 5});
 
     ASSERT_TRUE(env.has_value()) << (env.has_value() ? "" : env.error());
     EXPECT_EQ(env.value().MipLevels(), 3u) << "4x4 supports mips 4, 2 and 1";
@@ -93,14 +93,14 @@ TEST_F(VulkanDeviceTest, EnvironmentCubemapClampsAChainDeeperThanTheFace) {
 }
 
 // The other end: one level is always legal, and the chain loop must not run.
-TEST_F(VulkanDeviceTest, EnvironmentCubemapAcceptsASingleLevel) {
-    auto env = rendercore::EnvironmentCubemap::Fallback(GpuDevice(), {8, 1});
+TEST_P(GpuDeviceTest, EnvironmentCubemapAcceptsASingleLevel) {
+    auto env = rendercore::EnvironmentCubemap::Fallback(Gpu(), {8, 1});
 
     EXPECT_TRUE(env.IsValid());
     EXPECT_EQ(env.MipLevels(), 1u);
 }
 
-TEST_F(VulkanDeviceTest, EnvironmentCubemapDefaultsMatchTheShippedConfiguration) {
+TEST_P(GpuDeviceTest, EnvironmentCubemapDefaultsMatchTheShippedConfiguration) {
     constexpr rendercore::EnvironmentCubemap::Params defaults{};
     EXPECT_EQ(defaults.faceSize, 512u);
     EXPECT_EQ(defaults.mipLevels, 8u);
@@ -115,9 +115,9 @@ TEST_F(VulkanDeviceTest, EnvironmentCubemapDefaultsMatchTheShippedConfiguration)
 // The placeholder's own shape is the degenerate one, so build it exactly as
 // shipped rather than trusting that the clamp handles 1x1 the way 8x1 is handled
 // above: a single texel is where an off-by-one in the mip chain would land.
-TEST_F(VulkanDeviceTest, EnvironmentCubemapBuildsTheShippedPlaceholder) {
+TEST_P(GpuDeviceTest, EnvironmentCubemapBuildsTheShippedPlaceholder) {
     auto env = rendercore::EnvironmentCubemap::Fallback(
-        GpuDevice(), rendercore::EnvironmentCubemap::kFallbackParams);
+        Gpu(), rendercore::EnvironmentCubemap::kFallbackParams);
 
     EXPECT_TRUE(env.IsValid());
     EXPECT_TRUE(env.View().IsValid());
