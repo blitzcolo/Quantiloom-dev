@@ -1218,9 +1218,9 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     }
     gpuDevice = gpu::vulkan::AdoptContext(*contextAdapter);
 
-    perfLogger = std::make_unique<PerformanceLogger>(*contextAdapter);
-    cameraTracePerf = std::make_unique<PerformanceLogger>(*contextAdapter);
-    cameraFullPerf = std::make_unique<PerformanceLogger>(*contextAdapter);
+    perfLogger = std::make_unique<PerformanceLogger>(*gpuDevice);
+    cameraTracePerf = std::make_unique<PerformanceLogger>(*gpuDevice);
+    cameraFullPerf = std::make_unique<PerformanceLogger>(*gpuDevice);
 
     // Create command pool
     VkCommandPoolCreateInfo poolInfo{};

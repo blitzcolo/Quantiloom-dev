@@ -1,21 +1,22 @@
 #include "renderer/DeferredBufferUploads.hpp"
 
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/GpuBuffer.hpp"
 
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <cstring>
+#include <span>
 
 namespace quantiloom {
 
 namespace {
 
 constexpr VkDeviceSize kMaxCmdUpdateBytes = 65536;
-constexpr VkPipelineStageFlags kReaderStages =
-    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-constexpr VkAccessFlags kReaderAccess =
-    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
+// Ray tracing and compute shader reads, uniform reads included.
+constexpr gpu::Access kReaders =
+    gpu::Access::RayTraceRead | gpu::Access::ComputeRead | gpu::Access::UniformRead;
 
 } // namespace
 
@@ -43,31 +44,26 @@ void DeferredBufferUploads::Enqueue(const GpuBuffer& dst, VkDeviceSize offset,
 void DeferredBufferUploads::Record(VkCommandBuffer cmd) {
     if (m_pending.empty()) return;
 
+    auto list = gpu::vulkan::Wrap(cmd);
+
     // Earlier submissions may still be reading these buffers when this one
     // runs; the barrier pair is what orders the write between them.
-    VkMemoryBarrier writable{};
-    writable.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    writable.srcAccessMask = kReaderAccess;
-    writable.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, kReaderStages, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         1, &writable, 0, nullptr, 0, nullptr);
+    list.Barrier(gpu::GlobalBarrier{kReaders, gpu::Access::TransferWrite});
 
     for (const auto& pending : m_pending) {
+        // A pending entry keeps the handle only; the update reads nothing else.
+        const gpu::BufferRef dst = gpu::vulkan::Ref(pending.dst, gpu::kWholeSize);
         for (VkDeviceSize offset = 0; offset < pending.bytes.size();
              offset += kMaxCmdUpdateBytes) {
             const VkDeviceSize chunk = std::min<VkDeviceSize>(
                 kMaxCmdUpdateBytes, pending.bytes.size() - offset);
-            vkCmdUpdateBuffer(cmd, pending.dst, pending.offset + offset, chunk,
-                              pending.bytes.data() + offset);
+            list.UpdateBuffer(dst, pending.offset + offset,
+                              std::as_bytes(std::span<const u8>(
+                                  pending.bytes.data() + offset, static_cast<std::size_t>(chunk))));
         }
     }
 
-    VkMemoryBarrier ready{};
-    ready.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    ready.dstAccessMask = kReaderAccess;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, kReaderStages, 0,
-                         1, &ready, 0, nullptr, 0, nullptr);
+    list.Barrier(gpu::GlobalBarrier{gpu::Access::TransferWrite, kReaders});
 
     m_pending.clear();
 }

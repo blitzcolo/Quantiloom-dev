@@ -1,6 +1,9 @@
 #include "PerformanceLogger.hpp"
 #include "core/Log.hpp"
+#include "gpu/Device.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include <stdexcept>
+#include <utility>
 
 namespace quantiloom {
 
@@ -8,31 +11,29 @@ namespace quantiloom {
 // Lifecycle
 // ============================================================================
 
-PerformanceLogger::PerformanceLogger(VulkanContext& context, const Config& config)
-    : m_context(context)
-    , m_config(config)
+PerformanceLogger::PerformanceLogger(gpu::Device& device, const Config& config)
+    : m_config(config)
 {
     // Get timestamp period (ns per tick)
-    VkPhysicalDeviceProperties properties;
-    vkGetPhysicalDeviceProperties(m_context.GetPhysicalDevice(), &properties);
-    m_timestampPeriod = static_cast<f64>(properties.limits.timestampPeriod);
+    const gpu::DeviceInfo& info = device.Info();
+    m_timestampPeriod = info.timestampPeriodNs;
 
     // Check if timestamps are supported
-    if (properties.limits.timestampComputeAndGraphics == VK_FALSE) {
+    if (!info.timestampsOnAllQueues) {
         QL_LOG_WARN("GPU timestamps not supported on this device; "
                     "frame timing will read 0");
         return;
     }
 
-    CreateQueryPool();
+    CreateQueryPool(device);
     m_timestampsSupported = true;
 
     QL_LOG_INFO("GPU frame timing initialized ({:.3f} ns/tick, {} query slots)",
                 m_timestampPeriod, m_config.queryPoolSize);
 }
 
-PerformanceLogger::PerformanceLogger(VulkanContext& context)
-    : PerformanceLogger(context, Config{})
+PerformanceLogger::PerformanceLogger(gpu::Device& device)
+    : PerformanceLogger(device, Config{})
 {
 }
 
@@ -43,9 +44,7 @@ PerformanceLogger::~PerformanceLogger() {
                     "was not expected",
                     m_droppedFrames, m_config.queryPoolSize / 2);
     }
-    if (m_queryPool != VK_NULL_HANDLE) {
-        vkDestroyQueryPool(m_context.GetDevice(), m_queryPool, nullptr);
-    }
+    m_queryPool.reset();
 }
 
 // ============================================================================
@@ -74,10 +73,11 @@ void PerformanceLogger::BeginFrame(VkCommandBuffer cmd) {
 
     // Reset queries for this frame
     u32 startQuery = m_writeQueryIndex * 2;
-    vkCmdResetQueryPool(cmd, m_queryPool, startQuery, 2);
+    auto list = gpu::vulkan::Wrap(cmd);
+    list.ResetTimestamps(m_queryPool->Ref(), startQuery, 2);
 
     // Write start timestamp
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_queryPool, startQuery);
+    list.WriteTimestamp(m_queryPool->Ref(), startQuery, gpu::Stage::TopOfPipe);
 }
 
 void PerformanceLogger::EndFrame(VkCommandBuffer cmd) {
@@ -88,7 +88,8 @@ void PerformanceLogger::EndFrame(VkCommandBuffer cmd) {
     // Write end timestamp, then advance the write cursor so the next
     // recorded frame gets its own query pair (required for batched submits)
     u32 endQuery = m_writeQueryIndex * 2 + 1;
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_queryPool, endQuery);
+    auto list = gpu::vulkan::Wrap(cmd);
+    list.WriteTimestamp(m_queryPool->Ref(), endQuery, gpu::Stage::BottomOfPipe);
 
     m_writeQueryIndex = (m_writeQueryIndex + 1) % (m_config.queryPoolSize / 2);
     m_pendingFrames++;
@@ -124,19 +125,11 @@ bool PerformanceLogger::TryResolvePending() {
         // the caller records commands the host has not even submitted yet, so
         // the oldest pair may legitimately be unfinished -- stop there.
         u64 results[4] = {0, 0, 0, 0};
-        VkResult result = vkGetQueryPoolResults(
-            m_context.GetDevice(),
-            m_queryPool,
-            startQuery,
-            2,
-            sizeof(results),
-            results,
-            2 * sizeof(u64),
-            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT
-        );
-        if (result != VK_SUCCESS && result != VK_NOT_READY) {
+        const auto resolved = m_queryPool->Resolve(
+            startQuery, 2, gpu::TimestampResolve::WithAvailability, results);
+        if (!resolved) {
             QL_LOG_WARN("Failed to query GPU timestamps (result: {})",
-                        static_cast<i32>(result));
+                        resolved.error());
             break;
         }
         if (results[1] == 0 || results[3] == 0) {
@@ -157,37 +150,29 @@ bool PerformanceLogger::TryResolvePending() {
 // Internal Helpers
 // ============================================================================
 
-void PerformanceLogger::CreateQueryPool() {
-    VkQueryPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-    poolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-    poolInfo.queryCount = m_config.queryPoolSize;  // 2 timestamps per frame
-
-    VkResult result = vkCreateQueryPool(m_context.GetDevice(), &poolInfo, nullptr, &m_queryPool);
-    if (result != VK_SUCCESS) {
+void PerformanceLogger::CreateQueryPool(gpu::Device& device) {
+    auto pool = device.CreateTimestampPool(m_config.queryPoolSize);  // 2 timestamps per frame
+    if (!pool) {
         throw std::runtime_error("Failed to create query pool for performance logging");
     }
+    m_queryPool = std::move(pool).value();
 }
 
 f32 PerformanceLogger::QueryGpuTimeMs(u32 queryIndex) {
-    VkDevice device = m_context.GetDevice();
-
     u32 startQuery = queryIndex * 2;
 
     u64 timestamps[2] = {0, 0};
-    VkResult result = vkGetQueryPoolResults(
-        device,
-        m_queryPool,
+    const auto resolved = m_queryPool->Resolve(
         startQuery,
         2,  // Query 2 timestamps (start and end)
-        sizeof(timestamps),
-        timestamps,
-        sizeof(u64),
-        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT
-    );
+        gpu::TimestampResolve::Wait,
+        timestamps);
 
-    if (result != VK_SUCCESS) {
-        QL_LOG_WARN("Failed to query GPU timestamps (result: {})", static_cast<i32>(result));
+    // A wait returns only once both values are written, so anything but
+    // Ready is a failure, as any result but success was before.
+    if (!resolved || *resolved != gpu::ResolveStatus::Ready) {
+        QL_LOG_WARN("Failed to query GPU timestamps (result: {})",
+                    resolved ? String("not ready") : resolved.error());
         return 0.0f;
     }
 

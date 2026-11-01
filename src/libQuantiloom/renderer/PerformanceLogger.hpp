@@ -2,8 +2,9 @@
 
 #include "core/Types.hpp"
 #include "core/Platform.hpp"
-#include "VulkanContext.hpp"
+#include "gpu/Sync.hpp"
 #include <vulkan/vulkan.h>
+#include <memory>
 
 // ============================================================================
 // PerformanceLogger - GPU timestamps around the ray-tracing dispatch
@@ -29,6 +30,10 @@
 // - SRS §3.2: Performance cost recording requirement
 // ============================================================================
 
+namespace quantiloom::gpu {
+class Device;
+}
+
 namespace quantiloom {
 
 class PerformanceLogger {
@@ -45,8 +50,8 @@ public:
     // Lifecycle
     // ========================================================================
 
-    PerformanceLogger(VulkanContext& context, const Config& config);
-    explicit PerformanceLogger(VulkanContext& context);  // Uses default Config
+    PerformanceLogger(gpu::Device& device, const Config& config);
+    explicit PerformanceLogger(gpu::Device& device);  // Uses default Config
     ~PerformanceLogger();
 
     // Non-copyable, non-movable
@@ -85,18 +90,17 @@ private:
     // Internal state
     // ========================================================================
 
-    VulkanContext& m_context;
     Config m_config;
 
     // False when the device reports no timestamp support; every method is a
     // no-op then.
     bool m_timestampsSupported = false;
 
-    // Vulkan query pool for timestamps.
+    // Timestamp query pool.
     // Write cursor advances as frames are recorded (EndFrame);
     // read cursor advances as results are resolved.
     // Separate cursors allow multiple frames recorded per submit (batching).
-    VkQueryPool m_queryPool = VK_NULL_HANDLE;
+    std::unique_ptr<gpu::TimestampPool> m_queryPool;
     u32 m_writeQueryIndex = 0;
     u32 m_readQueryIndex = 0;
     u32 m_pendingFrames = 0;
@@ -115,7 +119,7 @@ private:
     // Helpers
     // ========================================================================
 
-    void CreateQueryPool();
+    void CreateQueryPool(gpu::Device& device);
     f32 QueryGpuTimeMs(u32 queryIndex);
 };
 
