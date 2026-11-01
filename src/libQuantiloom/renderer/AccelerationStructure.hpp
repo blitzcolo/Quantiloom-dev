@@ -38,6 +38,12 @@
 #include <vector>
 #include <memory>
 
+namespace quantiloom::gpu {
+class Buffer;
+class Device;
+class RtAccelerationStructure;
+}  // namespace quantiloom::gpu
+
 // ============================================================================
 // AccelerationStructure - Manages BLAS and TLAS for ray tracing
 // ============================================================================
@@ -121,7 +127,7 @@ public:
     void ReleaseBuildScratch();
 
     // Accessors
-    [[nodiscard]] VkAccelerationStructureKHR GetHandle() const { return m_as; }
+    [[nodiscard]] VkAccelerationStructureKHR GetHandle() const;
     [[nodiscard]] VkDeviceAddress GetDeviceAddress() const { return m_deviceAddress; }
     [[nodiscard]] bool IsBuilt() const { return m_built; }
     [[nodiscard]] bool HasBuildScratch() const { return m_scratchBuffer != nullptr; }
@@ -132,14 +138,16 @@ public:
     }
 
 private:
+    // m_context adopted on the first Build (Phase B of the RHI migration).
+    gpu::Device& Gpu();
+
     VulkanContext& m_context;
+    std::unique_ptr<gpu::Device> m_gpu;
 
-    // Acceleration structure handle
-    VkAccelerationStructureKHR m_as = VK_NULL_HANDLE;
-
-    // Buffers (backing memory for AS)
-    std::unique_ptr<GpuBuffer> m_asBuffer;       // AS storage
-    std::unique_ptr<GpuBuffer> m_scratchBuffer;  // Scratch space for build
+    std::unique_ptr<gpu::Buffer> m_scratchBuffer;  // Scratch space for build
+    // The acceleration structure with its storage. Declared last, so it is
+    // destroyed first: the structure, then its storage, then the scratch.
+    std::unique_ptr<gpu::RtAccelerationStructure> m_structure;
 
     // Device address
     VkDeviceAddress m_deviceAddress = 0;
@@ -198,7 +206,7 @@ public:
     void Update(VkCommandBuffer cmd);
 
     // Accessors
-    [[nodiscard]] VkAccelerationStructureKHR GetHandle() const { return m_as; }
+    [[nodiscard]] VkAccelerationStructureKHR GetHandle() const;
     [[nodiscard]] bool IsBuilt() const { return m_built; }
     [[nodiscard]] size_t InstanceCount() const { return m_instances.size(); }
     /// Exposed for synchronization regression tests that snapshot the exact
@@ -208,15 +216,18 @@ public:
     }
 
 private:
-    VulkanContext& m_context;
+    // m_context adopted on the first Build (Phase B of the RHI migration).
+    gpu::Device& Gpu();
 
-    // Acceleration structure handle
-    VkAccelerationStructureKHR m_as = VK_NULL_HANDLE;
+    VulkanContext& m_context;
+    std::unique_ptr<gpu::Device> m_gpu;
 
     // Buffers
-    std::unique_ptr<GpuBuffer> m_asBuffer;         // AS storage
-    std::unique_ptr<GpuBuffer> m_instanceBuffer;   // Instance data
-    std::unique_ptr<GpuBuffer> m_scratchBuffer;    // Scratch space for build
+    std::unique_ptr<GpuBuffer> m_instanceBuffer;     // Instance data
+    std::unique_ptr<gpu::Buffer> m_scratchBuffer;    // Scratch space for build and refits
+    // The acceleration structure with its storage. Declared last, so it is
+    // destroyed first: the structure, then its storage, then the buffers above.
+    std::unique_ptr<gpu::RtAccelerationStructure> m_structure;
 
     // Build state
     bool m_built = false;
