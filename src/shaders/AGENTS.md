@@ -33,6 +33,16 @@ specialisation constants, unbounded arrays) and the root signature MSC lays
 its argument buffer out from. A binding number past that root signature's
 ranges fails the build until the range grows with it.
 
+The ray tracing set is the exception: its 38 bindings are written down once,
+in `ql_rt_bindings.hlsli`, which `renderer/RtBindings.hpp` expands into the
+host's descriptor set layout too. A declaration in that set says
+`: QL_RT_REGISTER(role)` (the two bindless arrays
+`QL_RT_BINDLESS_BINDING`/`QL_RT_BINDLESS_REGISTER`) and keeps its own
+variable name, which the `.spv` carry as their debug names. A new binding
+there is a manifest entry, never a hand-written register; the manifest's
+header has the steps, and the C++ build rejects a gap, a reordering or a
+class that does not fit its kind.
+
 Every build also compiles each shader to DXIL and, where Metal Shader
 Converter is installed (`METAL_SHADER_CONVERTER_DIR`, or its default
 `C:\Program Files\Metal Shader Converter\bin`), on to a metallib — a compile

@@ -28,7 +28,7 @@
 
 #include "common.hlsli"
 #include "hit_common.hlsli"
-ByteAddressBuffer fusionVertices : register(t3, space0);
+ByteAddressBuffer fusionVertices : QL_RT_REGISTER(vertexPositions);
 
 [shader("anyhit")]
 void main(inout Payload payload, in HitAttributes attribs) {

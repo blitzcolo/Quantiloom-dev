@@ -33,11 +33,25 @@
 //       in space 1 at register 0; this macro keeps its Vulkan slot. Nothing else
 //       uses it -- a resource with a plain register needs no second annotation.
 //
+// The ray tracing set (space 0 of the ray tracing stages and of the fusion
+// geometry kernel) is the one set whose registers are not written out by hand.
+// Its 38 bindings are listed once, in ql_rt_bindings.hlsli, which the host's
+// descriptor set layout is expanded from as well, and a declaration in it names
+// its entry there instead of a register:
+//
+//   QL_RT_REGISTER(role)            register(<class><slot>, space0)
+//   QL_RT_BINDLESS_BINDING(role)    QL_VK_BINDING(<slot>, 0), for an unbounded array
+//   QL_RT_BINDLESS_REGISTER(role)   register(<class>0, space1), where DXIL needs one
+//
+// Each preprocesses to exactly the annotation it replaced.
+//
 // DXC defines __spirv__ when it is given -spirv.
 // ============================================================================
 
 #ifndef QUANTILOOM_QL_BIND_HLSLI
 #define QUANTILOOM_QL_BIND_HLSLI
+
+#include "ql_rt_bindings.hlsli"
 
 #if defined(__spirv__)
     #define QL_VK_BINDING(slot, set)                [[vk::binding(slot, set)]]
@@ -68,5 +82,15 @@
     GlobalRootSignature qlGlobalRootSignature = { QL_ROOT_SIGNATURE };
     #endif
 #endif
+
+// Row macros for the manifest's entries. Each keeps the class and the slot and
+// drops the four columns only the host reads.
+#define QL_RT_REG_(cls, slot, kind, count, vis, partial)         register(cls##slot, space0)
+#define QL_RT_VK_BINDING_(cls, slot, kind, count, vis, partial)  QL_VK_BINDING(slot, 0)
+#define QL_RT_SPACE1_REG_(cls, slot, kind, count, vis, partial)  register(cls##0, space1)
+
+#define QL_RT_REGISTER(role)           QL_RT_##role(QL_RT_REG_)
+#define QL_RT_BINDLESS_BINDING(role)   QL_RT_##role(QL_RT_VK_BINDING_)
+#define QL_RT_BINDLESS_REGISTER(role)  QL_RT_##role(QL_RT_SPACE1_REG_)
 
 #endif // QUANTILOOM_QL_BIND_HLSLI

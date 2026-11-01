@@ -27,8 +27,8 @@
 // whose inline coverage test reads it too.
 // Bindings 4/5/6/7/8 (indices, materials, textures, samplers, UVs) live in
 // hit_common.hlsli, shared with the any-hit stage.
-StructuredBuffer<float4> tangentBuffer : register(t9, space0);   // Tangent vectors (optional)
-ByteAddressBuffer normalBuffer : register(t16, space0);   // Normal vectors (12 bytes each)
+StructuredBuffer<float4> tangentBuffer : QL_RT_REGISTER(tangentBuffer);   // Tangent vectors (optional)
+ByteAddressBuffer normalBuffer : QL_RT_REGISTER(normalBuffer);   // Normal vectors (12 bytes each)
 
 // ============================================================================
 // NEW (M2+): Spectral Curve Buffer
@@ -38,7 +38,7 @@ ByteAddressBuffer normalBuffer : register(t16, space0);   // Normal vectors (12 
 // Binding 13 chosen to avoid conflict with IBL resources (10-12)
 // ============================================================================
 
-StructuredBuffer<SpectralCurveGPU> spectralCurves : register(t13, space0);
+StructuredBuffer<SpectralCurveGPU> spectralCurves : QL_RT_REGISTER(spectralCurves);
 
 // NOTE: Complex refractive index buffer (binding 14) is declared in pbr.hlsli
 // because the BRDF functions there read it directly.
@@ -80,13 +80,13 @@ StructuredBuffer<SpectralCurveGPU> spectralCurves : register(t13, space0);
 // lightingParams[0].emissiveTriangleCount before touching it.
 // ============================================================================
 
-StructuredBuffer<EmissiveTriangleGPU> emissiveTriangles : register(t23, space0);
+StructuredBuffer<EmissiveTriangleGPU> emissiveTriangles : QL_RT_REGISTER(emissiveTriangles);
 
 // Per-element surface temperatures from the thermal solver (binding 24). One
 // float per triangle, indexed by the instance's thermalElementBase plus
 // rec.primitiveIndex. A scene with no solve binds a single zero and every
 // instance carries the sentinel, so nothing reads it.
-StructuredBuffer<float> thermalTemperatures : register(t24, space0);
+StructuredBuffer<float> thermalTemperatures : QL_RT_REGISTER(thermalTemperatures);
 
 // How those temperatures respond to the sun (binding 26). Record 0 is a
 // header -- xyz the sun direction the solve used, w = 1 when the rest is real
@@ -94,7 +94,7 @@ StructuredBuffer<float> thermalTemperatures : register(t24, space0);
 // (dT/dv, v_element) for that triangle. See renderer/ThermalSunResponse.hpp
 // for why the header is at index 0 and why the direction is carried here
 // rather than read from lightingParams.
-StructuredBuffer<float4> thermalSunResponse : register(t26, space0);
+StructuredBuffer<float4> thermalSunResponse : QL_RT_REGISTER(thermalSunResponse);
 
 // How those temperatures respond to one material parameter (binding 27), and
 // by how much to move it. Element 0 is the step dp -- zero when nothing is
@@ -105,7 +105,7 @@ StructuredBuffer<float4> thermalSunResponse : register(t26, space0);
 //
 // The step rides in the buffer rather than in LightingParams because that
 // struct has no room left. See RayTracingPipeline's binding table.
-StructuredBuffer<float> thermalParameterTangent : register(t27, space0);
+StructuredBuffer<float> thermalParameterTangent : QL_RT_REGISTER(thermalParameterTangent);
 
 // ============================================================================
 // Path Depth
@@ -176,14 +176,14 @@ static const float WAVELENGTH_B_NM = 450.0;  // Blue channel representative wave
 // Added for physically-based specular reflections on metallic surfaces
 // ============================================================================
 
-TextureCube<float4> prefilteredEnvMap : register(t10, space0);  // Prefiltered environment cubemap (with mipmaps)
-Texture2D<float2> brdfLUT : register(t11, space0);              // BRDF integration lookup table
-SamplerState iblSampler : register(s12, space0);                // Linear sampler for the BRDF LUT (single level)
+TextureCube<float4> prefilteredEnvMap : QL_RT_REGISTER(prefilteredEnvMap);  // Prefiltered environment cubemap (with mipmaps)
+Texture2D<float2> brdfLUT : QL_RT_REGISTER(brdfLUT);                        // BRDF integration lookup table
+SamplerState iblSampler : QL_RT_REGISTER(iblSampler);                       // Linear sampler for the BRDF LUT (single level)
 // Separate from iblSampler because that one clamps maxLod to 0 -- correct for the
 // single-level BRDF LUT, but it silently pinned every environment lookup to mip 0,
 // so the prefiltered chain below was never reached and rough metals reflected
 // mirror-sharp. This one is unclamped and filters between levels.
-SamplerState envSampler : register(s21, space0);                // Trilinear sampler for the prefiltered environment
+SamplerState envSampler : QL_RT_REGISTER(envSampler);                       // Trilinear sampler for the prefiltered environment
 
 // ============================================================================
 // Sample sources

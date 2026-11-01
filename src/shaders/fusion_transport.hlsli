@@ -1,10 +1,13 @@
 #ifndef QL_FUSION_TRANSPORT_HLSLI
 #define QL_FUSION_TRANSPORT_HLSLI
+
+#include "ql_bind.hlsli"
+
 struct FusionTransportData {
     uint mode, nodeId, materialId, flags;
     float absorptionPerMeter, sheetReflectance, sheetTransmittance, orientation;
 };
-StructuredBuffer<FusionTransportData> fusionTransport : register(t35, space0);
+StructuredBuffer<FusionTransportData> fusionTransport : QL_RT_REGISTER(fusionTransport);
 
 #ifndef QL_FUSION_DATA_ONLY
 #include "fusion_records.hlsli"

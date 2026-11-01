@@ -34,7 +34,7 @@
 //   F = F0 + (1-F0) * (1-cosθ)^5
 // ============================================================================
 
-StructuredBuffer<ComplexRefractiveIndexGPU> complexRefractiveIndices : register(t14, space0);
+StructuredBuffer<ComplexRefractiveIndexGPU> complexRefractiveIndices : QL_RT_REGISTER(complexRefractiveIndices);
 
 static const float PI = 3.14159265358979323846;
 static const float EPSILON = 1e-6;

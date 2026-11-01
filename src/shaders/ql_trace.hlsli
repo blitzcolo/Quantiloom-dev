@@ -7,10 +7,10 @@
 // The acceleration structure every ray in this pipeline is traced against.
 // Kept here, and not in a shared resource header, so that a stage which never
 // traces (the sky evaluator) does not acquire a binding it must then satisfy.
-RaytracingAccelerationStructure scene : register(t1, space0);
+RaytracingAccelerationStructure scene : QL_RT_REGISTER(scene);
 
 // Positions, for the fusion re-hit test below (binding 3, the vertex buffer).
-ByteAddressBuffer vertexBuffer : register(t3, space0);
+ByteAddressBuffer vertexBuffer : QL_RT_REGISTER(vertexPositions);
 
 // Every ray is traced inline (RayQuery) from raygen: a TraceRay would split
 // raygen at each call and carry its live state -- the whole frame stack --

@@ -1,28 +1,29 @@
 /**
  * @file RtBindings.hpp
- * @brief The 38 bindings of the ray tracing descriptor set (space 0), one row each
+ * @brief The 38 bindings of the ray tracing descriptor set (space 0), expanded from the manifest
  *
  * RayTracingPipeline creates its binding layout from this table; nothing else
- * declares the set. A row is
+ * declares the set. No row is written here: each is an entry of the binding
+ * manifest, src/shaders/ql_rt_bindings.hlsli, which documents the columns and
+ * which the shaders read too. Every HLSL declaration of these resources takes its
+ * register from the same entry, so the layout and the shaders cannot disagree on
+ * a slot.
  *
- *     QL_RT_SLOT_(class, slot, kind, count, visibility, partially bound)
+ * This header gives the columns HLSL ignores their C++ meaning:
  *
- * - class: the HLSL register letter of the declaration (t, u, s). Not used by C++.
- * - slot: register number, Vulkan binding and row index at once.
  * - kind: the gpu::BindingKind the class and the HLSL type give (gpu/Binding.hpp).
  * - count: 1, or QL_BINDLESS for the two bindless arrays, which RayTracingPipeline
  *   replaces by the device's texture limit (1024 with descriptor indexing, 32 without).
- * - visibility: the final Vulkan stage set. It folds in the two loops that used to run
- *   over the hand-built table (every binding a closest-hit or miss stage sees, raygen
- *   sees too, because raygen shades every path vertex itself; and every binding is
- *   visible to compute), so it is the stage mask the layout actually carries.
+ * - visibility: the QL_VIS_* stages below, the final Vulkan stage set. It folds in
+ *   the two loops that used to run over the hand-built table (every binding a
+ *   closest-hit or miss stage sees, raygen sees too, because raygen shades every
+ *   path vertex itself; and every binding is visible to compute), so it is the
+ *   stage mask the layout actually carries.
  * - partially bound: 1 for the bindless arrays and for the bindings only one of the
  *   three descriptor sets ever writes (camera-only 30/31, geometry-capture-only 33/34).
  *
- * The row format is the one the binding manifest (design P05 section 5) uses, so that
- * the HLSL register declarations and this table can later be expanded from one list.
- * Each row names its HLSL declaration and the RayTracingPipeline.cpp line (at 7a875be)
- * whose hand-filled layout binding it replaces.
+ * and holds the manifest to what RayTracingPipeline relies on: 38 rows, row i is
+ * binding i, and each row's register class is the one its kind is declared with.
  */
 
 #pragma once
@@ -30,6 +31,11 @@
 #include "gpu/Binding.hpp"
 
 #include <iterator>
+
+// By a path relative to this file, so no include directory is involved. The shader
+// build depends on the same file through its *.hlsli glob (src/shaders/CMakeLists.txt),
+// so an edit to it recompiles the shaders as well as this table.
+#include "../../shaders/ql_rt_bindings.hlsli"
 
 namespace quantiloom::rendercore {
 
@@ -44,50 +50,12 @@ inline constexpr gpu::ShaderStages QL_VIS_X = gpu::ShaderStages::Compute;
 inline constexpr u32 QL_BINDLESS = gpu::kUnboundedCount;
 
 #define QL_RT_SLOT_(cls, slot, kind, count, vis, partial) \
-    gpu::BindingSlot{slot, gpu::BindingKind::kind, count, (partial) != 0, vis}
+    gpu::BindingSlot{slot, gpu::BindingKind::kind, count, (partial) != 0, vis},
+#define QL_RT_ROW(role) QL_RT_##role(QL_RT_SLOT_)
 
-inline constexpr gpu::BindingSlot kRtBindingTemplate[] = {
-    //          cls slot kind                    count        visibility                                     partial    HLSL declaration                                     was RTP.cpp
-    QL_RT_SLOT_(u,  0,  StorageTexture,        1,           QL_VIS_R | QL_VIS_X,                                0),  // outputImage                 raygen.rgen:24            :397
-    QL_RT_SLOT_(t,  1,  AccelerationStructure, 1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // scene                       ql_trace.hlsli:10         :409
-    QL_RT_SLOT_(t,  2,  ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_M | QL_VIS_X,          0),  // lightingParams              shade_resources.hlsli:6   :416
-    QL_RT_SLOT_(t,  3,  ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_A | QL_VIS_X,          0),  // vertexBuffer                ql_trace.hlsli:13         :423
-    QL_RT_SLOT_(t,  4,  ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_A | QL_VIS_X,          0),  // indexBuffer                 hit_common.hlsli:31       :430
-    QL_RT_SLOT_(t,  5,  ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_A | QL_VIS_X,          0),  // materials                   hit_common.hlsli:32       :437
-    QL_RT_SLOT_(t,  6,  SampledTexture,        QL_BINDLESS, QL_VIS_R | QL_VIS_C | QL_VIS_A | QL_VIS_X,          1),  // textures[]                  hit_common.hlsli:33       :446
-    QL_RT_SLOT_(s,  7,  Sampler,               QL_BINDLESS, QL_VIS_R | QL_VIS_C | QL_VIS_A | QL_VIS_X,          1),  // samplers[]                  hit_common.hlsli:34       :453
-    QL_RT_SLOT_(t,  8,  ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_A | QL_VIS_X,          0),  // uvBuffer                    hit_common.hlsli:35       :460
-    QL_RT_SLOT_(t,  9,  ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // tangentBuffer               shade_vertex.hlsli:30     :467
-    QL_RT_SLOT_(t,  10, SampledTexture,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // prefilteredEnvMap           shade_vertex.hlsli:179    :482
-    QL_RT_SLOT_(t,  11, SampledTexture,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // brdfLUT                     shade_vertex.hlsli:180    :490
-    QL_RT_SLOT_(s,  12, Sampler,               1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // iblSampler                  shade_vertex.hlsli:181    :498
-    QL_RT_SLOT_(t,  13, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // spectralCurves              shade_vertex.hlsli:41     :512
-    QL_RT_SLOT_(t,  14, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // complexRefractiveIndices    pbr.hlsli:37              :526
-    QL_RT_SLOT_(t,  15, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_M | QL_VIS_X,          0),  // solarSpectralLUT            shade_resources.hlsli:7   :542
-    QL_RT_SLOT_(t,  16, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // normalBuffer                shade_vertex.hlsli:31     :557
-    QL_RT_SLOT_(t,  17, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_M | QL_VIS_X,          0),  // atmosNNHeader               shade_resources.hlsli:9   :571
-    QL_RT_SLOT_(t,  18, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_A | QL_VIS_X,          0),  // instanceGeometryInfo        hit_common.hlsli:52       :586
-    QL_RT_SLOT_(t,  19, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_M | QL_VIS_X,          0),  // cieCMF_LUT                  shade_resources.hlsli:11  :601
-    QL_RT_SLOT_(t,  20, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_M | QL_VIS_X,          0),  // atmosNNData                 shade_resources.hlsli:10  :614
-    QL_RT_SLOT_(s,  21, Sampler,               1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // envSampler                  shade_vertex.hlsli:186    :626
-    QL_RT_SLOT_(u,  22, StorageTexture,        1,           QL_VIS_R | QL_VIS_X,                                0),  // depthImage                  raygen.rgen:42            :633
-    QL_RT_SLOT_(t,  23, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // emissiveTriangles           shade_vertex.hlsli:83     :643
-    QL_RT_SLOT_(t,  24, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // thermalTemperatures         shade_vertex.hlsli:89     :654
-    QL_RT_SLOT_(t,  25, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_M | QL_VIS_X,          0),  // rgbToSpectrumTable          shade_resources.hlsli:12  :668
-    QL_RT_SLOT_(t,  26, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // thermalSunResponse          shade_vertex.hlsli:97     :686
-    QL_RT_SLOT_(t,  27, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // thermalParameterTangent     shade_vertex.hlsli:108    :709
-    QL_RT_SLOT_(u,  28, StorageTexture,        1,           QL_VIS_R | QL_VIS_X,                                0),  // cameraMeasurementImage      raygen.rgen:29            :715
-    QL_RT_SLOT_(t,  29, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_M | QL_VIS_X,          0),  // cameraResponseTable         shade_resources.hlsli:8   :721
-    QL_RT_SLOT_(u,  30, ReadWriteBuffer,       1,           QL_VIS_R | QL_VIS_X,                                1),  // cameraDynamicCounters       raygen.rgen:37            :731
-    QL_RT_SLOT_(u,  31, StorageTexture,        1,           QL_VIS_R | QL_VIS_X,                                1),  // cameraMeasurementDepthImage raygen.rgen:32            :737
-    QL_RT_SLOT_(t,  32, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_X,                                0),  // projectionConfig            camera_projection.hlsli:5 :745
-    QL_RT_SLOT_(u,  33, ReadWriteBuffer,       1,           QL_VIS_X,                                           1),  // geometryHits                fusion_geometry.rayq.hlsl:21 :749
-    QL_RT_SLOT_(t,  34, ReadOnlyBuffer,        1,           QL_VIS_X,                                           1),  // geometryQueryPixels         fusion_geometry.rayq.hlsl:22 :753
-    QL_RT_SLOT_(t,  35, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // fusionTransport             fusion_transport.hlsli:7  :755
-    QL_RT_SLOT_(u,  36, ReadWriteBuffer,       1,           QL_VIS_R | QL_VIS_C | QL_VIS_M | QL_VIS_X,          0),  // fusionRecords               fusion_records.hlsli:8    :758
-    QL_RT_SLOT_(t,  37, ReadOnlyBuffer,        1,           QL_VIS_R | QL_VIS_C | QL_VIS_X,                     0),  // fusionProbeRays             raygen.rgen:49            :761
-};
+inline constexpr gpu::BindingSlot kRtBindingTemplate[] = {QL_RT_BINDINGS(QL_RT_ROW)};
 
+#undef QL_RT_ROW
 #undef QL_RT_SLOT_
 
 static_assert(std::size(kRtBindingTemplate) == 38, "the ray tracing set declares 38 bindings");
@@ -100,5 +68,30 @@ constexpr bool RtBindingRowsAreTheirSlots() {
     return true;
 }
 static_assert(RtBindingRowsAreTheirSlots(), "kRtBindingTemplate rows must be in binding order, one per binding");
+
+/// The HLSL register letter a kind is declared with (the table in gpu/Binding.hpp).
+constexpr char RegisterClassOf(gpu::BindingKind kind) {
+    switch (kind) {
+        case gpu::BindingKind::ReadOnlyBuffer:
+        case gpu::BindingKind::SampledTexture:
+        case gpu::BindingKind::AccelerationStructure: return 't';
+        case gpu::BindingKind::ReadWriteBuffer:
+        case gpu::BindingKind::StorageTexture: return 'u';
+        case gpu::BindingKind::Sampler: return 's';
+        case gpu::BindingKind::ConstantBuffer: return 'b';
+    }
+    return '?';
+}
+
+// Only HLSL reads the class column, so check it here against the kind, entry by entry.
+#define QL_RT_CLASS_(cls, slot, kind, count, vis, partial) #cls[0]
+#define QL_RT_KIND_CLASS_(cls, slot, kind, count, vis, partial) RegisterClassOf(gpu::BindingKind::kind)
+#define QL_RT_CHECK_CLASS(role)                                                  \
+    static_assert(QL_RT_##role(QL_RT_CLASS_) == QL_RT_##role(QL_RT_KIND_CLASS_), \
+                  "QL_RT_" #role ": the register class does not fit the kind");
+QL_RT_BINDINGS(QL_RT_CHECK_CLASS)
+#undef QL_RT_CHECK_CLASS
+#undef QL_RT_KIND_CLASS_
+#undef QL_RT_CLASS_
 
 }  // namespace quantiloom::rendercore

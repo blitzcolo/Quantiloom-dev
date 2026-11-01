@@ -24,7 +24,10 @@ no `QL_API`, no header under `include/`, no `docs/abi/exports.golden` change.
 - **Bindings** mirror HLSL `register(<class><slot>, space<n>)` (`src/shaders/ql_bind.hlsli`):
   slot = register number = Vulkan binding, space = set, one slot number per space.
   `BindingSlot::visibility` and `KernelLayoutDesc::pushConstantVisibility` are Vulkan stage
-  masks and default to Compute, so a compute table needs neither.
+  masks and default to Compute, so a compute table needs neither. The ray tracing set's 38
+  slots are written nowhere in C++: `renderer/RtBindings.hpp` expands them from the shaders'
+  manifest, `src/shaders/ql_rt_bindings.hlsli`, whose header also says how a Metal
+  argument-buffer layout follows from the same rows.
 - **Ray tracing.** `RtScene.hpp` holds an acceleration structure with its storage; a build or
   refit is one `CommandList::BuildRtAccelerationStructure`, and which barriers surround it stays
   with the caller. Instances are neutral `RtInstance` values that `Device::PackRtInstances`
