@@ -7,7 +7,9 @@
 // The acceleration structure every ray in this pipeline is traced against.
 // Kept here, and not in a shared resource header, so that a stage which never
 // traces (the sky evaluator) does not acquire a binding it must then satisfy.
-RaytracingAccelerationStructure sce// Positions, for the fusion re-hit test below (binding 3, the vertex buffer).
+RaytracingAccelerationStructure scene : register(t1, space0);
+
+// Positions, for the fusion re-hit test below (binding 3, the vertex buffer).
 ByteAddressBuffer vertexBuffer : register(t3, space0);
 
 // Every ray is traced inline (RayQuery) from raygen: a TraceRay would split
@@ -73,9 +75,6 @@ bool QlVisible(RayDesc ray) {
     return q.CommittedStatus() == COMMITTED_NOTHING;
 }
 
-eturn p.isShadowed == 0;
-}
-
 // A child's vertex as its parent hands it over: the request's fields, and the
 // medium the parent vertex is in.
 PathVertex QlChildVertex(ChildRequest req, PathVertex parent) {
@@ -87,7 +86,11 @@ PathVertex QlChildVertex(ChildRequest req, PathVertex parent) {
     child.heroLambda  = req.heroLambda;
     child.primaryHitT = -1.0;
     child.bsdfPdf     = req.bsdfPdf;
-    InheritFusionMedium(child, pa// Where a ray lands, and nothing more: the closest committed triangle as a
+    InheritFusionMedium(child, parent);
+    return child;
+}
+
+// Where a ray lands, and nothing more: the closest committed triangle as a
 // HitRecord, read off the query exactly as closest-hit read it off the
 // intrinsics, or t = -1 for a miss. The vertex's fusionPrevious* fields feed
 // the re-hit test, as the payload fed the any-hit stage.
@@ -117,9 +120,6 @@ bool QlTraceRecord(RayDesc ray, uint rayFlags, PathVertex v, out HitRecord rec) 
         rec.o2w0 = o2w[0]; rec.o2w1 = o2w[1]; rec.o2w2 = o2w[2];
         rec.w2o0 = w2o[0]; rec.w2o1 = w2o[1]; rec.w2o2 = w2o[2];
     }
-    return rec.t >= 0.0;
-}
-
     return rec.t >= 0.0;
 }
 
