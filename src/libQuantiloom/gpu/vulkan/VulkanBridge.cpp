@@ -81,4 +81,27 @@ VkDescriptorSet NativeSet(gpu::BindGroup group) {
     return FromHandle<VkDescriptorSet>(group.handle);
 }
 
+gpu::SamplerRef Ref(VkSampler sampler) {
+    return SamplerRef{ToHandle(sampler)};
+}
+
+gpu::RtSceneRef Ref(VkAccelerationStructureKHR structure, VkDeviceAddress address) {
+    return RtSceneRef{ToHandle(structure), static_cast<u64>(address)};
+}
+
+gpu::TextureRef SampledRef(VkImageView view) {
+    TextureRef ref;
+    ref.view = ToHandle(view);
+    ref.layout = TextureLayoutPolicy::Optimal;
+    return ref;
+}
+
+VkSampler NativeSampler(gpu::SamplerRef ref) {
+    return FromHandle<VkSampler>(ref.handle);
+}
+
+VkAccelerationStructureKHR NativeScene(gpu::RtSceneRef ref) {
+    return FromHandle<VkAccelerationStructureKHR>(ref.handle);
+}
+
 }  // namespace quantiloom::gpu::vulkan

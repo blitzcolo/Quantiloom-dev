@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gpu/Device.hpp"
+#include "gpu/vulkan/VulkanRt.hpp"
 
 namespace quantiloom {
 class VulkanContext;
@@ -41,12 +42,23 @@ public:
     [[nodiscard]] std::unique_ptr<CommandList> WrapRecording(NativeHandle commandBuffer) override;
     [[nodiscard]] TextureRef ImportHostTexture(NativeHandle image, Format format, u32 width, u32 height) override;
 
+    [[nodiscard]] Result<std::unique_ptr<PipelineCache>, String> CreatePipelineCache(
+        std::span<const std::byte> initialData) override;
+    [[nodiscard]] Result<std::unique_ptr<TraceKernel>, String> CreateTraceKernel(
+        const TraceKernelDesc& desc) override;
+    [[nodiscard]] RtBuildSizes GetRtBuildSizes(const RtGeometry& geometry) const override;
+    [[nodiscard]] Result<std::unique_ptr<RtAccelerationStructure>, String> CreateRtAccelerationStructure(
+        RtLevel level, u64 bytes) override;
+    [[nodiscard]] u32 RtInstanceStride() const override;
+    void PackRtInstances(std::span<const RtInstance> instances, std::span<std::byte> out) const override;
+
     [[nodiscard]] VulkanContext& Context() const { return context_; }
 
 private:
     VulkanContext& context_;
     DeviceInfo info_;
     ShaderLibrary shaders_{ShaderFormat::SpirV};
+    RtFunctions rt_;  // loaded once; copied into every command list this device hands out
 };
 
 }  // namespace quantiloom::gpu::vulkan

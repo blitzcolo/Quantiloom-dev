@@ -9,7 +9,8 @@ namespace quantiloom::gpu::vulkan {
 // ----------------------------------------------------------------------------
 
 Result<std::unique_ptr<CommandPool>, String> VulkanCommandPool::Create(VkDevice device, u32 queueFamily,
-                                                                       const CommandPoolDesc& desc) {
+                                                                       const CommandPoolDesc& desc,
+                                                                       const RtFunctions& rt) {
     VkCommandPoolCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     if (desc.transient) info.flags |= VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
@@ -23,6 +24,7 @@ Result<std::unique_ptr<CommandPool>, String> VulkanCommandPool::Create(VkDevice 
         return Fail<std::unique_ptr<CommandPool>>(ResultCode(result));
     }
     pool->device_ = device;
+    pool->rt_ = rt;
     return std::unique_ptr<CommandPool>(std::move(pool));
 }
 
@@ -42,7 +44,7 @@ Result<std::unique_ptr<CommandBuffer>, String> VulkanCommandPool::Allocate() {
     if (result != VK_SUCCESS) {
         return Fail<std::unique_ptr<CommandBuffer>>(ResultCode(result));
     }
-    return std::unique_ptr<CommandBuffer>(std::make_unique<VulkanCommandBuffer>(device_, pool_, cmd));
+    return std::unique_ptr<CommandBuffer>(std::make_unique<VulkanCommandBuffer>(device_, pool_, cmd, rt_));
 }
 
 // ----------------------------------------------------------------------------

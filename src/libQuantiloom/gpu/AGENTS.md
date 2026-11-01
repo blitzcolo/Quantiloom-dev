@@ -8,10 +8,11 @@ no `QL_API`, no header under `include/`, no `docs/abi/exports.golden` change.
   `vulkan.h` lives only in `gpu/vulkan/`, a Metal backend would live only in `gpu/metal/`.
   Outside `gpu/vulkan/`, a comment names a Vulkan call without its opening parenthesis:
   `scripts/gpu-ab/vk_residual.sh` counts every `vk*(`, comments included.
-- **Refs vs owners.** `Buffer`/`Texture`/`Sampler`/`ComputeKernel`/`CommandPool`/`Fence`/... are
-  owned through `unique_ptr`; `BufferRef`/`TextureRef`/`SamplerRef`/`EventRef`/`RtSceneRef`/
-  `TimestampPoolRef`/`BindGroup` are non-owning PODs. Identity guards compare
-  `TextureRef::Identity()`. A `CommandBuffer` dies before its `CommandPool`.
+- **Refs vs owners.** `Buffer`/`Texture`/`Sampler`/`ComputeKernel`/`CommandPool`/`Fence`/
+  `TraceKernel`/`PipelineCache`/`RtAccelerationStructure`/... are owned through `unique_ptr`;
+  `BufferRef`/`TextureRef`/`SamplerRef`/`EventRef`/`RtSceneRef`/`TimestampPoolRef`/`BindGroup`
+  are non-owning PODs. Identity guards compare `TextureRef::Identity()`. A `CommandBuffer` dies
+  before its `CommandPool`.
 - **One recording call, one native command.** That is what makes the api_dump command-stream
   diff (`scripts/gpu-ab/apidump_diff.py`) meaningful. Do not batch or elide inside the backend.
 - **Barriers** name `from` and `to` as `Access` bit sets; `VulkanMapping.cpp` is the only place
@@ -24,11 +25,23 @@ no `QL_API`, no header under `include/`, no `docs/abi/exports.golden` change.
   slot = register number = Vulkan binding, space = set, one slot number per space.
   `BindingSlot::visibility` and `KernelLayoutDesc::pushConstantVisibility` are Vulkan stage
   masks and default to Compute, so a compute table needs neither.
+- **Ray tracing.** `RtScene.hpp` holds an acceleration structure with its storage; a build or
+  refit is one `CommandList::BuildRtAccelerationStructure`, and which barriers surround it stays
+  with the caller. Instances are neutral `RtInstance` values that `Device::PackRtInstances`
+  writes in the native layout (Vulkan names a bottom level by address, Metal 3 by index into
+  `RtInstances::referencedBottomLevels`). `Trace.hpp`: a `TraceKernel` owns its shader binding
+  table on Vulkan and no `gpu/` header mentions one; Metal has none, every ray being inline from
+  raygen. The Vulkan ray tracing entry points are fetched once per `VulkanDevice` and copied into
+  every list it hands out (`ExecuteImmediate`, `WrapRecording`, a `CommandPool`'s buffers); a
+  `vulkan::Wrap` list has none, so an acceleration structure build on it throws.
 - **No RGB32Float textures.** Metal has no 3-channel 2D format. Pad to RGBA32Float with alpha
   1: sampling a 3-component format already returns alpha 1, so the shader reads the same values.
 - **Errors.** On Vulkan, the `Err` of a failed `gpu/Sync.hpp` call, `CreateSampler`, `CreateGpuEvent`,
   `CreateTimestampPool`, `CreateCommandPool`, `CreateFence`, `Submit` or `WaitQueueIdle` is the
-  `VkResult` as a decimal, so a caller keeps a message that prints the code.
+  `VkResult` as a decimal, so a caller keeps a message that prints the code. `CreateTraceKernel`,
+  `CreateRtAccelerationStructure`, `CreatePipelineCache` and `PipelineCache::Serialize` instead
+  return the message `RayTracingPipeline` or `AccelerationStructure` threw or logged for the same
+  failure, so a caller that throws or logs the `Err` keeps that text.
 - **No member named after a `<windows.h>` macro.** `CreateEvent`, `CreateSemaphore`, `CreateMutex`,
   `GetObject`, `LoadImage`... are macros there; a translation unit that sees `<windows.h>` would
   declare a different member than the backend defines (and `VulkanDevice` is `final`, so calls

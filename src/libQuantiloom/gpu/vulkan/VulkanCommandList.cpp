@@ -2,6 +2,9 @@
 
 #include "core/Platform.hpp"
 #include "gpu/vulkan/VulkanResources.hpp"
+#include "gpu/vulkan/VulkanTrace.hpp"
+
+#include <stdexcept>
 
 namespace quantiloom::gpu::vulkan {
 
@@ -45,6 +48,36 @@ void VulkanCommandList::PushConstants(const KernelLayout& layout, std::span<cons
 
 void VulkanCommandList::Dispatch(u32 groupsX, u32 groupsY, u32 groupsZ) {
     vkCmdDispatch(cmd_, groupsX, groupsY, groupsZ);
+}
+
+void VulkanCommandList::SetTraceKernel(const TraceKernel& kernel) {
+    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+                      static_cast<const VulkanTraceKernel&>(kernel).Native());
+}
+
+void VulkanCommandList::Trace(const TraceKernel& kernel, u32 width, u32 height, u32 depth) {
+    static_cast<const VulkanTraceKernel&>(kernel).TraceRays(cmd_, width, height, depth);
+}
+
+void VulkanCommandList::BuildRtAccelerationStructure(const RtBuild& build) {
+    if (rt_.cmdBuildStructures == nullptr) {
+        // A vulkan::Wrap list carries no device functions; neither does a device without the
+        // extension. The same message AccelerationStructure.cpp throws for a missing function.
+        throw std::runtime_error("Failed to load acceleration structure functions");
+    }
+    NativeRtGeometry native;
+    FillRtGeometry(rt_.device, build.geometry, native);
+    if (build.mode == RtBuildMode::Update) {
+        native.info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+        native.info.srcAccelerationStructure = FromHandle<VkAccelerationStructureKHR>(build.src.handle);
+    }
+    native.info.dstAccelerationStructure = FromHandle<VkAccelerationStructureKHR>(build.dst.handle);
+    native.info.scratchData.deviceAddress = BufferAddress(rt_.device, build.scratch);
+
+    VkAccelerationStructureBuildRangeInfoKHR range{};
+    range.primitiveCount = native.primitiveCount;
+    const VkAccelerationStructureBuildRangeInfoKHR* ranges = &range;
+    rt_.cmdBuildStructures(cmd_, 1, &native.info, &ranges);
 }
 
 void VulkanCommandList::Barrier(const BarrierBatch& batch) {

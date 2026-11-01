@@ -9,8 +9,10 @@
 #include "gpu/CommandList.hpp"
 #include "gpu/Kernel.hpp"
 #include "gpu/Resources.hpp"
+#include "gpu/RtScene.hpp"
 #include "gpu/ShaderLibrary.hpp"
 #include "gpu/Sync.hpp"
+#include "gpu/Trace.hpp"
 
 #include <functional>
 #include <memory>
@@ -66,6 +68,25 @@ public:
     /// travel in TextureBarrier::hostLayoutBefore/After.
     [[nodiscard]] virtual TextureRef ImportHostTexture(NativeHandle image, Format format, u32 width,
                                                        u32 height) = 0;
+
+    /// From a previous run's PipelineCache::Serialize bytes. When the driver rejects them
+    /// (stale or foreign) it warns and creates an empty cache instead; Err only when that fails too.
+    [[nodiscard]] virtual Result<std::unique_ptr<PipelineCache>, String> CreatePipelineCache(
+        std::span<const std::byte> initialData) = 0;
+    [[nodiscard]] virtual Result<std::unique_ptr<TraceKernel>, String> CreateTraceKernel(
+        const TraceKernelDesc& desc) = 0;
+    /// What a build of `geometry` needs (vkGetAccelerationStructureBuildSizesKHR); all zero on a
+    /// device without acceleration structures. Metal: accelerationStructureSizesWithDescriptor.
+    [[nodiscard]] virtual RtBuildSizes GetRtBuildSizes(const RtGeometry& geometry) const = 0;
+    /// A storage buffer of `bytes`, the structure on it and, for a Bottom level, its device
+    /// address, in that order. Metal: newAccelerationStructureWithSize.
+    [[nodiscard]] virtual Result<std::unique_ptr<RtAccelerationStructure>, String>
+    CreateRtAccelerationStructure(RtLevel level, u64 bytes) = 0;
+    /// Bytes per packed instance record: 64 on Vulkan.
+    [[nodiscard]] virtual u32 RtInstanceStride() const = 0;
+    /// Writes one native record per instance into `out`, which holds at least
+    /// instances.size() * RtInstanceStride() bytes.
+    virtual void PackRtInstances(std::span<const RtInstance> instances, std::span<std::byte> out) const = 0;
 };
 
 }  // namespace quantiloom::gpu

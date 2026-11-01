@@ -4,6 +4,7 @@
 #include "gpu/vulkan/VulkanCommandList.hpp"
 #include "gpu/vulkan/VulkanResources.hpp"
 #include "gpu/vulkan/VulkanSync.hpp"
+#include "gpu/vulkan/VulkanTrace.hpp"
 #include "renderer/CommandHelper.hpp"
 #include "renderer/VulkanContext.hpp"
 
@@ -47,6 +48,7 @@ VulkanDevice::VulkanDevice(VulkanContext& context) : context_(context) {
     vkGetPhysicalDeviceFormatProperties(context.GetPhysicalDevice(), VK_FORMAT_R32G32B32A32_SFLOAT, &accumulation);
     info_.linearFilterRGBA32Float =
         (accumulation.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0U;
+    rt_ = LoadRtFunctions(context.GetDevice());
 }
 
 Result<std::unique_ptr<Buffer>, String> VulkanDevice::CreateBuffer(const BufferDesc& desc) {
@@ -183,7 +185,7 @@ void VulkanDevice::WriteBindGroup(BindGroup group, std::span<const BindingWrite>
 
 void VulkanDevice::ExecuteImmediate(const std::function<void(CommandList&)>& record) {
     CommandHelper::ExecuteImmediate(context_, [&](VkCommandBuffer cmd) {
-        VulkanCommandList list(cmd);
+        VulkanCommandList list(cmd, rt_);
         record(list);
     });
 }
@@ -208,7 +210,7 @@ Result<std::unique_ptr<TimestampPool>, String> VulkanDevice::CreateTimestampPool
 }
 
 Result<std::unique_ptr<CommandPool>, String> VulkanDevice::CreateCommandPool(const CommandPoolDesc& desc) {
-    return VulkanCommandPool::Create(context_.GetDevice(), context_.GetGraphicsQueueFamily(), desc);
+    return VulkanCommandPool::Create(context_.GetDevice(), context_.GetGraphicsQueueFamily(), desc, rt_);
 }
 
 Result<std::unique_ptr<Fence>, String> VulkanDevice::CreateFence() {
@@ -234,7 +236,7 @@ Result<void, String> VulkanDevice::WaitQueueIdle() {
 }
 
 std::unique_ptr<CommandList> VulkanDevice::WrapRecording(NativeHandle commandBuffer) {
-    return std::make_unique<VulkanCommandList>(FromHandle<VkCommandBuffer>(commandBuffer));
+    return std::make_unique<VulkanCommandList>(FromHandle<VkCommandBuffer>(commandBuffer), rt_);
 }
 
 TextureRef VulkanDevice::ImportHostTexture(NativeHandle image, Format format, u32 width, u32 height) {
@@ -247,6 +249,32 @@ TextureRef VulkanDevice::ImportHostTexture(NativeHandle image, Format format, u3
     ref.layers = 1;
     ref.layout = TextureLayoutPolicy::Optimal;
     return ref;
+}
+
+Result<std::unique_ptr<PipelineCache>, String> VulkanDevice::CreatePipelineCache(
+    std::span<const std::byte> initialData) {
+    return VulkanPipelineCache::Create(context_.GetDevice(), initialData);
+}
+
+Result<std::unique_ptr<TraceKernel>, String> VulkanDevice::CreateTraceKernel(const TraceKernelDesc& desc) {
+    return VulkanTraceKernel::Create(context_.GetAllocator(), context_.GetRayTracingProperties(), rt_, desc);
+}
+
+RtBuildSizes VulkanDevice::GetRtBuildSizes(const RtGeometry& geometry) const {
+    return QueryRtBuildSizes(rt_, geometry);
+}
+
+Result<std::unique_ptr<RtAccelerationStructure>, String> VulkanDevice::CreateRtAccelerationStructure(RtLevel level,
+                                                                                                     u64 bytes) {
+    return VulkanRtAccelerationStructure::Create(context_.GetAllocator(), rt_, level, bytes);
+}
+
+u32 VulkanDevice::RtInstanceStride() const {
+    return kRtInstanceStride;
+}
+
+void VulkanDevice::PackRtInstances(std::span<const RtInstance> instances, std::span<std::byte> out) const {
+    WriteRtInstances(instances, out);
 }
 
 }  // namespace quantiloom::gpu::vulkan

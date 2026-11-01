@@ -18,6 +18,9 @@ namespace quantiloom::gpu {
 
 inline constexpr u32 kRemaining = ~u32{0};  // VK_REMAINING_MIP_LEVELS / VK_REMAINING_ARRAY_LAYERS
 
+class TraceKernel;  // Trace.hpp
+struct RtBuild;     // RtScene.hpp
+
 struct GlobalBarrier {
     Access from = Access::None;
     Access to = Access::None;
@@ -116,6 +119,19 @@ public:
         PushConstants(layout, std::span<const std::byte>(reinterpret_cast<const std::byte*>(&block), sizeof(T)));
     }
     virtual void Dispatch(u32 groupsX, u32 groupsY, u32 groupsZ) = 0;
+
+    /// Binds the kernel at the ray tracing bind point (vkCmdBindPipeline). Its bind groups are
+    /// set with PipelineKind::Trace. Metal: the converted ray generation kernel's compute
+    /// pipeline state.
+    virtual void SetTraceKernel(const TraceKernel& kernel) = 0;
+    /// width x height x depth rays through the kernel's own SBT (vkCmdTraceRaysKHR).
+    /// Metal: dispatchThreads over the same grid.
+    virtual void Trace(const TraceKernel& kernel, u32 width, u32 height, u32 depth) = 0;
+    /// One build or refit with one geometry and one range (vkCmdBuildAccelerationStructuresKHR).
+    /// Vulkan: throws std::runtime_error when the list has no device functions to call (a
+    /// vulkan::Wrap list, or a device without acceleration structures); every list a
+    /// gpu::Device hands out has them. Metal: an acceleration structure encoder's build or refit.
+    virtual void BuildRtAccelerationStructure(const RtBuild& build) = 0;
 
     virtual void Barrier(const BarrierBatch& batch) = 0;
     void Barrier(const GlobalBarrier& b) {

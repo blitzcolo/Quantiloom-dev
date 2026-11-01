@@ -36,4 +36,14 @@ namespace quantiloom::gpu::vulkan {
 [[nodiscard]] VkPipelineLayout NativeLayout(const gpu::KernelLayout& layout);
 [[nodiscard]] VkDescriptorSet NativeSet(gpu::BindGroup group);
 
+// The ray tracing modules' raw samplers, views and acceleration structures until they hold gpu::
+// objects. A view-only SampledRef has no image and policy Optimal: it is written
+// SHADER_READ_ONLY_OPTIMAL, as RayTracingPipeline's texture, BRDF LUT and environment writes are.
+[[nodiscard]] gpu::SamplerRef Ref(VkSampler sampler);                    // Transitional; deleted in S19
+[[nodiscard]] gpu::RtSceneRef Ref(VkAccelerationStructureKHR structure,
+                                  VkDeviceAddress address = 0);           // Transitional; deleted in S19
+[[nodiscard]] gpu::TextureRef SampledRef(VkImageView view);               // Transitional; deleted in S19
+[[nodiscard]] VkSampler NativeSampler(gpu::SamplerRef ref);               // Transitional; deleted in S19
+[[nodiscard]] VkAccelerationStructureKHR NativeScene(gpu::RtSceneRef ref);  // Transitional; deleted in S19
+
 }  // namespace quantiloom::gpu::vulkan

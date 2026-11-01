@@ -12,7 +12,8 @@ namespace quantiloom::gpu::vulkan {
 class VulkanCommandPool final : public CommandPool {
 public:
     [[nodiscard]] static Result<std::unique_ptr<CommandPool>, String> Create(VkDevice device, u32 queueFamily,
-                                                                             const CommandPoolDesc& desc);
+                                                                             const CommandPoolDesc& desc,
+                                                                             const RtFunctions& rt);
     ~VulkanCommandPool() override;
     VulkanCommandPool(const VulkanCommandPool&) = delete;
     VulkanCommandPool& operator=(const VulkanCommandPool&) = delete;
@@ -24,12 +25,13 @@ private:
     VulkanCommandPool() = default;
     VkDevice device_ = VK_NULL_HANDLE;
     VkCommandPool pool_ = VK_NULL_HANDLE;
+    RtFunctions rt_{};  // copied into every buffer's list
 };
 
 class VulkanCommandBuffer final : public CommandBuffer {
 public:
-    VulkanCommandBuffer(VkDevice device, VkCommandPool pool, VkCommandBuffer cmd)
-        : device_(device), pool_(pool), list_(cmd) {}
+    VulkanCommandBuffer(VkDevice device, VkCommandPool pool, VkCommandBuffer cmd, const RtFunctions& rt)
+        : device_(device), pool_(pool), list_(cmd, rt) {}
     ~VulkanCommandBuffer() override;
     VulkanCommandBuffer(const VulkanCommandBuffer&) = delete;
     VulkanCommandBuffer& operator=(const VulkanCommandBuffer&) = delete;

@@ -2,6 +2,7 @@
 
 #include "gpu/CommandList.hpp"
 #include "gpu/vulkan/VulkanMapping.hpp"
+#include "gpu/vulkan/VulkanRt.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -10,6 +11,8 @@ namespace quantiloom::gpu::vulkan {
 class VulkanCommandList final : public CommandList {
 public:
     explicit VulkanCommandList(VkCommandBuffer cmd) : cmd_(cmd) {}
+    /// What a VulkanDevice hands out: the list can also record acceleration structure builds.
+    VulkanCommandList(VkCommandBuffer cmd, const RtFunctions& rt) : cmd_(cmd), rt_(rt) {}
 
     [[nodiscard]] Backend GetBackend() const override { return Backend::Vulkan; }
     [[nodiscard]] VkCommandBuffer Native() const { return cmd_; }
@@ -20,6 +23,10 @@ public:
     void PushConstants(const KernelLayout& layout, std::span<const std::byte> bytes) override;
     using CommandList::PushConstants;
     void Dispatch(u32 groupsX, u32 groupsY, u32 groupsZ) override;
+
+    void SetTraceKernel(const TraceKernel& kernel) override;
+    void Trace(const TraceKernel& kernel, u32 width, u32 height, u32 depth) override;
+    void BuildRtAccelerationStructure(const RtBuild& build) override;
 
     void Barrier(const BarrierBatch& batch) override;
     using CommandList::Barrier;
@@ -40,6 +47,7 @@ public:
 
 private:
     VkCommandBuffer cmd_;
+    RtFunctions rt_{};
 };
 
 }  // namespace quantiloom::gpu::vulkan
