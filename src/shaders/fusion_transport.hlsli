@@ -3,10 +3,9 @@
 
 #include "ql_bind.hlsli"
 
-struct FusionTransportData {
-    uint mode, nodeId, materialId, flags;
-    float absorptionPerMeter, sheetReflectance, sheetTransmittance, orientation;
-};
+// Shared with renderer/FusionTransport.hpp: ql_shared_fusion.hlsli.
+#define QL_SHARED_WANT_FusionTransportData
+#include "ql_shared_fusion.hlsli"
 StructuredBuffer<FusionTransportData> fusionTransport : QL_RT_REGISTER(fusionTransport);
 
 #ifndef QL_FUSION_DATA_ONLY

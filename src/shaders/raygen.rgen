@@ -40,12 +40,9 @@ RWByteAddressBuffer cameraDynamicCounters : QL_RT_REGISTER(cameraDynamicCounters
 // miss. Overwritten every frame (never accumulated) so it always reflects the
 // current scene; consumed by ExternalRenderContext::BlitDepthTo.
 RWTexture2D<float> depthImage : QL_RT_REGISTER(depthImage);
-struct FusionProbeRay {
-    float3 origin;
-    float wavelength;
-    float3 direction;
-    uint branchMask;
-};
+// Shared with RayTracingPipeline::SetFusionProbes: ql_shared_fusion.hlsli.
+#define QL_SHARED_WANT_FusionProbeRay
+#include "ql_shared_fusion.hlsli"
 StructuredBuffer<FusionProbeRay> fusionProbeRays : QL_RT_REGISTER(fusionProbeRays);
 
 // The push-constant block lives in common.hlsli, shared with the closest-hit

@@ -51,6 +51,26 @@ here, on Windows. MSC runs with `--disableNanInfOptimization`: 4.0 assumes
 no NaN by default, and the `isnan`/`isfinite` guards in this directory are
 there precisely because NaN happens.
 
+## Sharing a struct with the host
+
+A struct the host fills and a shader reads is written once, in a
+`ql_shared_*.hlsli` header that DXC and MSVC both compile -- never as an HLSL
+struct plus a C++ twin. `ql_shared_prelude.hlsli` has the rules: HLSL names
+(the `.spv` carry them as debug names), a `float3` on a 16-byte boundary
+followed by a scalar, no `bool`, no matrix, no array in a push-constant
+struct, `QL_SHARED_LAYOUT`/`QL_SHARED_OFFSET` on the size and every member,
+host defaults through `QL_DEFAULT`. A shader asks for one struct where it
+needs it:
+
+```hlsl
+#define QL_SHARED_WANT_ThermalElementGpu
+#include "ql_shared_thermal.hlsli"
+```
+
+so its preprocessed tokens stay what they were and it gains no struct it does
+not use; the host includes the header by a relative path and aliases the
+struct (`using DisplayRangePush = shader::RangePush;`).
+
 ## Stage extensions
 
 `.rgen` / `.rchit` / `.rmiss` ray tracing stages, `.comp` and `.comp.hlsl` compute,

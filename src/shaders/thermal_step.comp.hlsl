@@ -29,25 +29,11 @@
 
 #define QL_THERMAL_MAX_NODES 32
 
-struct ThermalElementGpu {
-    float3 centre;
-    float  area;
-    float3 normal;
-    uint   materialId;
-};
-
-struct ThermalMaterialGpu {
-    float conductivity;      // W/(mK), 0 = non-participating
-    float density;           // kg/m^3
-    float specificHeat;      // J/(kgK)
-    float thickness;         // m
-    float convection;        // W/(m^2 K)
-    float shortwaveAbsorptivity;
-    float longwaveEmissivity;
-    uint  interiorBcFixed;   // 0 = adiabatic, 1 = fixed temperature
-    float interiorTemperature;
-    float wetnessFactor;     // 0 = dry, 1 = open water
-};
+// Shared with the host and with thermal_exchange.rayq.hlsl:
+// ql_shared_thermal.hlsli.
+#define QL_SHARED_WANT_ThermalElementGpu
+#define QL_SHARED_WANT_ThermalMaterialGpu
+#include "ql_shared_thermal.hlsli"
 
 StructuredBuffer<ThermalElementGpu>   elements : register(t0, space0);
 StructuredBuffer<ThermalMaterialGpu>  materials : register(t1, space0);
@@ -79,24 +65,8 @@ RWStructuredBuffer<float>            sensitivity : register(u11, space0);
 RWStructuredBuffer<float>            radiosity : register(u12, space0);
 RWStructuredBuffer<float>            irradiance : register(u13, space0);
 
-struct StepPushConstants {
-    float3 sunDirection;
-    float  dt_s;
-    float  airTemperature_K;
-    float  sunIrradiance;
-    float  skyTemperature_K;
-    float  sunBlend;
-    uint   elementCount;
-    uint   nodeCount;
-    uint   parity;
-    uint   sunSampleA;
-    uint   sunSampleB;
-    float  diffuseIrradiance;
-    float  relativeHumidity;   // percent
-    float  convection_W_m2K;   // 0 means "the material's own"
-    uint   hasReflectedGain;   // 0 when the table is a placeholder
-    uint   carryTangent;       // 0 when binding 11 is a placeholder
-};
+#define QL_SHARED_WANT_StepPushConstants
+#include "ql_shared_thermal.hlsli"
 QL_PUSH_CONSTANTS(StepPushConstants, pc);
 
 static const float kStefanBoltzmann = 5.670374419e-8;

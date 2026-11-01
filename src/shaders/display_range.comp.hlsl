@@ -33,14 +33,9 @@ RWTexture2D<float4> inputImage : register(u0, space0);
 globallycoherent RWStructuredBuffer<uint> rangeScratch : register(u1, space0);
 globallycoherent RWStructuredBuffer<uint> histogram : register(u2, space0);
 
-struct RangePush {
-    uint width;
-    uint height;
-    float absMin;
-    float scale;
-    uint targetLow;
-    uint targetHigh;
-};
+// Shared with renderer/GpuDisplayRange.cpp: ql_shared_compute.hlsli.
+#define QL_SHARED_WANT_RangePush
+#include "ql_shared_compute.hlsli"
 QL_PUSH_CONSTANTS(RangePush, params);
 
 static const uint HISTOGRAM_BINS = 65536u;

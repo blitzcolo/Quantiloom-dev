@@ -12,6 +12,10 @@
 #include <limits>
 #include <vector>
 
+// RangePush, defined once for display_range.comp.hlsl and this file. By a path
+// relative to this file, as RtBindings.hpp includes its manifest.
+#include "../../shaders/ql_shared_compute.hlsli"
+
 
 namespace quantiloom::rendercore {
 namespace {
@@ -27,16 +31,8 @@ f32 OrderedToFloat(u32 ordered) {
     return std::bit_cast<f32>(bits);
 }
 
-/// Must match the push block in display_range.comp.hlsl (:44).
-struct DisplayRangePush {
-    u32 width;
-    u32 height;
-    f32 absMin;
-    f32 scale;
-    u32 targetLow;
-    u32 targetHigh;
-};
-static_assert(sizeof(DisplayRangePush) == 24);
+/// The push block of display_range.comp.hlsl, which calls it RangePush.
+using DisplayRangePush = shader::RangePush;
 
 }  // namespace
 

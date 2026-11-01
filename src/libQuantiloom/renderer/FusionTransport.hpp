@@ -2,13 +2,12 @@
 #include "scene/Scene.hpp"
 #include "core/Config.hpp"
 #include <vector>
+// FusionTransportData, defined once for fusion_transport.hlsli and the host. By a
+// path relative to this file, as RtBindings.hpp includes its manifest.
+#include "../../shaders/ql_shared_fusion.hlsli"
 
 namespace quantiloom::rendercore {
-struct FusionTransportGpu {
-    u32 mode=0,nodeId=0,materialId=0,flags=0;
-    f32 absorptionPerMeter=0,sheetReflectance=0,sheetTransmittance=0,orientation=1;
-};
-static_assert(sizeof(FusionTransportGpu)==32);
+using FusionTransportGpu = shader::FusionTransportData;
 /// Record 0 is the summary ResolveFusionTransport writes: mode 0 means the
 /// config named fusion transport but no interface qualified, anything else
 /// means rays must walk fusion media. Every host branch on it goes through

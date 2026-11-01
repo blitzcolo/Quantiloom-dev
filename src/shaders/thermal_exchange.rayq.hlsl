@@ -30,15 +30,10 @@
 
 RaytracingAccelerationStructure sceneTlas : register(t0, space0);
 
-// One per element, in the order BuildThermalMesh produced them.
-struct ThermalElementGpu {
-    // `centre`, not `centroid`: the latter is an HLSL interpolation modifier
-    // and a member by that name does not parse.
-    float3 centre;
-    float  area;
-    float3 normal;
-    uint   materialId;
-};
+// One per element, in the order BuildThermalMesh produced them. The struct is
+// shared with the host and with thermal_step.comp.hlsl: ql_shared_thermal.hlsli.
+#define QL_SHARED_WANT_ThermalElementGpu
+#include "ql_shared_thermal.hlsli"
 StructuredBuffer<ThermalElementGpu> elements : register(t1, space0);
 
 // instanceElementBase[instanceIndex] + primitiveIndex is the element a hit
@@ -71,15 +66,8 @@ RWStructuredBuffer<float> sunVisibility : register(u4, space0);
 // on one side, which no view factor at this resolution distinguishes anyway.
 StructuredBuffer<float> materialCoverage : register(t5, space0);
 
-struct ExchangePushConstants {
-    float3 sunDirection;   // from surface toward the sun, normalised
-    uint   elementCount;
-    uint   rayCount;       // hemisphere rays per element; 0 = sun-only pass
-    uint   sunRayCount;    // rays toward the sun, for a soft shadow edge
-    float  sunAngularRadius;  // radians; 0.00465 is the real sun
-    float  rayOffset;      // floor of how far off the surface a ray starts
-    uint   sunOutputOffset;   // element offset into sunVisibility for this direction
-};
+#define QL_SHARED_WANT_ExchangePushConstants
+#include "ql_shared_thermal.hlsli"
 QL_PUSH_CONSTANTS(ExchangePushConstants, pc);
 
 // ----------------------------------------------------------------------------

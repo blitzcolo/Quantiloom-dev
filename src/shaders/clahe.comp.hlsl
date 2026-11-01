@@ -62,21 +62,10 @@
 // display_palettes.hlsli so the two paths cannot drift apart.
 #include "display_palettes.hlsli"
 
-// Push constants for all passes
-struct CLAHEPushConstants {
-    uint imageWidth;
-    uint imageHeight;
-    uint tileCountX;
-    uint tileCountY;
-    float clipLimit;           // Typically 2.0-4.0
-    uint luminanceOnly;        // 1 = process luminance only, 0 = all channels
-    float inputMin;            // Pre-computed min value for normalization
-    float inputMax;            // Pre-computed max value for normalization
-    uint passIndex;            // Which pass is executing (0, 1, or 2)
-    uint toneMode;             // TONE_*
-    uint palette;              // PALETTE_*
-    uint padding;
-};
+// Push constants for all passes, shared with renderer/GpuClahe.cpp:
+// ql_shared_compute.hlsli.
+#define QL_SHARED_WANT_CLAHEPushConstants
+#include "ql_shared_compute.hlsli"
 
 QL_PUSH_CONSTANTS(CLAHEPushConstants, params);
 

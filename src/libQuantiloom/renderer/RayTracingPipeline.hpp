@@ -64,6 +64,9 @@
 #include "scene/CameraProjection.hpp"
 #include "renderer/FusionRecordLayout.hpp"
 #include "renderer/FusionTransport.hpp"
+// GeometryHit and FusionProbeRay, defined once for the fusion kernels and the
+// host. By a path relative to this file, as RtBindings.hpp includes its manifest.
+#include "../../shaders/ql_shared_fusion.hlsli"
 #include <array>
 
 #include "core/Types.hpp"
@@ -411,23 +414,11 @@ public:
                               bool aggregate = false, bool quantitative = false);
     Vector<u8> ReadFusionRecording();
     void SetFusionInitialMedia(const Vector<u32>& media);
-    struct ProbeRay {
-        glm::vec3 origin;
-        f32 wavelength;
-        glm::vec3 direction;
-        u32 branchMask;
-    };
+    /// raygen.rgen's FusionProbeRay.
+    using ProbeRay = shader::FusionProbeRay;
     void SetFusionProbes(const Vector<ProbeRay>& probes);
-    struct GeometryHit {
-        u32 hit = 0, instanceIndex = 0, primitiveIndex = 0;
-        f32 distance = -1;
-        glm::vec3 position{};
-        f32 depth = -1;
-        glm::vec3 normal{};
-        u32 validity = 0;
-        glm::vec2 bary{}, padding{};
-    };
-    static_assert(sizeof(GeometryHit) == 64);
+    /// fusion_geometry.rayq.hlsl's GeometryHit; a default one is a miss.
+    using GeometryHit = shader::GeometryHit;
     Vector<GeometryHit> CapturePrimaryGeometry(u32 width, u32 height,
                                                const Vector<glm::vec2>* queryPixels = nullptr);
     [[nodiscard]] const CameraData& GetCameraData() const { return m_pushConstants.cameraAndSampling.camera; }

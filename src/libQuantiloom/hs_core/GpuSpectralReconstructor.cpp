@@ -19,6 +19,11 @@
 #include <vector>
 #include <cmath>
 
+// ReconstructPush, defined once for spectral_reconstruct.comp.hlsl and this file.
+// By a path relative to this file, as renderer/RtBindings.hpp includes its
+// manifest.
+#include "../../shaders/ql_shared_compute.hlsli"
+
 namespace quantiloom {
 
 // ============================================================================
@@ -42,20 +47,10 @@ const char* GpuReconstructorStatusToString(GpuReconstructorStatus status) {
 }
 
 // ============================================================================
-// Push Constants Structure (must match shader)
+// Push Constants Structure (the shader's ReconstructPush)
 // ============================================================================
 
-struct ReconstructPushConstants {
-    u32 width;
-    u32 height;
-    u32 srcBands;
-    u32 dstBands;
-    u32 interpolationMode;
-    u32 _pad0;
-    u32 _pad1;
-    u32 _pad2;
-};
-static_assert(sizeof(ReconstructPushConstants) == 8u * sizeof(u32));
+using ReconstructPushConstants = shader::ReconstructPush;
 
 // ============================================================================
 // Reconstruction Mapping (must match spectral_reconstruct.comp, binding 4)

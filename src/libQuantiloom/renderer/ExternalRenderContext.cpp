@@ -53,6 +53,9 @@
 #include "io/GltfLoader.hpp"
 #include "io/UsdLoader.hpp"
 #include "io/ImageIO.hpp"
+// The pick's structs, shared with pick.rayq.hlsl. By a path relative to this
+// file, as RtBindings.hpp includes its manifest.
+#include "../../shaders/ql_shared_compute.hlsli"
 
 #include <glm/gtc/matrix_inverse.hpp>
 #include <algorithm>
@@ -4007,34 +4010,10 @@ Result<Optional<PixelReading>, String> ExternalRenderContext::PollPixelValue() {
 
 namespace {
 
-// Must match PickResultGpu in pick.rayq.hlsl (std430, 32 bytes)
-struct PickResultGpu {
-    u32 hit;
-    u32 instanceIndex;
-    u32 primitiveIndex;
-    f32 hitT;
-    glm::vec3 worldPosition;
-    u32 _pad;
-};
-static_assert(sizeof(PickResultGpu) == 32, "PickResultGpu size mismatch");
-
-// Must match PickPushConstants in pick.rayq.hlsl (80 bytes)
-struct PickPushConstants {
-    glm::vec3 origin;
-    f32 fovScale;
-    glm::vec3 forward;
-    f32 aspectRatio;
-    glm::vec3 right;
-    u32 pixelX;
-    glm::vec3 up;
-    u32 pixelY;
-    u32 width;
-    u32 height;
-    // Same two words the shader repurposed; the struct is still 80 bytes.
-    u32 projection;
-    f32 orthoHeight;
-};
-static_assert(sizeof(PickPushConstants) == 80, "PickPushConstants size mismatch");
+// pick.rayq.hlsl's result record (32 bytes) and push constants (80 bytes),
+// defined once for both in ql_shared_compute.hlsli.
+using PickResultGpu = shader::PickResultGpu;
+using PickPushConstants = shader::PickPushConstants;
 
 /// The observer descriptor set stays selected only while camera strata are
 /// traced. The manual reset used to sit after the loop, so every early return

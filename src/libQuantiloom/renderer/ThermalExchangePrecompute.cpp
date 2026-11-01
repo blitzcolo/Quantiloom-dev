@@ -16,6 +16,11 @@
 #include <numeric>
 #include <unordered_map>
 
+// The structs thermal_exchange.rayq.hlsl reads, defined once for the shader and
+// this file. By a path relative to this file, as RtBindings.hpp includes its
+// manifest.
+#include "../../shaders/ql_shared_thermal.hlsli"
+
 
 namespace quantiloom::rendercore {
 
@@ -29,27 +34,11 @@ constexpr u32 kSkyRecord = 0xFFFFFFFFu;
 /// triangle's size.
 constexpr f32 kRayOffsetFloor = 1e-5f;
 
-/// Mirrors ThermalElementGpu in thermal_exchange.rayq.hlsl. `centre`, not
-/// `centroid`: the latter is an HLSL interpolation modifier and will not parse
-/// as a member name, which is worth knowing before renaming it back.
-struct ThermalElementGpu {
-    glm::vec3 centre;
-    f32 area;
-    glm::vec3 normal;
-    u32 materialId;
-};
-static_assert(sizeof(ThermalElementGpu) == 32, "ThermalElementGpu size mismatch");
-
-struct ExchangePushConstants {
-    glm::vec3 sunDirection;
-    u32 elementCount;
-    u32 rayCount;
-    u32 sunRayCount;
-    f32 sunAngularRadius;
-    f32 rayOffset;
-    u32 sunOutputOffset;
-};
-static_assert(sizeof(ExchangePushConstants) == 36, "ExchangePushConstants size mismatch");
+/// `centre`, not `centroid`: the latter is an HLSL interpolation modifier and
+/// will not parse as a member name, which is worth knowing before renaming it
+/// back.
+using ThermalElementGpu = shader::ThermalElementGpu;
+using ExchangePushConstants = shader::ExchangePushConstants;
 
 /// Make the view factors reciprocal, and let the sky take what is left.
 ///

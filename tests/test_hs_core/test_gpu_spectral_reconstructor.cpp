@@ -18,6 +18,8 @@
 #include "core/SpectralCube.hpp"
 #include <cmath>
 #include "support/VulkanTestDevice.hpp"
+// The push constants the shader and GpuSpectralReconstructor.cpp share.
+#include "../../src/shaders/ql_shared_compute.hlsli"
 
 using namespace quantiloom;
 
@@ -350,17 +352,8 @@ TEST(SpectralCubeLayoutTest, BandPointerAccess) {
 // These tests verify data structures match shader expectations
 
 TEST(ComputeShaderCompatTest, PushConstantsSize) {
-    // Push constants structure must match shader
-    struct ReconstructPushConstants {
-        u32 width;
-        u32 height;
-        u32 srcBands;
-        u32 dstBands;
-        u32 interpolationMode;
-        u32 _pad0;
-        u32 _pad1;
-        u32 _pad2;
-    };
+    // The one definition the shader and the reconstructor both use
+    using ReconstructPushConstants = shader::ReconstructPush;
 
     // Must be a multiple of 4 bytes and reasonably sized
     EXPECT_EQ(sizeof(ReconstructPushConstants) % 4, 0u);

@@ -6,18 +6,9 @@
 
 RaytracingAccelerationStructure geometryScene : QL_RT_REGISTER(scene);
 ByteAddressBuffer geometryVertices : QL_RT_REGISTER(vertexPositions);
-struct GeometryHit {
-    uint hit;
-    uint instanceIndex;
-    uint primitiveIndex;
-    float distance;
-    float3 position;
-    float depth;
-    float3 normal;
-    uint validity;
-    float2 bary;
-    float2 padding;
-};
+// Shared with RayTracingPipeline::CapturePrimaryGeometry: ql_shared_fusion.hlsli.
+#define QL_SHARED_WANT_GeometryHit
+#include "ql_shared_fusion.hlsli"
 RWStructuredBuffer<GeometryHit> geometryHits : QL_RT_REGISTER(geometryHits);
 StructuredBuffer<float2> geometryQueryPixels : QL_RT_REGISTER(geometryQueryPixels);
 
