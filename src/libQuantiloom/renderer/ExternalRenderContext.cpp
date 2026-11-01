@@ -166,6 +166,17 @@ void NoteTargetFormat(GpuTargetFormat format) {
                 static_cast<u32>(format));
 }
 
+/// The neutral format of a host target, for the texture it is imported as.
+gpu::Format HostTargetFormat(GpuTargetFormat format) {
+    switch (format) {
+        case GpuTargetFormat::Rgba8Srgb: return gpu::Format::RGBA8Srgb;
+        case GpuTargetFormat::Bgra8Srgb: return gpu::Format::BGRA8Srgb;
+        case GpuTargetFormat::Rgba16Float: return gpu::Format::RGBA16Float;
+        case GpuTargetFormat::R32Float: return gpu::Format::R32Float;
+    }
+    return gpu::Format::Undefined;
+}
+
 }  // namespace
 
 // ============================================================================
@@ -492,7 +503,7 @@ struct ExternalRenderContext::Impl {
     /// waiting on the queue. The event is set by that copy block and reset
     /// by the next measurement recording.
     std::unique_ptr<GpuBuffer> cameraDynamicReadback;
-    VkEvent cameraDynamicReadbackEvent = VK_NULL_HANDLE;
+    std::unique_ptr<gpu::Event> cameraDynamicReadbackEvent;
     // The report's host-side inputs, snapshotted where the copy is recorded
     // so a config change between record and read cannot retcon them.
     u32 cameraDynamicSensorWidth = 0;
@@ -590,7 +601,7 @@ struct ExternalRenderContext::Impl {
     // Seven-stamp query pool bracketing the camera compute passes
     // (start/dynamic/psf/detector/display/isp/hsv-end). Resolved lazily by
     // GetLastCameraGpuTimings once the GPU has finished the frame.
-    VkQueryPool cameraTimingPool = VK_NULL_HANDLE;
+    std::unique_ptr<gpu::TimestampPool> cameraTimingPool;
     f64 cameraTimestampPeriodNs = 1.0;
 
     // Ready flag
@@ -615,10 +626,7 @@ struct ExternalRenderContext::Impl {
         cameraFullPerf.reset();
         pipeline.reset();
         cameraGpuPipeline.reset();
-        if (cameraTimingPool != VK_NULL_HANDLE) {
-            vkDestroyQueryPool(device, cameraTimingPool, nullptr);
-            cameraTimingPool = VK_NULL_HANDLE;
-        }
+        cameraTimingPool.reset();
         cameraMeasurementImage.reset();
         cameraMeasurementDepthImage.reset();
         cameraBaselineImage.reset();
@@ -626,10 +634,7 @@ struct ExternalRenderContext::Impl {
         cameraResponseBuffer.reset();
         cameraDynamicCounterBuffer.reset();
         cameraDynamicReadback.reset();
-        if (cameraDynamicReadbackEvent != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
-            vkDestroyEvent(device, cameraDynamicReadbackEvent, nullptr);
-            cameraDynamicReadbackEvent = VK_NULL_HANDLE;
-        }
+        cameraDynamicReadbackEvent.reset();
         cameraAtmosHeaderBuffer.reset();
         cameraAtmosDataBuffer.reset();
         cameraBaselineAtmosHeaderBuffer.reset();
@@ -1013,12 +1018,13 @@ struct ExternalRenderContext::Impl {
     /// which is what lets a frame be drawn without advancing the accumulation.
     /// @p srcWidth/@p srcHeight are the internal render extent, @p dstWidth/
     /// @p dstHeight the target's. They differ whenever the render scale is
-    /// below 1.0, and the blit magnifies.
+    /// below 1.0, and the blit magnifies. @p sourceWrite is the write of the
+    /// pass that produced @p source (RayTraceWrite or ComputeWrite).
     void BlitToTarget(VkCommandBuffer cmd, VkImage source, VkImage targetImage,
                       VkImageLayout targetLayout, VkImageLayout targetFinalLayout,
                       u32 srcWidth, u32 srcHeight,
                       u32 dstWidth, u32 dstHeight,
-                      VkPipelineStageFlags sourceStage, GpuTargetFormat targetFormat);
+                      gpu::Access sourceWrite, GpuTargetFormat targetFormat);
 
     /// Recreate every render-extent-sized resource at @p renderW x @p renderH.
     /// Waits for the GPU and resets the accumulation: nothing survives a
@@ -2193,11 +2199,11 @@ void ExternalRenderContext::RenderFrame(
 
         const auto blitSource = m_impl->CurrentDisplaySource();
         // Whichever pass wrote it last is what the barrier has to wait on.
-        const VkPipelineStageFlags srcStage = (blitSource.image == m_impl->outputImage->GetImage())
-                                                  ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
-                                                  : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        const gpu::Access srcWrite = (blitSource.image == m_impl->outputImage->GetImage())
+                                         ? gpu::Access::RayTraceWrite
+                                         : gpu::Access::ComputeWrite;
         m_impl->BlitToTarget(cmd, blitSource.image, targetImage, targetLayout, targetFinalLayout,
-                             blitSource.width, blitSource.height, width, height, srcStage,
+                             blitSource.width, blitSource.height, width, height, srcWrite,
                              target.format);
 
         m_impl->frameIndex++;
@@ -2243,28 +2249,25 @@ void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage sour
                                                VkImageLayout targetFinalLayout,
                                                u32 srcWidth, u32 srcHeight,
                                                u32 dstWidth, u32 dstHeight,
-                                               VkPipelineStageFlags sourceStage,
+                                               gpu::Access sourceWrite,
                                                GpuTargetFormat targetFormat) {
     NoteTargetFormat(targetFormat);
 
+    auto gpuList = gpu::vulkan::Wrap(cmd);
+    // The source is a storage image kept in GENERAL, passed under Optimal so
+    // its transfer read is TRANSFER_SRC_OPTIMAL. The target is the host's
+    // image; its layouts are the caller's and travel verbatim.
+    gpu::TextureRef sourceRef;
+    sourceRef.image = gpu::vulkan::ToHandle(source);
+    sourceRef.width = srcWidth;
+    sourceRef.height = srcHeight;
+    sourceRef.layout = gpu::TextureLayoutPolicy::Optimal;
+    const gpu::TextureRef targetRef = gpuDevice->ImportHostTexture(
+        gpu::vulkan::ToHandle(targetImage), HostTargetFormat(targetFormat), dstWidth, dstHeight);
+
     // Step 1: source GENERAL -> TRANSFER_SRC_OPTIMAL, ordered against the pass
     // that wrote it and nothing else.
-    VkImageMemoryBarrier outputBarrier{};
-    outputBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    outputBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-    outputBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    outputBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    outputBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    outputBarrier.image = source;
-    outputBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    outputBarrier.subresourceRange.baseMipLevel = 0;
-    outputBarrier.subresourceRange.levelCount = 1;
-    outputBarrier.subresourceRange.baseArrayLayer = 0;
-    outputBarrier.subresourceRange.layerCount = 1;
-    outputBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    outputBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, sourceStage, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &outputBarrier);
+    gpuList.Barrier(gpu::TextureBarrier{sourceRef, sourceWrite, gpu::Access::TransferRead});
 
     // Step 2: target -> TRANSFER_DST_OPTIMAL, from the caller-declared current
     // layout. The host's own barrier tracker cannot see what was recorded
@@ -2272,70 +2275,39 @@ void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage sour
     // before this point. That also absorbs the write-after-read case of a
     // compositor still sampling the previous frame's texture, which the old
     // trace-stage-only barrier with srcAccess 0 did not.
-    VkImageMemoryBarrier targetBarrier{};
-    targetBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    targetBarrier.oldLayout = targetLayout;
-    targetBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    targetBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    targetBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    targetBarrier.image = targetImage;
-    targetBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    targetBarrier.subresourceRange.baseMipLevel = 0;
-    targetBarrier.subresourceRange.levelCount = 1;
-    targetBarrier.subresourceRange.baseArrayLayer = 0;
-    targetBarrier.subresourceRange.layerCount = 1;
-    targetBarrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-    targetBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &targetBarrier);
+    gpu::TextureBarrier targetIn{targetRef, gpu::Access::AnyWrite, gpu::Access::TransferWrite};
+    targetIn.hostLayoutBefore = static_cast<u32>(targetLayout);
+    gpuList.Barrier(targetIn);
 
     // Step 3: blit, converting R32G32B32A32_SFLOAT to the target format and
     // magnifying when the render extent is below the target's.
     // vkCmdBlitImage clamps anything above 1.0.
-    VkImageBlit blitRegion{};
-    blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    blitRegion.srcSubresource.mipLevel = 0;
-    blitRegion.srcSubresource.baseArrayLayer = 0;
-    blitRegion.srcSubresource.layerCount = 1;
-    blitRegion.srcOffsets[0] = {0, 0, 0};
-    blitRegion.srcOffsets[1] = {static_cast<i32>(srcWidth), static_cast<i32>(srcHeight), 1};
-    blitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    blitRegion.dstSubresource.mipLevel = 0;
-    blitRegion.dstSubresource.baseArrayLayer = 0;
-    blitRegion.dstSubresource.layerCount = 1;
-    blitRegion.dstOffsets[0] = {0, 0, 0};
-    blitRegion.dstOffsets[1] = {static_cast<i32>(dstWidth), static_cast<i32>(dstHeight), 1};
+    gpu::BlitRegion blitRegion;
+    blitRegion.srcX1 = static_cast<i32>(srcWidth);
+    blitRegion.srcY1 = static_cast<i32>(srcHeight);
+    blitRegion.dstX1 = static_cast<i32>(dstWidth);
+    blitRegion.dstY1 = static_cast<i32>(dstHeight);
 
     // NEAREST when the extents match: a 1:1 blit resolves to a copy either
     // way, and this is the path every full-scale frame takes.
     const bool magnifying = (srcWidth != dstWidth) || (srcHeight != dstHeight);
-    const VkFilter filter = (magnifying && linearBlitSupported)
-                                ? VK_FILTER_LINEAR
-                                : VK_FILTER_NEAREST;
+    const gpu::Filter filter = (magnifying && linearBlitSupported)
+                                   ? gpu::Filter::Linear
+                                   : gpu::Filter::Nearest;
 
-    vkCmdBlitImage(cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   targetImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   1, &blitRegion, filter);
+    gpuList.BlitTexture(sourceRef, targetRef, blitRegion, filter);
 
     // Step 4: source back to GENERAL for the next pass to write
-    outputBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    outputBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    outputBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    outputBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, sourceStage,
-                         0, 0, nullptr, 0, nullptr, 1, &outputBarrier);
+    gpuList.Barrier(gpu::TextureBarrier{sourceRef, gpu::Access::TransferRead, sourceWrite});
 
     // Step 5: target to the caller-chosen final layout, with a destination
     // scope wide enough for whatever the host does next. The host's next use
     // must request exactly this layout, so its own first barrier is a
     // same-layout barrier rather than a transition from a stale scope.
-    targetBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    targetBarrier.newLayout = targetFinalLayout;
-    targetBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    targetBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &targetBarrier);
+    gpu::TextureBarrier targetOut{targetRef, gpu::Access::TransferWrite,
+                                  gpu::Access::AnyRead | gpu::Access::AnyWrite};
+    targetOut.hostLayoutAfter = static_cast<u32>(targetFinalLayout);
+    gpuList.Barrier(targetOut);
 }
 
 bool ExternalRenderContext::PresentAccumulated(
@@ -2388,14 +2360,14 @@ bool ExternalRenderContext::PresentAccumulated(
     const auto source = m_impl->CurrentDisplaySource();
     // The post-processed images still hold the last frame's result -- nothing
     // has changed the accumulation since -- so the chains are not re-run.
-    const VkPipelineStageFlags sourceStage =
+    const gpu::Access sourceWrite =
         (source.image == m_impl->outputImage->GetImage())
-            ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
-            : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            ? gpu::Access::RayTraceWrite
+            : gpu::Access::ComputeWrite;
 
     m_impl->BlitToTarget(cmd, source.image, targetImage, targetLayout, targetFinalLayout,
                          source.width, source.height, width, height,
-                         sourceStage, target.format);
+                         sourceWrite, target.format);
     // Deliberately no accumulatedSamples++: that is the whole point.
     return true;
 }
@@ -2478,14 +2450,14 @@ bool ExternalRenderContext::ReprocessAccumulated(
     if (!m_impl->DisplaySourceReady(source)) {
         return false;
     }
-    const VkPipelineStageFlags sourceStage =
+    const gpu::Access sourceWrite =
         (source.image == m_impl->outputImage->GetImage())
-            ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
-            : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            ? gpu::Access::RayTraceWrite
+            : gpu::Access::ComputeWrite;
 
     m_impl->BlitToTarget(cmd, source.image, targetImage, targetLayout, targetFinalLayout,
                          source.width, source.height, width, height,
-                         sourceStage, target.format);
+                         sourceWrite, target.format);
     // Like PresentAccumulated: no accumulatedSamples++.
     return true;
 }
@@ -2530,84 +2502,48 @@ void ExternalRenderContext::BlitDepthTo(
         return;
     }
 
-    VkImageSubresourceRange colorRange{};
-    colorRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    colorRange.baseMipLevel = 0;
-    colorRange.levelCount = 1;
-    colorRange.baseArrayLayer = 0;
-    colorRange.layerCount = 1;
+    auto gpuList = gpu::vulkan::Wrap(cmd);
+    // The depth AOV is a storage image kept in GENERAL, passed under Optimal
+    // for its transfer read. The target is the host's image; its layouts are
+    // the caller's and travel verbatim.
+    const gpu::TextureRef depthRef =
+        gpu::vulkan::Ref(*m_impl->depthAovImage).WithLayout(gpu::TextureLayoutPolicy::Optimal);
+    const gpu::TextureRef targetRef = m_impl->gpuDevice->ImportHostTexture(
+        gpu::vulkan::ToHandle(targetImage), HostTargetFormat(target.format), width, height);
 
     // Source: depth AOV GENERAL (raygen storage write) -> TRANSFER_SRC
-    VkImageMemoryBarrier srcBarrier{};
-    srcBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    srcBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-    srcBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    srcBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    srcBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    srcBarrier.image = m_impl->depthAovImage->GetImage();
-    srcBarrier.subresourceRange = colorRange;
-    srcBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    srcBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &srcBarrier);
+    gpuList.Barrier(
+        gpu::TextureBarrier{depthRef, gpu::Access::RayTraceWrite, gpu::Access::TransferRead});
 
     // Target: caller's layout -> TRANSFER_DST. The same contract as the colour
     // present: everything submitted before this point is waited on, which
     // covers last frame's fragment reads as well as the host's own writes.
-    VkImageMemoryBarrier dstBarrier{};
-    dstBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    dstBarrier.oldLayout = targetCurrentLayout;
-    dstBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    dstBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    dstBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    dstBarrier.image = targetImage;
-    dstBarrier.subresourceRange = colorRange;
-    dstBarrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-    dstBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &dstBarrier);
+    gpu::TextureBarrier targetIn{targetRef, gpu::Access::AnyWrite, gpu::Access::TransferWrite};
+    targetIn.hostLayoutBefore = static_cast<u32>(targetCurrentLayout);
+    gpuList.Barrier(targetIn);
 
     // NEAREST on purpose: depth values must never be mixed across silhouettes.
     // That holds all the more when the render extent is below the target's and
     // this is a magnification -- an interpolated depth there would be a
     // surface that is not in the scene.
-    VkImageBlit blitRegion{};
-    blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    blitRegion.srcSubresource.mipLevel = 0;
-    blitRegion.srcSubresource.baseArrayLayer = 0;
-    blitRegion.srcSubresource.layerCount = 1;
-    blitRegion.srcOffsets[0] = {0, 0, 0};
-    blitRegion.srcOffsets[1] = {static_cast<i32>(m_impl->width),
-                                static_cast<i32>(m_impl->height), 1};
-    blitRegion.dstSubresource = blitRegion.srcSubresource;
-    blitRegion.dstOffsets[0] = {0, 0, 0};
-    blitRegion.dstOffsets[1] = {static_cast<i32>(width), static_cast<i32>(height), 1};
+    gpu::BlitRegion blitRegion;
+    blitRegion.srcX1 = static_cast<i32>(m_impl->width);
+    blitRegion.srcY1 = static_cast<i32>(m_impl->height);
+    blitRegion.dstX1 = static_cast<i32>(width);
+    blitRegion.dstY1 = static_cast<i32>(height);
 
-    vkCmdBlitImage(cmd,
-                   m_impl->depthAovImage->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   targetImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   1, &blitRegion, VK_FILTER_NEAREST);
+    gpuList.BlitTexture(depthRef, targetRef, blitRegion, gpu::Filter::Nearest);
 
     // Source back to GENERAL for next frame's raygen write
-    srcBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    srcBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    srcBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    srcBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                         0, 0, nullptr, 0, nullptr, 1, &srcBarrier);
+    gpuList.Barrier(
+        gpu::TextureBarrier{depthRef, gpu::Access::TransferRead, gpu::Access::RayTraceWrite});
 
     // Target into the caller's final layout (SHADER_READ_ONLY_OPTIMAL by
     // default), with the same conservative destination scope as the present.
-    dstBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    dstBarrier.newLayout = targetFinalLayout;
-    dstBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    dstBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &dstBarrier);
+    gpu::TextureBarrier targetOut{targetRef, gpu::Access::TransferWrite,
+                                  gpu::Access::AnyRead | gpu::Access::AnyWrite};
+    targetOut.hostLayoutAfter = static_cast<u32>(targetFinalLayout);
+    gpuList.Barrier(targetOut);
 }
 
 void ExternalRenderContext::Resize(u32 width, u32 height) {
@@ -4835,14 +4771,12 @@ CameraGpuTimings ExternalRenderContext::GetLastCameraGpuTimings() const {
     }
     // Per-pass breakdown from the camera pipeline's seven stamps. Never
     // blocks: a frame still in flight leaves the previous values standing.
-    if (m_impl->cameraTimingPool != VK_NULL_HANDLE) {
+    if (m_impl->cameraTimingPool) {
         std::array<u64, 14> results{};
-        const VkResult resolved =
-            vkGetQueryPoolResults(m_impl->device, m_impl->cameraTimingPool, 0,
-                                  rendercore::GpuCameraPipeline::kTimingQueryCount,
-                                  results.size() * sizeof(u64), results.data(), 2 * sizeof(u64),
-                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
-        bool available = resolved == VK_SUCCESS;
+        const auto resolved = m_impl->cameraTimingPool->Resolve(
+            0, rendercore::GpuCameraPipeline::kTimingQueryCount,
+            gpu::TimestampResolve::WithAvailability, results);
+        bool available = resolved.has_value() && resolved.value() == gpu::ResolveStatus::Ready;
         for (u32 i = 0; available && i < 7; ++i)
             available = results[2 * i + 1] != 0;
         if (available) {
@@ -4868,8 +4802,8 @@ DynamicExposureReport ExternalRenderContext::GetLastDynamicExposureReport() cons
     // Never blocks: the counters were copied at the end of the acquisition's
     // own submission and the event marks when they landed. A frame still in
     // flight leaves the previous report standing.
-    if (!m_impl->cameraDynamicReadback || m_impl->cameraDynamicReadbackEvent == VK_NULL_HANDLE ||
-        vkGetEventStatus(m_impl->device, m_impl->cameraDynamicReadbackEvent) != VK_EVENT_SET)
+    if (!m_impl->cameraDynamicReadback || !m_impl->cameraDynamicReadbackEvent ||
+        !m_impl->cameraDynamicReadbackEvent->IsSet())
         return m_impl->lastDynamicReport;
 
     std::array<u32, 8> counters{};
@@ -5520,7 +5454,7 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
     UploadLightingParams();
     // Configuration changes happen between frames; wait before replacing
     // descriptor-backed images/buffers that a submitted frame may still use.
-    vkDeviceWaitIdle(device);
+    (void)gpuDevice->WaitIdle();
     const u32 physicalW = cameraConfig.optics.sensorWidthPx;
     const u32 physicalH = cameraConfig.optics.sensorHeightPx;
     const auto nativeProjection = camera::ResolveProjection(
@@ -5595,8 +5529,8 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
                                                              VMA_MEMORY_USAGE_GPU_ONLY);
     if (!cameraDynamicCounterBuffer->IsValid())
         return Result<void, String>::Err("camera dynamic counter allocation failed");
-    CommandHelper::ExecuteImmediate(*contextAdapter, [&](VkCommandBuffer cmd) {
-        vkCmdFillBuffer(cmd, cameraDynamicCounterBuffer->GetHandle(), 0, VK_WHOLE_SIZE, 0);
+    gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
+        list.FillBuffer(gpu::vulkan::Ref(*cameraDynamicCounterBuffer), 0, gpu::kWholeSize, 0);
     });
     pipeline->BindCameraDynamicCounterBuffer(*cameraDynamicCounterBuffer);
     // The DynamicExposureReport readback: both 4 x u32 counter blocks side
@@ -5609,11 +5543,11 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
         if (!cameraDynamicReadback->IsValid())
             return Result<void, String>::Err("camera dynamic readback allocation failed");
     }
-    if (cameraDynamicReadbackEvent == VK_NULL_HANDLE) {
-        VkEventCreateInfo eventInfo{};
-        eventInfo.sType = VK_STRUCTURE_TYPE_EVENT_CREATE_INFO;
-        if (vkCreateEvent(device, &eventInfo, nullptr, &cameraDynamicReadbackEvent) != VK_SUCCESS)
+    if (!cameraDynamicReadbackEvent) {
+        auto event = gpuDevice->CreateGpuEvent();
+        if (!event)
             return Result<void, String>::Err("camera dynamic readback event creation failed");
+        cameraDynamicReadbackEvent = std::move(event).value();
     }
     pipeline->BindCameraDepthImage(*cameraDepthImage);
     pipeline->BindCameraObserverOutputImage(*cameraBaselineImage);
@@ -5632,18 +5566,14 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
     if (auto configured = gpu.value()->Configure(cameraConfig); !configured)
         return configured;
     cameraGpuPipeline = std::move(gpu.value());
-    if (cameraTimingPool != VK_NULL_HANDLE) {
-        vkDestroyQueryPool(device, cameraTimingPool, nullptr);
-        cameraTimingPool = VK_NULL_HANDLE;
-    }
-    VkQueryPoolCreateInfo timingInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-    timingInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-    timingInfo.queryCount = rendercore::GpuCameraPipeline::kTimingQueryCount;
-    if (vkCreateQueryPool(device, &timingInfo, nullptr, &cameraTimingPool) != VK_SUCCESS)
+    // The previous pool is destroyed before its replacement is created.
+    cameraTimingPool.reset();
+    auto timingPool =
+        gpuDevice->CreateTimestampPool(rendercore::GpuCameraPipeline::kTimingQueryCount);
+    if (!timingPool)
         return Result<void, String>::Err("cannot create camera timing pool");
-    VkPhysicalDeviceProperties properties{};
-    vkGetPhysicalDeviceProperties(contextAdapter->GetPhysicalDevice(), &properties);
-    cameraTimestampPeriodNs = static_cast<f64>(properties.limits.timestampPeriod);
+    cameraTimingPool = std::move(timingPool).value();
+    cameraTimestampPeriodNs = gpuDevice->Info().timestampPeriodNs;
     cameraStratumSampleCounts.fill(0);
     cameraStratumRecordedAcquisition = std::numeric_limits<u64>::max();
     cameraResourcesDirty = false;
@@ -5996,23 +5926,14 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
             cameraStratumRecordedAcquisition = cameraAcquisitionIndex;
         }
         // Zero the transparent/specular counters for this acquisition.
-        vkCmdFillBuffer(cmd, cameraDynamicCounterBuffer->GetHandle(), 0, VK_WHOLE_SIZE, 0);
+        gpuList.FillBuffer(gpu::vulkan::Ref(*cameraDynamicCounterBuffer), 0, gpu::kWholeSize, 0);
         // This recording will publish fresh report counters at the end; the
         // reset keeps a getter mid-flight pointed at the previous report.
-        if (cameraDynamicReadbackEvent != VK_NULL_HANDLE)
-            vkCmdResetEvent(cmd, cameraDynamicReadbackEvent, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        VkBufferMemoryBarrier zeroed{};
-        zeroed.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        zeroed.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        zeroed.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        zeroed.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        zeroed.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        zeroed.buffer = cameraDynamicCounterBuffer->GetHandle();
-        zeroed.offset = 0;
-        zeroed.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 0, nullptr, 1,
-                             &zeroed, 0, nullptr);
+        if (cameraDynamicReadbackEvent)
+            gpuList.ResetEvent(cameraDynamicReadbackEvent->Ref(), gpu::Stage::Transfer);
+        gpuList.Barrier(gpu::BufferBarrier{gpu::vulkan::Ref(*cameraDynamicCounterBuffer),
+                                           gpu::Access::TransferWrite,
+                                           gpu::Access::RayTraceRead | gpu::Access::RayTraceWrite});
     }
     stratumTimes = camera::ExposureStratumTimes(cameraAcquisitionTimeSeconds,
                                                 captureConfig.readout.exposureSeconds, strataCount);
@@ -6094,13 +6015,9 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
                                         effectiveSeed);
             pipeline->TraceRays(cmd, physicalW, physicalH);
             if (sample + 1u < stratumSamples || stratum + 1u < strataCount) {
-                VkMemoryBarrier accumulation{};
-                accumulation.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-                accumulation.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-                accumulation.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                                     VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 1,
-                                     &accumulation, 0, nullptr, 0, nullptr);
+                gpuList.Barrier(gpu::GlobalBarrier{gpu::Access::RayTraceWrite,
+                                                   gpu::Access::RayTraceRead |
+                                                       gpu::Access::RayTraceWrite});
             }
         }
         cameraStratumSampleCounts[stratum] = running + stratumSamples;
@@ -6108,13 +6025,7 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
     }
     if (cameraTracePerf)
         cameraTracePerf->EndFrame(cmd);
-    VkMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
-                         nullptr);
+    gpuList.Barrier(gpu::GlobalBarrier{gpu::Access::RayTraceWrite, gpu::Access::ComputeRead});
 
     // Object-motion approximation for the report: the mean adjacent-stratum
     // displacement of the scene's animated nodes, measured on the trajectory
@@ -6148,9 +6059,7 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
     dynamic.exposureSeconds = readoutConfig.exposureSeconds;
     dynamic.rowDelaySeconds = rolling ? readoutConfig.rowDelaySeconds : 0.0;
     const rendercore::GpuCameraPipeline::TimingQueries timing{
-        gpu::vulkan::Ref(cameraTimingPool,
-                         rendercore::GpuCameraPipeline::kTimingQueryCount),
-        0u};
+        cameraTimingPool ? cameraTimingPool->Ref() : gpu::TimestampPoolRef{}, 0u};
     const auto readout =
         fastRgb
             ? cameraGpuPipeline->RecordFastRgbMeasurement(
@@ -6165,35 +6074,20 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
         return readout;
     cameraLastAcquisitionSamples = totalTraced;
     cameraLastStrataCount = strataCount;
-    if (!fastRgb && cameraDynamicReadback && cameraDynamicReadbackEvent != VK_NULL_HANDLE) {
+    if (!fastRgb && cameraDynamicReadback && cameraDynamicReadbackEvent) {
         // Both counter sets ride one 32-byte readback, copied here -- after
         // the trace and the compositor have written them -- so the report
         // getter only checks the event instead of draining the queue.
-        VkBufferMemoryBarrier raygenReady{};
-        raygenReady.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        raygenReady.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        raygenReady.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        raygenReady.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        raygenReady.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        raygenReady.buffer = cameraDynamicCounterBuffer->GetHandle();
-        raygenReady.offset = 0;
-        raygenReady.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &raygenReady, 0,
-                             nullptr);
-        VkBufferCopy copy{};
-        copy.size = 4u * sizeof(u32);
-        vkCmdCopyBuffer(cmd, cameraDynamicCounterBuffer->GetHandle(),
-                        cameraDynamicReadback->GetHandle(), 1, &copy);
+        gpuList.Barrier(gpu::BufferBarrier{gpu::vulkan::Ref(*cameraDynamicCounterBuffer),
+                                           gpu::Access::RayTraceWrite, gpu::Access::TransferRead});
+        const gpu::BufferCopyRegion copy{0, 0, 4u * sizeof(u32)};
+        gpuList.CopyBuffer(gpu::vulkan::Ref(*cameraDynamicCounterBuffer),
+                           gpu::vulkan::Ref(*cameraDynamicReadback),
+                           std::span<const gpu::BufferCopyRegion>{&copy, 1});
         cameraGpuPipeline->RecordDynamicCounterCopy(
             gpuList, gpu::vulkan::Ref(*cameraDynamicReadback), 4u * sizeof(u32));
-        VkMemoryBarrier hostRead{};
-        hostRead.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        hostRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        hostRead.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1,
-                             &hostRead, 0, nullptr, 0, nullptr);
-        vkCmdSetEvent(cmd, cameraDynamicReadbackEvent, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        gpuList.Barrier(gpu::GlobalBarrier{gpu::Access::TransferWrite, gpu::Access::HostRead});
+        gpuList.SetEvent(cameraDynamicReadbackEvent->Ref(), gpu::Stage::Transfer);
         cameraDynamicSensorWidth = cameraConfig.optics.sensorWidthPx;
         cameraDynamicSensorHeight = cameraConfig.optics.sensorHeightPx;
         cameraDynamicGpuTimePositions = cameraConfig.quality.gpuTimePositions;
