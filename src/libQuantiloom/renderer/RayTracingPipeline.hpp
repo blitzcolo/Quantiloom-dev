@@ -161,30 +161,30 @@ public:
      * @brief Load pipeline cache from disk
      * @param context VulkanContext to create cache for
      * @param cachePath Path to cache file (e.g., "pipeline_cache.bin")
-     * @return VkPipelineCache handle (VK_NULL_HANDLE if failed or file doesn't exist)
+     * @return The cache, empty when the file is missing or rejected; null only if
+     *         not even an empty cache could be created
      *
      * Call once at application startup before creating any pipelines.
      * The cache accelerates shader compilation on subsequent runs.
      */
-    static VkPipelineCache LoadPipelineCache(VulkanContext& context, const std::string& cachePath);
+    static std::unique_ptr<gpu::PipelineCache> LoadPipelineCache(VulkanContext& context,
+                                                                 const std::string& cachePath);
 
     /**
      * @brief Save pipeline cache to disk
-     * @param context VulkanContext that owns the cache
-     * @param cache Pipeline cache to save
+     * @param cache Pipeline cache to save (null: nothing to save)
      * @param cachePath Path to save cache file
      * @return true if saved successfully
      *
      * Call at application shutdown after all pipelines are destroyed.
      */
-    static bool SavePipelineCache(VulkanContext& context, VkPipelineCache cache, const std::string& cachePath);
+    static bool SavePipelineCache(const gpu::PipelineCache* cache, const std::string& cachePath);
 
     /**
      * @brief Destroy pipeline cache
-     * @param context VulkanContext that owns the cache
-     * @param cache Pipeline cache to destroy
+     * @param cache Pipeline cache to destroy; null afterwards
      */
-    static void DestroyPipelineCache(VulkanContext& context, VkPipelineCache cache);
+    static void DestroyPipelineCache(std::unique_ptr<gpu::PipelineCache>& cache);
 
     // ========================================================================
     // Lifecycle
@@ -198,7 +198,7 @@ public:
         const std::string& closestHitPath,
         const std::string& missPath,
         const std::string& anyHitPath,
-        VkPipelineCache pipelineCache = VK_NULL_HANDLE
+        const gpu::PipelineCache* pipelineCache = nullptr
     );
 
     ~RayTracingPipeline();
@@ -460,13 +460,6 @@ public:
     // Lazily creates and caches the pipeline + SBT on first use per combination.
     void SetSpecConstants(u32 spectralMode, bool debugEnabled);
 
-    // ========================================================================
-    // Accessors
-    // ========================================================================
-
-    [[nodiscard]] VkPipeline GetPipeline() const { return m_pipeline; }
-    [[nodiscard]] VkPipelineLayout GetPipelineLayout() const;
-
 private:
     // ========================================================================
     // Initialization steps
@@ -485,16 +478,10 @@ private:
     // Load SPIR-V shader from file
     static std::vector<u32> LoadSPIRV(const std::string& path);
 
-    // Create shader module from SPIR-V
-    [[nodiscard]] VkShaderModule CreateShaderModule(const std::vector<u32>& spirv) const;
-
-    // Get SBT aligned size
-    static u32 AlignedSize(u32 size, u32 alignment);
-
     /// Record the armed record-buffer init -- header update plus zero fill --
-    /// into `cmd` ahead of a trace. Invoked from TraceRays so the barriers
+    /// into `list` ahead of a trace. Invoked from TraceRays so the barriers
     /// order the writes against whatever read the buffer last.
-    void RecordFusionInit(VkCommandBuffer cmd) const;
+    void RecordFusionInit(gpu::CommandList& list) const;
 
     // ========================================================================
     // Vulkan handles
@@ -515,8 +502,7 @@ private:
     // Pipeline objects
     std::unique_ptr<gpu::BindingLayout> m_bindingLayout;  // the set of RtBindings.hpp, space 0
     std::unique_ptr<gpu::KernelLayout> m_kernelLayout;    // that set plus TracePushConstants
-    VkPipeline m_pipeline = VK_NULL_HANDLE;
-    VkPipelineCache m_pipelineCache = VK_NULL_HANDLE;  // External, not owned
+    const gpu::PipelineCache* m_pipelineCache = nullptr;  // External, not owned
 
     // Descriptor pool and sets
     std::unique_ptr<gpu::BindGroupPool> m_bindGroupPool;
@@ -530,7 +516,7 @@ private:
     // Deferred-upload queue attached by the render context; null means
     // uploads write through the mapping directly.
     DeferredBufferUploads* m_uploadQueue = nullptr;
-    VkPipeline m_geometryPipeline=VK_NULL_HANDLE;
+    std::unique_ptr<gpu::ComputeKernel> m_geometryKernel;  // fusion_geometry on m_kernelLayout
     std::unique_ptr<GpuBuffer> m_fusionTransportBuffer;
     std::unique_ptr<GpuBuffer> m_fusionRecordBuffer;
     /// Bytes the last BeginFusionRecording armed; ReadFusionRecording returns
@@ -547,35 +533,17 @@ private:
     std::unique_ptr<GpuBuffer> m_cameraFallbackAtmosHeader;
     std::unique_ptr<GpuBuffer> m_cameraFallbackAtmosData;
 
-    // Shader Binding Table (SBT)
-    std::unique_ptr<GpuBuffer> m_sbtBuffer;
-    VkStridedDeviceAddressRegionKHR m_raygenRegion{};
-    VkStridedDeviceAddressRegionKHR m_missRegion{};
-    VkStridedDeviceAddressRegionKHR m_hitRegion{};
-    VkStridedDeviceAddressRegionKHR m_callableRegion{};
-
     // SPIR-V bytecode (kept for lazy pipeline variant creation)
-    std::vector<std::vector<u32>> m_spirvData;  // [raygen, chit, miss, shadow_miss, anyhit]
+    std::vector<gpu::ShaderCode> m_spirvData;  // [raygen, chit, miss, shadow_miss, anyhit]
 
-    // Ray Tracing properties (cached from context)
-    VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{};
-
-    // Pipeline variant cache (keyed by packed spec constants)
-    struct PipelineVariant {
-        VkPipeline pipeline = VK_NULL_HANDLE;
-        std::unique_ptr<GpuBuffer> sbtBuffer;
-        VkStridedDeviceAddressRegionKHR raygenRegion{};
-        VkStridedDeviceAddressRegionKHR missRegion{};
-        VkStridedDeviceAddressRegionKHR hitRegion{};
-        VkStridedDeviceAddressRegionKHR callableRegion{};
-    };
-
-    std::unordered_map<u64, PipelineVariant> m_variantCache;
-    PipelineVariant* m_activeVariant = nullptr;
+    // Pipeline variant cache (keyed by packed spec constants). Each kernel owns
+    // its pipeline and shader binding table.
+    std::unordered_map<u64, std::unique_ptr<gpu::TraceKernel>> m_variantCache;
+    const gpu::TraceKernel* m_activeVariant = nullptr;
     u32 m_activeSpectralMode = 7;
     bool m_useObserverDescriptorSet = false;
 
-    PipelineVariant CreatePipelineVariant(const SpecConstants& spec);
+    std::unique_ptr<gpu::TraceKernel> CreatePipelineVariant(const SpecConstants& spec);
     static u64 PackSpecKey(u32 spectralMode, u32 debugEnabled) {
         return (static_cast<u64>(debugEnabled) << 32) | spectralMode;
     }

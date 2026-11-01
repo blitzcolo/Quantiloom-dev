@@ -22,12 +22,12 @@ RenderDevice::Impl::~Impl() {
     // Before the members go, because the cache was created against the context
     // and the context is one of them. Saved on the way out so the next process
     // starts warm -- once for the whole batch rather than once per render.
-    if (pipelineCache != VK_NULL_HANDLE && context) {
+    if (pipelineCache && context) {
         if (!init.pipelineCachePath.empty()) {
-            RayTracingPipeline::SavePipelineCache(*context, pipelineCache,
+            RayTracingPipeline::SavePipelineCache(pipelineCache.get(),
                                                   init.pipelineCachePath);
         }
-        RayTracingPipeline::DestroyPipelineCache(*context, pipelineCache);
+        RayTracingPipeline::DestroyPipelineCache(pipelineCache);
     }
 }
 

@@ -56,6 +56,9 @@ class GpuImage;
 class RayTracingPipeline;
 class TextureManager;
 class VulkanContext;
+namespace gpu {
+class PipelineCache;
+}
 }
 
 namespace quantiloom::rendercore {
@@ -666,12 +669,12 @@ struct PipelineBindings {
 /**
  * @brief Build the ray tracing pipeline and bind its resources
  *
- * @param cache Pipeline cache to build against; may be VK_NULL_HANDLE. The caller
+ * @param cache Pipeline cache to build against; may be null. The caller
  *              owns it, because the two front ends keep it for different spans --
  *              the context across scene reloads, the CLI for one run.
  */
 std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
-    VulkanContext& ctx, VkPipelineCache cache, const PipelineBindings& bindings);
+    VulkanContext& ctx, const gpu::PipelineCache* cache, const PipelineBindings& bindings);
 
 /**
  * @brief How a fused-band render has to be conditioned before the sensor chain

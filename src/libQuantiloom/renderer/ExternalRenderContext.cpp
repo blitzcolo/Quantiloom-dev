@@ -323,7 +323,7 @@ struct ExternalRenderContext::Impl {
 
     // Ray tracing pipeline
     std::unique_ptr<RayTracingPipeline> pipeline;
-    VkPipelineCache pipelineCache = VK_NULL_HANDLE;
+    std::unique_ptr<gpu::PipelineCache> pipelineCache;
     std::string pipelineCachePath;  // Set in Create() based on InitParams or platform default
 
     // GPU timestamps around the trace dispatch. Resolved non-blocking at the
@@ -634,10 +634,9 @@ struct ExternalRenderContext::Impl {
         cameraBaselineAtmosDataBuffer.reset();
 
         // Save and destroy pipeline cache
-        if (pipelineCache != VK_NULL_HANDLE && contextAdapter) {
-            RayTracingPipeline::SavePipelineCache(*contextAdapter, pipelineCache, pipelineCachePath);
-            RayTracingPipeline::DestroyPipelineCache(*contextAdapter, pipelineCache);
-            pipelineCache = VK_NULL_HANDLE;
+        if (pipelineCache && contextAdapter) {
+            RayTracingPipeline::SavePipelineCache(pipelineCache.get(), pipelineCachePath);
+            RayTracingPipeline::DestroyPipelineCache(pipelineCache);
         }
 
         textureManager.reset();
@@ -5486,7 +5485,7 @@ void ExternalRenderContext::Impl::CreateFallbackEnvMap() {
 }
 
 void ExternalRenderContext::Impl::CreatePipeline() {
-    if (pipelineCache == VK_NULL_HANDLE) {
+    if (!pipelineCache) {
         pipelineCache = RayTracingPipeline::LoadPipelineCache(*contextAdapter,
                                                               pipelineCachePath);
     }
@@ -5512,7 +5511,7 @@ void ExternalRenderContext::Impl::CreatePipeline() {
     bindings.thermalSunResponse = thermalSunResponseBuffer.get();
     bindings.thermalParameterTangent = thermalParameterTangentBuffer.get();
 
-    pipeline = rendercore::CreateRayTracingPipeline(*contextAdapter, pipelineCache,
+    pipeline = rendercore::CreateRayTracingPipeline(*contextAdapter, pipelineCache.get(),
                                                     bindings);
     pipeline->SetUploadQueue(&pendingUploads);
     if (cameraLightingParamsBuffer)

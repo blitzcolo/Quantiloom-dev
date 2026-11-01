@@ -1566,7 +1566,7 @@ std::unique_ptr<GpuImage> CreateRenderTarget(VulkanContext& ctx, const u32 width
 // ============================================================================
 
 std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
-    VulkanContext& ctx, VkPipelineCache cache, const PipelineBindings& bindings) {
+    VulkanContext& ctx, const gpu::PipelineCache* cache, const PipelineBindings& bindings) {
     QL_LOG_INFO("Creating ray tracing pipeline...");
 
     auto pipeline = std::make_unique<RayTracingPipeline>(

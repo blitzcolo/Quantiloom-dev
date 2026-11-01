@@ -13,6 +13,7 @@
 
 #include "renderer/RenderDevice.hpp"
 
+#include "gpu/Trace.hpp"
 #include "renderer/GpuBuffer.hpp"
 #include "renderer/RenderCore.hpp"
 #include "renderer/VulkanContext.hpp"
@@ -39,7 +40,7 @@ struct RenderDevice::Impl {
     std::unique_ptr<GpuBuffer> rgbToSpectrumBuffer;
     /// Bound when a scene names no environment map, which is most of them.
     rendercore::EnvironmentCubemap fallbackEnvMap;
-    VkPipelineCache pipelineCache = VK_NULL_HANDLE;
+    std::unique_ptr<gpu::PipelineCache> pipelineCache;
 
     ~Impl();
 };

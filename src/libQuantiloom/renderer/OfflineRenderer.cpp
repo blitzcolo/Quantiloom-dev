@@ -268,7 +268,10 @@ struct OfflineRenderer::Impl {
     std::unique_ptr<GpuBuffer> materialBuffer;
     rendercore::BrdfLut brdfLut;
     rendercore::EnvironmentCubemap envMap;
-    VkPipelineCache pipelineCache = VK_NULL_HANDLE;
+    /// Loaded by BuildPipeline unless the cache is borrowed; pipelineCache names
+    /// this one or the RenderDevice's.
+    std::unique_ptr<gpu::PipelineCache> ownedPipelineCache;
+    const gpu::PipelineCache* pipelineCache = nullptr;
     std::unique_ptr<RayTracingPipeline> pipeline;
     std::unique_ptr<PerformanceLogger> perfLogger;
     std::unique_ptr<BatchRenderer> cameraBatchRenderer;
@@ -302,12 +305,12 @@ struct OfflineRenderer::Impl {
         // the context is one of them. Saved on the way out so the next run
         // starts warm. A borrowed cache belongs to the RenderDevice, which saves
         // and destroys it once for the whole batch.
-        if (!borrowingDevice && pipelineCache != VK_NULL_HANDLE && contextPtr) {
+        if (!borrowingDevice && ownedPipelineCache && contextPtr) {
             if (!init.pipelineCachePath.empty()) {
-                RayTracingPipeline::SavePipelineCache(*contextPtr, pipelineCache,
+                RayTracingPipeline::SavePipelineCache(ownedPipelineCache.get(),
                                                       init.pipelineCachePath);
             }
-            RayTracingPipeline::DestroyPipelineCache(*contextPtr, pipelineCache);
+            RayTracingPipeline::DestroyPipelineCache(ownedPipelineCache);
         }
     }
 
@@ -1176,8 +1179,9 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     // Create() put it in `pipelineCache` and set borrowingDevice so that ~Impl
     // leaves it alone.
     if (!borrowingDevice && !init.pipelineCachePath.empty()) {
-        pipelineCache =
+        ownedPipelineCache =
             RayTracingPipeline::LoadPipelineCache(context, init.pipelineCachePath);
+        pipelineCache = ownedPipelineCache.get();
     }
 
     rendercore::PipelineBindings bindings;
@@ -1297,7 +1301,7 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
         impl.fallbackEnvMapRef = &shared.fallbackEnvMap;
         impl.cieCMF_LUTRef = shared.cieCMF_LUTBuffer.get();
         impl.rgbToSpectrumRef = shared.rgbToSpectrumBuffer.get();
-        impl.pipelineCache = shared.pipelineCache;
+        impl.pipelineCache = shared.pipelineCache.get();
     } else {
         QL_LOG_INFO("Initializing Vulkan context...");
         impl.contextPtr = std::make_unique<VulkanContext>();

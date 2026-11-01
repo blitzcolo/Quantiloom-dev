@@ -16,7 +16,6 @@
 #include <stdexcept>
 #include <cstring>
 #include <filesystem>
-#include <chrono>
 
 namespace quantiloom {
 
@@ -48,39 +47,15 @@ static u32 GetMaxTexturesForDevice(const VulkanContext& ctx) {
     return ctx.GetCapabilities().hasDescriptorIndexing ? 1024 : 32;
 }
 
-// What the driver says each group needs on the ray tracing stack, and what the
-// pipeline is therefore given when nothing calls
-// vkCmdSetRayTracingPipelineStackSizeKHR (nothing here does). The default is
-// the specification's own formula over the recursion depth the pipeline was
-// created with, so a deeper recursion multiplies the closest-hit's share and a
-// heavier raygen adds once. Logged per variant because the numbers depend on
-// the specialisation constants the variant was compiled with.
-static void LogPipelineStackSizes(VkDevice device, VkPipeline pipeline, u32 spectralMode,
-                                  u32 recursionDepth) {
-    const auto vkGetRayTracingShaderGroupStackSizeKHR =
-        reinterpret_cast<PFN_vkGetRayTracingShaderGroupStackSizeKHR>(
-            vkGetDeviceProcAddr(device, "vkGetRayTracingShaderGroupStackSizeKHR"));
-    if (!vkGetRayTracingShaderGroupStackSizeKHR) {
-        QL_LOG_WARN("  Ray tracing stack sizes: vkGetRayTracingShaderGroupStackSizeKHR unavailable");
-        return;
-    }
-    const auto size = [&](u32 group, VkShaderGroupShaderKHR shader) {
-        return static_cast<u64>(
-            vkGetRayTracingShaderGroupStackSizeKHR(device, pipeline, group, shader));
-    };
-    const u64 rgen = size(0, VK_SHADER_GROUP_SHADER_GENERAL_KHR);
-    const u64 chit = size(1, VK_SHADER_GROUP_SHADER_CLOSEST_HIT_KHR);
-    const u64 ahit = size(1, VK_SHADER_GROUP_SHADER_ANY_HIT_KHR);
-    const u64 miss = std::max(size(2, VK_SHADER_GROUP_SHADER_GENERAL_KHR),
-                              size(3, VK_SHADER_GROUP_SHADER_GENERAL_KHR));
-    const u64 depth = recursionDepth;
-    const u64 deepest = std::max(chit, miss);
-    const u64 pipelineDefault =
-        rgen + std::min<u64>(1, depth) * std::max(deepest, ahit) +
-        (depth > 0 ? depth - 1 : 0) * deepest;
-    QL_LOG_INFO("  Ray tracing stack sizes (mode {}): raygen {} B, closest-hit {} B, any-hit {} B, "
-                "miss {} B; pipeline default at recursion depth {}: {} B",
-                spectralMode, rgen, chit, ahit, miss, recursionDepth, pipelineDefault);
+// A shader as the gpu:: kernel factories take it: the words LoadSPIRV read, as
+// bytes, named after the file.
+static gpu::ShaderCode ToShaderCode(const std::string& path, const std::vector<u32>& words) {
+    gpu::ShaderCode code;
+    code.name = std::filesystem::path(path).filename().string();
+    code.path = path;
+    code.bytes.resize(words.size() * sizeof(u32));
+    std::memcpy(code.bytes.data(), words.data(), code.bytes.size());
+    return code;
 }
 
 // A whole-buffer write of a storage buffer binding, with the kind its row in
@@ -107,9 +82,8 @@ static void WriteStorageBuffer(gpu::Device& device, gpu::BindGroup set, u32 bind
 // Pipeline Cache Static Methods
 // ============================================================================
 
-VkPipelineCache RayTracingPipeline::LoadPipelineCache(VulkanContext& context, const std::string& cachePath) {
-    VkDevice device = context.GetDevice();
-
+std::unique_ptr<gpu::PipelineCache> RayTracingPipeline::LoadPipelineCache(VulkanContext& context,
+                                                                       const std::string& cachePath) {
     // Try to load existing cache from disk
     std::vector<char> cacheData;
     std::ifstream file(cachePath, std::ios::binary | std::ios::ate);
@@ -125,53 +99,30 @@ VkPipelineCache RayTracingPipeline::LoadPipelineCache(VulkanContext& context, co
         QL_LOG_INFO("No existing pipeline cache found at: {}", cachePath);
     }
 
-    VkPipelineCacheCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-    createInfo.initialDataSize = cacheData.size();
-    createInfo.pInitialData = cacheData.empty() ? nullptr : cacheData.data();
-
-    VkPipelineCache cache = VK_NULL_HANDLE;
-    VkResult result = vkCreatePipelineCache(device, &createInfo, nullptr, &cache);
-
-    if (result != VK_SUCCESS) {
-        QL_LOG_WARN("Failed to create pipeline cache (VkResult={}), creating empty cache", static_cast<int>(result));
-
-        // Try again without initial data (cache might be corrupted or incompatible)
-        createInfo.initialDataSize = 0;
-        createInfo.pInitialData = nullptr;
-        result = vkCreatePipelineCache(device, &createInfo, nullptr, &cache);
-
-        if (result != VK_SUCCESS) {
-            QL_LOG_ERROR("Failed to create empty pipeline cache");
-            return VK_NULL_HANDLE;
-        }
+    // Data the driver rejects (corrupted or incompatible) gets a warning and an
+    // empty cache instead; the error is only that the empty one failed too.
+    auto cache = gpu::vulkan::AdoptContext(context)->CreatePipelineCache(
+        std::as_bytes(std::span<const char>(cacheData)));
+    if (!cache.has_value()) {
+        QL_LOG_ERROR("{}", cache.error());
+        return nullptr;
     }
 
-    return cache;
+    return std::move(cache.value());
 }
 
-bool RayTracingPipeline::SavePipelineCache(VulkanContext& context, VkPipelineCache cache, const std::string& cachePath) {
-    if (cache == VK_NULL_HANDLE) {
+bool RayTracingPipeline::SavePipelineCache(const gpu::PipelineCache* cache, const std::string& cachePath) {
+    if (cache == nullptr) {
         return false;
     }
 
-    VkDevice device = context.GetDevice();
-
-    // Get cache data size
-    size_t cacheSize = 0;
-    VkResult result = vkGetPipelineCacheData(device, cache, &cacheSize, nullptr);
-    if (result != VK_SUCCESS || cacheSize == 0) {
-        QL_LOG_WARN("Failed to get pipeline cache size");
+    // Get cache data: its size, then the data
+    auto cacheData = cache->Serialize();
+    if (!cacheData.has_value()) {
+        QL_LOG_WARN("{}", cacheData.error());
         return false;
     }
-
-    // Get cache data
-    std::vector<char> cacheData(cacheSize);
-    result = vkGetPipelineCacheData(device, cache, &cacheSize, cacheData.data());
-    if (result != VK_SUCCESS) {
-        QL_LOG_WARN("Failed to get pipeline cache data");
-        return false;
-    }
+    const Vector<std::byte>& bytes = cacheData.value();
 
     // Write to disk
     std::ofstream file(cachePath, std::ios::binary);
@@ -180,17 +131,15 @@ bool RayTracingPipeline::SavePipelineCache(VulkanContext& context, VkPipelineCac
         return false;
     }
 
-    file.write(cacheData.data(), static_cast<std::streamsize>(cacheSize));
+    file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     file.close();
 
-    QL_LOG_INFO("Saved pipeline cache to disk: {} ({} bytes)", cachePath, cacheSize);
+    QL_LOG_INFO("Saved pipeline cache to disk: {} ({} bytes)", cachePath, bytes.size());
     return true;
 }
 
-void RayTracingPipeline::DestroyPipelineCache(VulkanContext& context, VkPipelineCache cache) {
-    if (cache != VK_NULL_HANDLE) {
-        vkDestroyPipelineCache(context.GetDevice(), cache, nullptr);
-    }
+void RayTracingPipeline::DestroyPipelineCache(std::unique_ptr<gpu::PipelineCache>& cache) {
+    cache.reset();
 }
 
 // ============================================================================
@@ -203,7 +152,7 @@ RayTracingPipeline::RayTracingPipeline(
     const std::string& closestHitPath,
     const std::string& missPath,
     const std::string& anyHitPath,
-    VkPipelineCache pipelineCache)
+    const gpu::PipelineCache* pipelineCache)
     : m_context(context)
     , m_gpu(gpu::vulkan::AdoptContext(context))
     , m_raygenPath(raygenPath)
@@ -224,18 +173,16 @@ RayTracingPipeline::RayTracingPipeline(
         m_shadowMissPath = shadowMissName.string();
     }
 
-    // Cache RT properties
-    m_rtProperties = m_context.GetRayTracingProperties();
-
     // The pipeline is created with kMaxPipelineRayRecursionDepth. Every
     // conforming ray tracing device offers at least 1, which is all the
     // raygen-driven integrator needs, so this only trips on a device that
     // reports less than the specification allows -- and then names itself here
     // rather than as a device loss somewhere unrelated.
-    if (m_rtProperties.maxRayRecursionDepth < kMaxPipelineRayRecursionDepth) {
+    const u32 maxRecursionDepth = m_gpu->Info().maxTraceRecursionDepth;
+    if (maxRecursionDepth < kMaxPipelineRayRecursionDepth) {
         throw std::runtime_error(
             "Ray tracing device supports a recursion depth of only " +
-            std::to_string(m_rtProperties.maxRayRecursionDepth) +
+            std::to_string(maxRecursionDepth) +
             "; Quantiloom traces every ray from raygen and needs " +
             std::to_string(kMaxPipelineRayRecursionDepth) +
             " (see src/shaders/path_driver.hlsli)");
@@ -321,14 +268,7 @@ RayTracingPipeline::RayTracingPipeline(
         QL_LOG_INFO("Ray Tracing pipeline created successfully");
     }
     catch (const std::exception& e) {
-        VkDevice device = m_context.GetDevice();
-
-        for (auto& [key, variant] : m_variantCache) {
-            if (variant.pipeline != VK_NULL_HANDLE) {
-                vkDestroyPipeline(device, variant.pipeline, nullptr);
-            }
-        }
-        m_variantCache.clear();
+        m_variantCache.clear();  // each kernel: its pipeline, then its shader binding table
 
         m_kernelLayout.reset();
         m_bindGroupPool.reset();
@@ -340,19 +280,10 @@ RayTracingPipeline::RayTracingPipeline(
 }
 
 RayTracingPipeline::~RayTracingPipeline() {
-    VkDevice device = m_context.GetDevice();
-    if (m_geometryPipeline != VK_NULL_HANDLE)
-        vkDestroyPipeline(device, m_geometryPipeline, nullptr);
+    m_geometryKernel.reset();
 
     m_activeVariant = nullptr;
-    m_pipeline = VK_NULL_HANDLE;  // just a copied handle, owned by variant cache
-    for (auto& [key, variant] : m_variantCache) {
-        variant.sbtBuffer.reset();
-        if (variant.pipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(device, variant.pipeline, nullptr);
-        }
-    }
-    m_variantCache.clear();
+    m_variantCache.clear();  // each kernel: its pipeline, then its shader binding table
 
     m_bindGroupPool.reset();
     m_kernelLayout.reset();
@@ -432,20 +363,20 @@ void RayTracingPipeline::LoadShaders() {
     QL_LOG_INFO("  [LoadShaders] Loading SPIR-V shaders...");
 
     m_spirvData.resize(5);
-    m_spirvData[0] = LoadSPIRV(m_raygenPath);
-    QL_LOG_INFO("  [LoadShaders] Raygen loaded: {} words", m_spirvData[0].size());
+    m_spirvData[0] = ToShaderCode(m_raygenPath, LoadSPIRV(m_raygenPath));
+    QL_LOG_INFO("  [LoadShaders] Raygen loaded: {} words", m_spirvData[0].bytes.size() / sizeof(u32));
 
-    m_spirvData[1] = LoadSPIRV(m_closestHitPath);
-    QL_LOG_INFO("  [LoadShaders] ClosestHit loaded: {} words", m_spirvData[1].size());
+    m_spirvData[1] = ToShaderCode(m_closestHitPath, LoadSPIRV(m_closestHitPath));
+    QL_LOG_INFO("  [LoadShaders] ClosestHit loaded: {} words", m_spirvData[1].bytes.size() / sizeof(u32));
 
-    m_spirvData[2] = LoadSPIRV(m_missPath);
-    QL_LOG_INFO("  [LoadShaders] Miss loaded: {} words", m_spirvData[2].size());
+    m_spirvData[2] = ToShaderCode(m_missPath, LoadSPIRV(m_missPath));
+    QL_LOG_INFO("  [LoadShaders] Miss loaded: {} words", m_spirvData[2].bytes.size() / sizeof(u32));
 
-    m_spirvData[3] = LoadSPIRV(m_shadowMissPath);
-    QL_LOG_INFO("  [LoadShaders] ShadowMiss loaded: {} words", m_spirvData[3].size());
+    m_spirvData[3] = ToShaderCode(m_shadowMissPath, LoadSPIRV(m_shadowMissPath));
+    QL_LOG_INFO("  [LoadShaders] ShadowMiss loaded: {} words", m_spirvData[3].bytes.size() / sizeof(u32));
 
-    m_spirvData[4] = LoadSPIRV(m_anyHitPath);
-    QL_LOG_INFO("  [LoadShaders] AnyHit loaded: {} words", m_spirvData[4].size());
+    m_spirvData[4] = ToShaderCode(m_anyHitPath, LoadSPIRV(m_anyHitPath));
+    QL_LOG_INFO("  [LoadShaders] AnyHit loaded: {} words", m_spirvData[4].bytes.size() / sizeof(u32));
 
     QL_LOG_INFO("  Shaders loaded: {} / {} / {} / {}", m_raygenPath, m_closestHitPath, m_missPath, m_shadowMissPath);
     Log::Flush();
@@ -474,215 +405,45 @@ std::vector<u32> RayTracingPipeline::LoadSPIRV(const std::string& path) {
     return buffer;
 }
 
-VkShaderModule RayTracingPipeline::CreateShaderModule(const std::vector<u32>& spirv) const {
-    VkDevice device = m_context.GetDevice();
-
-    VkShaderModuleCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    createInfo.codeSize = spirv.size() * sizeof(u32);
-    createInfo.pCode = spirv.data();
-
-    VkShaderModule shaderModule;
-    if (const VkResult result = vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule);
-        result != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create shader module");
-    }
-
-    return shaderModule;
-}
-
 // ============================================================================
 // Pipeline Creation
 // ============================================================================
 
-RayTracingPipeline::PipelineVariant RayTracingPipeline::CreatePipelineVariant(const SpecConstants& spec) {
-    VkDevice device = m_context.GetDevice();
-
-    // Create temporary shader modules from stored SPIR-V
-    std::vector<VkShaderModule> modules(5);
-    for (int i = 0; i < 5; ++i) {
-        modules[i] = CreateShaderModule(m_spirvData[i]);
-    }
-
+std::unique_ptr<gpu::TraceKernel> RayTracingPipeline::CreatePipelineVariant(const SpecConstants& spec) {
     // The raygen now selects CameraMeasurement before the CIE colour path, so
-    // all three tracing stages must see the same spectral-mode specialization.
-    VkSpecializationMapEntry specEntries[2] = {};
-    specEntries[0].constantID = 0;
-    specEntries[0].offset = offsetof(SpecConstants, spectralMode);
-    specEntries[0].size = sizeof(u32);
-    specEntries[1].constantID = 1;
-    specEntries[1].offset = offsetof(SpecConstants, debugEnabled);
-    specEntries[1].size = sizeof(u32);
+    // all three tracing stages must see the same spectral-mode specialization:
+    // {id 0, offset 0} spectralMode and {id 1, offset 4} debugEnabled, 8 bytes,
+    // on raygen, closest hit and miss. The shadow miss and the any-hit take
+    // none: an any-hit decides whether a surface is present, which is a
+    // coverage question with no wavelength in it.
+    const gpu::SpecializationConstant constants[] = {{0, spec.spectralMode}, {1, spec.debugEnabled}};
 
-    VkSpecializationInfo specInfo{};
-    specInfo.mapEntryCount = 2;
-    specInfo.pMapEntries = specEntries;
-    specInfo.dataSize = sizeof(SpecConstants);
-    specInfo.pData = &spec;
-
-    std::vector<VkPipelineShaderStageCreateInfo> stages(5, VkPipelineShaderStageCreateInfo{});
-    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[0].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-    stages[0].module = modules[0];
-    stages[0].pName = "main";
-    stages[0].pSpecializationInfo = &specInfo;
-
-    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    stages[1].module = modules[1];
-    stages[1].pName = "main";
-    stages[1].pSpecializationInfo = &specInfo;
-
-    stages[2].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[2].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
-    stages[2].module = modules[2];
-    stages[2].pName = "main";
-    stages[2].pSpecializationInfo = &specInfo;
-
-    stages[3].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[3].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
-    stages[3].module = modules[3];
-    stages[3].pName = "main";
-
-    // No specialization info, as the shadow miss above has none: an any-hit
-    // decides whether a surface is present, which is a coverage question with
-    // no wavelength in it. It has no use for the spectral mode.
-    stages[4].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[4].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-    stages[4].module = modules[4];
-    stages[4].pName = "main";
-
-    // Still four groups. The any-hit joins the one triangles hit group rather
-    // than forming its own, so the shader binding table below is unchanged --
-    // one hit record, two miss records, and every TraceRay's sbtRecordOffset
-    // and missIndex keep the meaning they had.
-    std::vector<VkRayTracingShaderGroupCreateInfoKHR> groups(4, VkRayTracingShaderGroupCreateInfoKHR{});
-    groups[0].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
-    groups[0].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
-    groups[0].generalShader = 0;
-    groups[0].closestHitShader = VK_SHADER_UNUSED_KHR;
-    groups[0].anyHitShader = VK_SHADER_UNUSED_KHR;
-    groups[0].intersectionShader = VK_SHADER_UNUSED_KHR;
-
-    groups[1].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
-    groups[1].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
-    groups[1].generalShader = VK_SHADER_UNUSED_KHR;
-    groups[1].closestHitShader = 1;
-    groups[1].anyHitShader = 4;
-    groups[1].intersectionShader = VK_SHADER_UNUSED_KHR;
-
-    groups[2].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
-    groups[2].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
-    groups[2].generalShader = 2;
-    groups[2].closestHitShader = VK_SHADER_UNUSED_KHR;
-    groups[2].anyHitShader = VK_SHADER_UNUSED_KHR;
-    groups[2].intersectionShader = VK_SHADER_UNUSED_KHR;
-
-    groups[3].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
-    groups[3].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
-    groups[3].generalShader = 3;
-    groups[3].closestHitShader = VK_SHADER_UNUSED_KHR;
-    groups[3].anyHitShader = VK_SHADER_UNUSED_KHR;
-    groups[3].intersectionShader = VK_SHADER_UNUSED_KHR;
-
-    VkRayTracingPipelineCreateInfoKHR pipelineInfo{};
-    pipelineInfo.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
-    pipelineInfo.stageCount = static_cast<u32>(stages.size());
-    pipelineInfo.pStages = stages.data();
-    pipelineInfo.groupCount = static_cast<u32>(groups.size());
-    pipelineInfo.pGroups = groups.data();
-    pipelineInfo.maxPipelineRayRecursionDepth = kMaxPipelineRayRecursionDepth;
-    pipelineInfo.layout = gpu::vulkan::NativeLayout(*m_kernelLayout);
+    // Five stages in four groups: the any-hit joins the one triangles hit group
+    // rather than forming its own, so the shader binding table has one hit
+    // record and two miss records, and every TraceRay's sbtRecordOffset and
+    // missIndex keep the meaning they had.
+    gpu::TraceKernelDesc desc;
+    desc.rayGen = &m_spirvData[0];
+    desc.closestHit = &m_spirvData[1];
+    desc.miss = &m_spirvData[2];
+    desc.shadowMiss = &m_spirvData[3];
+    desc.anyHit = &m_spirvData[4];
+    desc.layout = m_kernelLayout.get();
+    desc.specialization = constants;
+    desc.specializedStages = gpu::ShaderStages::RayGen | gpu::ShaderStages::ClosestHit | gpu::ShaderStages::Miss;
+    desc.maxRecursionDepth = kMaxPipelineRayRecursionDepth;
+    desc.cache = m_pipelineCache;
+    const String name = "mode " + std::to_string(spec.spectralMode);  // the stack-size log's label
+    desc.name = name;
 
     QL_LOG_INFO("  [CreatePipelineVariant] spectralMode={}, debugEnabled={}", spec.spectralMode, spec.debugEnabled);
     Log::Flush();
 
-    const auto vkCreateRayTracingPipelinesKHR = reinterpret_cast<PFN_vkCreateRayTracingPipelinesKHR>(
-        vkGetDeviceProcAddr(device, "vkCreateRayTracingPipelinesKHR"));
-    if (!vkCreateRayTracingPipelinesKHR) {
-        throw std::runtime_error("Failed to load vkCreateRayTracingPipelinesKHR");
+    auto kernel = m_gpu->CreateTraceKernel(desc);
+    if (!kernel.has_value()) {
+        throw std::runtime_error(kernel.error());
     }
-
-    QL_LOG_INFO("  Calling vkCreateRayTracingPipelinesKHR...");
-    QL_LOG_INFO("  Using pipeline cache: {}", m_pipelineCache != VK_NULL_HANDLE ? "YES" : "NO");
-    Log::Flush();
-
-    auto startTime = std::chrono::high_resolution_clock::now();
-
-    PipelineVariant variant;
-    const VkResult result = vkCreateRayTracingPipelinesKHR(
-        device, VK_NULL_HANDLE, m_pipelineCache,
-        1, &pipelineInfo, nullptr, &variant.pipeline);
-
-    auto endTime = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-    QL_LOG_INFO("  vkCreateRayTracingPipelinesKHR returned: {} (took {} ms)", static_cast<int>(result), duration.count());
-
-    if (result != VK_SUCCESS) {
-        for (auto m : modules) vkDestroyShaderModule(device, m, nullptr);
-        throw std::runtime_error("Failed to create ray tracing pipeline variant");
-    }
-
-    for (auto m : modules) vkDestroyShaderModule(device, m, nullptr);
-
-    // Build SBT for this variant
-    const auto vkGetRayTracingShaderGroupHandlesKHR = reinterpret_cast<PFN_vkGetRayTracingShaderGroupHandlesKHR>(
-        vkGetDeviceProcAddr(device, "vkGetRayTracingShaderGroupHandlesKHR"));
-    if (!vkGetRayTracingShaderGroupHandlesKHR) {
-        throw std::runtime_error("Failed to load vkGetRayTracingShaderGroupHandlesKHR");
-    }
-
-    const u32 handleSize = m_rtProperties.shaderGroupHandleSize;
-    const u32 handleAlignment = m_rtProperties.shaderGroupHandleAlignment;
-    const u32 baseAlignment = m_rtProperties.shaderGroupBaseAlignment;
-    const u32 handleSizeAligned = AlignedSize(handleSize, handleAlignment);
-
-    const u32 raygenSize = AlignedSize(handleSizeAligned, baseAlignment);
-    const u32 missStride = AlignedSize(handleSizeAligned, baseAlignment);
-    const u32 missCount = 2;
-    const u32 missSize = missCount * missStride;
-    const u32 hitSize = AlignedSize(handleSizeAligned, baseAlignment);
-    const u32 sbtSize = raygenSize + missSize + hitSize;
-
-    constexpr u32 groupCount = 4;
-    std::vector<u8> handleData(groupCount * handleSize);
-    if (const VkResult handlesResult = vkGetRayTracingShaderGroupHandlesKHR(
-            device, variant.pipeline, 0, groupCount, handleData.size(), handleData.data());
-        handlesResult != VK_SUCCESS) {
-        // Carrying on would build the SBT from the zero-initialised handleData.
-        vkDestroyPipeline(device, variant.pipeline, nullptr);
-        throw std::runtime_error("Failed to get ray tracing shader group handles (VkResult " +
-                                 std::to_string(static_cast<int>(handlesResult)) + ")");
-    }
-    LogPipelineStackSizes(device, variant.pipeline, spec.spectralMode,
-                          kMaxPipelineRayRecursionDepth);
-
-    std::vector<u8> sbtData(sbtSize, 0);
-    std::memcpy(sbtData.data(), handleData.data() + handleSize * 0, handleSize);
-    std::memcpy(sbtData.data() + raygenSize, handleData.data() + handleSize * 2, handleSize);
-    std::memcpy(sbtData.data() + raygenSize + missStride, handleData.data() + handleSize * 3, handleSize);
-    std::memcpy(sbtData.data() + raygenSize + missSize, handleData.data() + handleSize * 1, handleSize);
-
-    variant.sbtBuffer = std::make_unique<GpuBuffer>(
-        m_context.GetAllocator(), sbtSize,
-        VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU, baseAlignment);
-    variant.sbtBuffer->Upload(sbtData.data(), sbtSize);
-
-    const VkDeviceAddress sbtAddress = variant.sbtBuffer->GetDeviceAddress(device);
-    variant.raygenRegion.deviceAddress = sbtAddress;
-    variant.raygenRegion.stride = raygenSize;
-    variant.raygenRegion.size = raygenSize;
-    variant.missRegion.deviceAddress = sbtAddress + raygenSize;
-    variant.missRegion.stride = missStride;
-    variant.missRegion.size = missSize;
-    variant.hitRegion.deviceAddress = sbtAddress + raygenSize + missSize;
-    variant.hitRegion.stride = hitSize;
-    variant.hitRegion.size = hitSize;
-    variant.callableRegion = {};
-
-    QL_LOG_INFO("  Pipeline variant created (SBT: {} bytes)", sbtSize);
-    return variant;
+    return std::move(kernel.value());
 }
 
 void RayTracingPipeline::SetSpecConstants(u32 spectralMode, bool debugEnabled) {
@@ -696,23 +457,8 @@ void RayTracingPipeline::SetSpecConstants(u32 spectralMode, bool debugEnabled) {
         it = inserted;
     }
 
-    m_activeVariant = &it->second;
+    m_activeVariant = it->second.get();
     m_activeSpectralMode = spectralMode;
-
-    // Keep legacy fields in sync for GetPipeline() backward compat
-    m_pipeline = m_activeVariant->pipeline;
-    m_raygenRegion = m_activeVariant->raygenRegion;
-    m_missRegion = m_activeVariant->missRegion;
-    m_hitRegion = m_activeVariant->hitRegion;
-    m_callableRegion = m_activeVariant->callableRegion;
-}
-
-u32 RayTracingPipeline::AlignedSize(const u32 size, const u32 alignment) {
-    return (size + alignment - 1) & ~(alignment - 1);
-}
-
-VkPipelineLayout RayTracingPipeline::GetPipelineLayout() const {
-    return gpu::vulkan::NativeLayout(*m_kernelLayout);
 }
 
 // ============================================================================
@@ -845,7 +591,7 @@ void RayTracingPipeline::BeginFusionRecording(u32 width, u32 height, u32 spp, u3
     m_fusionInitPending = true;
 }
 
-void RayTracingPipeline::RecordFusionInit(VkCommandBuffer cmd) const {
+void RayTracingPipeline::RecordFusionInit(gpu::CommandList& list) const {
     if (!m_fusionInitPending)
         return;
     m_fusionInitPending = false;
@@ -853,32 +599,16 @@ void RayTracingPipeline::RecordFusionInit(VkCommandBuffer cmd) const {
         m_pendingFusionZero = 0;
         return;
     }
-    const VkBuffer dst = m_fusionRecordBuffer->GetHandle();
-    VkBufferMemoryBarrier writable{};
-    writable.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    writable.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    writable.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    writable.srcQueueFamilyIndex = writable.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    writable.buffer = dst;
-    writable.size = VK_WHOLE_SIZE;
-    vkCmdPipelineBarrier(
-        cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &writable, 0, nullptr);
-    vkCmdUpdateBuffer(cmd, dst, 0, sizeof(m_fusionHeader), m_fusionHeader.data());
+    // Ray tracing and compute shaders read and write the records.
+    constexpr gpu::Access kShaderAccess = gpu::Access::RayTraceRead | gpu::Access::RayTraceWrite |
+                                          gpu::Access::ComputeRead | gpu::Access::ComputeWrite;
+    const gpu::BufferRef dst = gpu::vulkan::Ref(*m_fusionRecordBuffer);
+    list.Barrier(gpu::BufferBarrier{dst, kShaderAccess, gpu::Access::TransferWrite});
+    list.UpdateBuffer(dst, 0, std::as_bytes(std::span(m_fusionHeader)));
     if (m_pendingFusionZero)
-        vkCmdFillBuffer(cmd, dst, sizeof(m_fusionHeader), m_pendingFusionZero, 0);
+        list.FillBuffer(dst, sizeof(m_fusionHeader), m_pendingFusionZero, 0);
     m_pendingFusionZero = 0;
-    VkBufferMemoryBarrier ready{};
-    ready.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    ready.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    ready.srcQueueFamilyIndex = ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    ready.buffer = dst;
-    ready.size = VK_WHOLE_SIZE;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 0, nullptr, 1, &ready, 0, nullptr);
+    list.Barrier(gpu::BufferBarrier{dst, gpu::Access::TransferWrite, kShaderAccess});
 }
 
 void RayTracingPipeline::SetFusionInitialMedia(const Vector<u32>& media) {
@@ -903,17 +633,10 @@ void RayTracingPipeline::SetFusionInitialMedia(const Vector<u32>& media) {
 Vector<u8> RayTracingPipeline::ReadFusionRecording() {
     if (!m_fusionRecordBuffer || m_fusionRecordSize == 0)
         return {};
-    CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
-        VkBufferMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.buffer = m_fusionRecordBuffer->GetHandle();
-        barrier.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(
-            cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+    m_gpu->ExecuteImmediate([&](gpu::CommandList& list) {
+        list.Barrier(gpu::BufferBarrier{gpu::vulkan::Ref(*m_fusionRecordBuffer),
+                                        gpu::Access::RayTraceWrite | gpu::Access::TransferWrite,
+                                        gpu::Access::HostRead});
     });
     Vector<u8> bytes(static_cast<size_t>(m_fusionRecordSize));
     const void* data = m_fusionRecordBuffer->MapRead();
@@ -944,23 +667,18 @@ RayTracingPipeline::CapturePrimaryGeometry(u32 width, u32 height,
                                            const Vector<glm::vec2>* queryPixels) {
     if (!width || !height)
         throw std::invalid_argument("invalid geometry grid");
-    const VkDevice device = m_context.GetDevice();
-    if (m_geometryPipeline == VK_NULL_HANDLE) {
-        const auto code = LoadSPIRV(
-            (std::filesystem::path(m_raygenPath).parent_path() / "fusion_geometry.spv").string());
-        const auto module = CreateShaderModule(code);
-        VkComputePipelineCreateInfo info{};
-        info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-        info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        info.stage.module = module;
-        info.stage.pName = "main";
-        info.layout = gpu::vulkan::NativeLayout(*m_kernelLayout);
-        const auto result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info, nullptr,
-                                                     &m_geometryPipeline);
-        vkDestroyShaderModule(device, module, nullptr);
-        if (result != VK_SUCCESS)
+    if (!m_geometryKernel) {
+        // A compute pipeline on the ray tracing layout: same set, same push range.
+        const std::string path =
+            (std::filesystem::path(m_raygenPath).parent_path() / "fusion_geometry.spv").string();
+        const gpu::ShaderCode code = ToShaderCode(path, LoadSPIRV(path));
+        gpu::ComputeKernelDesc desc;
+        desc.code = &code;
+        desc.layout = m_kernelLayout.get();
+        auto kernel = m_gpu->CreateComputeKernel(desc);
+        if (!kernel.has_value())
             throw std::runtime_error("cannot create geometry capture pipeline");
+        m_geometryKernel = std::move(kernel.value());
     }
     const size_t count = Image::CheckedElementCount(width, height, 1);
     if (queryPixels && queryPixels->size() != count)
@@ -976,31 +694,17 @@ RayTracingPipeline::CapturePrimaryGeometry(u32 width, u32 height,
     GpuBuffer output(m_context.GetAllocator(), count * sizeof(GeometryHit),
                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
     WriteStorageBuffer(*m_gpu, m_descriptorSet, 33u, output);
-    const VkPipelineLayout pipelineLayout = gpu::vulkan::NativeLayout(*m_kernelLayout);
-    const VkDescriptorSet descriptorSet = gpu::vulkan::NativeSet(m_descriptorSet);
     auto pc = m_pushConstants;
     pc.cameraAndSampling.sampleIndex = width;
     pc.cameraAndSampling.totalSamples = height;
     pc.cameraAndSampling.frameIndex = queryPixels ? 1u : 0u;
-    CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_geometryPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1,
-                                &descriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, pipelineLayout,
-                           VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-                               VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
-                               VK_SHADER_STAGE_COMPUTE_BIT,
-                           0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
-        VkBufferMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.buffer = output.GetHandle();
-        barrier.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
-                             0, 0, nullptr, 1, &barrier, 0, nullptr);
+    m_gpu->ExecuteImmediate([&](gpu::CommandList& list) {
+        list.SetKernel(*m_geometryKernel);
+        list.SetBindGroup(*m_kernelLayout, 0, m_descriptorSet);
+        list.PushConstants(*m_kernelLayout, pc);
+        list.Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        list.Barrier(gpu::BufferBarrier{gpu::vulkan::Ref(output), gpu::Access::ComputeWrite,
+                                        gpu::Access::HostRead});
     });
     Vector<GeometryHit> hits(count);
     const auto* data = output.MapRead();
@@ -1280,77 +984,35 @@ void RayTracingPipeline::UpdateDescriptorSets() {
 // ============================================================================
 
 void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u32 height, const bool finalDispatch) const {
+    // The trace goes through the kernel's own entry point and SBT regions, so a
+    // plain wrapped list records it.
+    auto list = gpu::vulkan::Wrap(cmd);
+
     // An armed record init -- header update plus zero fill -- lands in this
     // submission before the trace that reads it.
-    RecordFusionInit(cmd);
-
-    // Get function pointer for vkCmdTraceRaysKHR
-    const auto vkCmdTraceRaysKHR = reinterpret_cast<PFN_vkCmdTraceRaysKHR>(vkGetDeviceProcAddr(
-        m_context.GetDevice(), "vkCmdTraceRaysKHR"));
-
-    if (!vkCmdTraceRaysKHR) {
-        throw std::runtime_error("Failed to load vkCmdTraceRaysKHR");
-    }
+    RecordFusionInit(list);
 
     // Bind pipeline and descriptor set
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipeline);
+    list.SetTraceKernel(*m_activeVariant);
 
-    const VkPipelineLayout pipelineLayout = gpu::vulkan::NativeLayout(*m_kernelLayout);
-    const VkDescriptorSet activeSet = gpu::vulkan::NativeSet(m_activeSpectralMode ==
+    const gpu::BindGroup activeSet = m_activeSpectralMode ==
         static_cast<u32>(SpectralMode::CameraMeasurement)
         ? m_cameraDescriptorSet
-        : (m_useObserverDescriptorSet ? m_observerDescriptorSet : m_descriptorSet));
-    vkCmdBindDescriptorSets(
-        cmd,
-        VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-        pipelineLayout,
-        0,
-        1,
-        &activeSet,
-        0,
-        nullptr
-    );
+        : (m_useObserverDescriptorSet ? m_observerDescriptorSet : m_descriptorSet);
+    list.SetBindGroup(*m_kernelLayout, 0, activeSet, gpu::PipelineKind::Trace);
 
-    // Push constants (camera + sampling parameters)
-    // IMPORTANT: stageFlags must match the pipeline layout push constant range
-    vkCmdPushConstants(
-        cmd,
-        pipelineLayout,
-        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-            VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT,
-        0,
-        sizeof(TracePushConstants),
-        &m_pushConstants
-    );
+    // Push constants (camera + sampling parameters), with the stages of the
+    // pipeline layout's push constant range
+    list.PushConstants(*m_kernelLayout, m_pushConstants);
 
     // Trace rays
-    vkCmdTraceRaysKHR(
-        cmd,
-        &m_raygenRegion,
-        &m_missRegion,
-        &m_hitRegion,
-        &m_callableRegion,
-        width,
-        height,
-        1  // depth
-    );
-
-    VkMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    list.Trace(*m_activeVariant, width, height, 1);
 
     if (finalDispatch) {
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0, 1, &barrier, 0, nullptr, 0, nullptr);
+        list.Barrier(gpu::GlobalBarrier{gpu::Access::RayTraceWrite, gpu::Access::TransferRead});
     } else {
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-            0, 1, &barrier, 0, nullptr, 0, nullptr);
+        list.Barrier(gpu::GlobalBarrier{gpu::Access::RayTraceWrite,
+                                        gpu::Access::RayTraceRead | gpu::Access::RayTraceWrite});
     }
 }
 
