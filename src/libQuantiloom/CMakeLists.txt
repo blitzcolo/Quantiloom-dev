@@ -490,22 +490,31 @@ set_source_files_properties(gpu/NeutralHeaders.cpp PROPERTIES SKIP_PRECOMPILE_HE
 # ============================================================================
 # libQuantiloom -- the SDK artifact
 # ============================================================================
-# Carries only the .rc (version resource); all code comes from quantiloom_core.
+# Carries only the .rc version resource on Windows (a stub source elsewhere);
+# all code comes from quantiloom_core.
 # The link is PRIVATE so the object library's include directories and its
 # QL_BUILD_SHARED define stop here: consumers get QL_USE_SHARED (dllimport) and
 # only the headers this target declares PUBLIC.
 # ============================================================================
 
-# Generated so the version follows project(VERSION) rather than being typed
-# into four lines of a checked-in .rc. @ONLY because a .rc is full of ${...}
-# belonging to the resource compiler.
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/libQuantiloom.rc.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/libQuantiloom.rc"
-    @ONLY
-)
+if(WIN32)
+    # Generated so the version follows project(VERSION) rather than being typed
+    # into four lines of a checked-in .rc. @ONLY because a .rc is full of ${...}
+    # belonging to the resource compiler.
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/libQuantiloom.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/libQuantiloom.rc"
+        @ONLY
+    )
 
-add_library(libQuantiloom SHARED ${CMAKE_CURRENT_BINARY_DIR}/libQuantiloom.rc)
+    add_library(libQuantiloom SHARED ${CMAKE_CURRENT_BINARY_DIR}/libQuantiloom.rc)
+else()
+    # The version resource is Windows-only and CMake requires at least one
+    # compilable source for a SHARED target; the stub is that source. It
+    # carries no code on purpose -- the whole SDK surface still comes from
+    # quantiloom_core through the PRIVATE link below.
+    add_library(libQuantiloom SHARED NonWindowsStub.cpp)
+endif()
 
 target_link_libraries(libQuantiloom PRIVATE quantiloom_core)
 
@@ -533,7 +542,7 @@ target_link_libraries(libQuantiloom PRIVATE Vulkan::Vulkan)
 # Set library output name (remove "lib" prefix for cleaner names)
 set_target_properties(libQuantiloom PROPERTIES
     OUTPUT_NAME "Quantiloom"
-    LINKER_LANGUAGE CXX  # the only listed source is a .rc
+    LINKER_LANGUAGE CXX  # on Windows the only listed source is a .rc
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
 
