@@ -460,26 +460,29 @@ Result<void, String> RecordCamera(VulkanContext& context, GpuCameraPipeline& pip
     return status;
 }
 
-std::vector<f32> ReadFloat(VulkanContext& context, const GpuImage* image, u32 width, u32 height) {
-    if (!image) return {};
-    return CommandHelper::ReadbackImage(context, image->GetImage(), image->GetFormat(), width, height);
+std::vector<f32> ReadFloat(VulkanContext& context, gpu::TextureRef image, u32 width, u32 height) {
+    if (!image.IsValid()) return {};
+    return CommandHelper::ReadbackImage(context, gpu::vulkan::NativeImage(image),
+                                        gpu::vulkan::ToVk(image.format), width, height);
 }
 
-std::vector<u32> ReadUint(VulkanContext& context, const GpuImage* image, u32 width, u32 height) {
-    if (!image || image->GetFormat() != VK_FORMAT_R32G32B32A32_UINT) return {};
+std::vector<u32> ReadUint(VulkanContext& context, gpu::TextureRef image, u32 width, u32 height) {
+    if (!image.IsValid() || image.format != gpu::Format::RGBA32Uint) return {};
     const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 4 * sizeof(u32);
     GpuBuffer staging(context.GetAllocator(), bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
     if (!staging.IsValid()) return {};
     CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        CommandHelper::TransitionImageLayout(cmd, image->GetImage(), image->GetFormat(), VK_IMAGE_LAYOUT_GENERAL,
+        CommandHelper::TransitionImageLayout(cmd, gpu::vulkan::NativeImage(image),
+                                             gpu::vulkan::ToVk(image.format), VK_IMAGE_LAYOUT_GENERAL,
                                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         VkBufferImageCopy region{};
         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         region.imageSubresource.layerCount = 1;
         region.imageExtent = {width, height, 1};
-        vkCmdCopyImageToBuffer(cmd, image->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.GetHandle(), 1,
-                               &region);
-        CommandHelper::TransitionImageLayout(cmd, image->GetImage(), image->GetFormat(),
+        vkCmdCopyImageToBuffer(cmd, gpu::vulkan::NativeImage(image), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               staging.GetHandle(), 1, &region);
+        CommandHelper::TransitionImageLayout(cmd, gpu::vulkan::NativeImage(image),
+                                             gpu::vulkan::ToVk(image.format),
                                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
     });
     std::vector<u32> out(static_cast<size_t>(width) * height * 4);
@@ -493,7 +496,7 @@ std::vector<u32> ReadUint(VulkanContext& context, const GpuImage* image, u32 wid
 void HashProducts(const AbMode& mode, VulkanContext& device, GpuCameraPipeline& pipeline, u32 width, u32 height,
                   const std::string& prefix) {
     const auto outputs = pipeline.GetOutputs();
-    const std::pair<const char*, const GpuImage*> products[] = {
+    const std::pair<const char*, gpu::TextureRef> products[] = {
         {"rawDn", outputs.rawDn},
         {"corrected", outputs.corrected},
         {"display", outputs.display},
@@ -645,7 +648,8 @@ TEST_F(ComputeMigrationAB, CameraThermalCheckpoint) {
 
     Result<void, String> restored = Result<void, String>::Ok();
     CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        restored = pipeline->RestoreStateCheckpoint(checkpoint.value(), cmd);
+        auto list = gpu::vulkan::Wrap(cmd);
+        restored = pipeline->RestoreStateCheckpoint(checkpoint.value(), list);
     });
     ASSERT_TRUE(restored.has_value()) << restored.error();
     ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 2, 0.2).has_value());

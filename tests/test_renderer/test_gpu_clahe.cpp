@@ -102,14 +102,15 @@ struct ClaheFixture {
     f32 inputMax = 1.0f;
 };
 
-ClaheFixture MakeClahe(VulkanContext& context, u32 width, u32 height, const std::vector<f32>& rgba) {
+ClaheFixture MakeClahe(gpu::Device& device, VulkanContext& context, u32 width, u32 height,
+                       const std::vector<f32>& rgba) {
     ClaheFixture fixture{context, nullptr, nullptr, nullptr, 0.0f, 1.0f};
     fixture.input = UploadRgba32f(context, width, height, rgba);
     fixture.output = std::make_unique<GpuImage>(
         context.GetAllocator(), context.GetDevice(), width, height, VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
     if (!fixture.input || !fixture.output->IsValid()) return fixture;
-    auto created = GpuClahe::Create(GpuDevice());
+    auto created = GpuClahe::Create(device);
     if (created) {
         fixture.clahe = std::move(created.value());
         fixture.clahe->BindAll(gpu::vulkan::Ref(*fixture.input), gpu::vulkan::Ref(*fixture.output));
@@ -182,7 +183,7 @@ TEST_F(GpuClaheTest, PerChannelTonesNeverInvertTheirOwnChannel) {
     constexpr u32 kWidth = 37;
     constexpr u32 kHeight = 23;
     const std::vector<f32> rgba = MakeInput(kWidth, kHeight);
-    auto fixture = MakeClahe(Device(), kWidth, kHeight, rgba);
+    auto fixture = MakeClahe(GpuDevice(), Device(), kWidth, kHeight, rgba);
     if (!fixture.clahe) GTEST_SKIP() << "clahe shaders unavailable";
 
     for (const auto tone : {DisplayToneMode::Linear, DisplayToneMode::Equalize}) {
@@ -204,7 +205,7 @@ TEST_F(GpuClaheTest, ClaheStaysFiniteAndInRange) {
     constexpr u32 kWidth = 37;
     constexpr u32 kHeight = 23;
     const std::vector<f32> rgba = MakeInput(kWidth, kHeight);
-    auto fixture = MakeClahe(Device(), kWidth, kHeight, rgba);
+    auto fixture = MakeClahe(GpuDevice(), Device(), kWidth, kHeight, rgba);
     if (!fixture.clahe) GTEST_SKIP() << "clahe shaders unavailable";
 
     DisplayEnhancementParams params;

@@ -404,8 +404,9 @@ TEST_F(CameraGpuTest, IntegerCounterVectorsMatchIndependentGoldens) {
     ASSERT_TRUE(configured.has_value());
     Result<void, String> status = Result<void, String>::Ok();
     CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
+        auto list = gpu::vulkan::Wrap(cmd);
         status = pipeline->RecordRandomVectors(
-            cmd, 0x548cu, 7u, NoiseClass::PhotonShot, 0u);
+            list, 0x548cu, 7u, NoiseClass::PhotonShot, 0u);
     });
     ASSERT_TRUE(status.has_value());
     const auto first = ReadUint(Device(), pipeline->GetRandomVectors(), 64, 64);
@@ -417,8 +418,9 @@ TEST_F(CameraGpuTest, IntegerCounterVectorsMatchIndependentGoldens) {
     EXPECT_EQ(first[base + 3], 0xe0588ed0u);
 
     CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
+        auto list = gpu::vulkan::Wrap(cmd);
         status = pipeline->RecordRandomVectors(
-            cmd, 0x548cu, 0x100000007ull, NoiseClass::PhotonShot, 0u);
+            list, 0x548cu, 0x100000007ull, NoiseClass::PhotonShot, 0u);
     });
     ASSERT_TRUE(status.has_value());
     const auto highCapture = ReadUint(Device(), pipeline->GetRandomVectors(), 64, 64);
@@ -426,16 +428,18 @@ TEST_F(CameraGpuTest, IntegerCounterVectorsMatchIndependentGoldens) {
     EXPECT_EQ(highCapture[base], 0x0877f273u);
 
     CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
+        auto list = gpu::vulkan::Wrap(cmd);
         status = pipeline->RecordRandomVectors(
-            cmd, 0x548cu, 7u, NoiseClass::FixedPrnu, 0u);
+            list, 0x548cu, 7u, NoiseClass::FixedPrnu, 0u);
     });
     ASSERT_TRUE(status.has_value());
     const auto fixedFirst = ReadUint(Device(), pipeline->GetRandomVectors(), 64, 64);
     ASSERT_EQ(fixedFirst.size(), first.size());
     EXPECT_EQ(fixedFirst[base], 0x3c64784eu);
     CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
+        auto list = gpu::vulkan::Wrap(cmd);
         status = pipeline->RecordRandomVectors(
-            cmd, 0x548cu, 0x1000003e7ull, NoiseClass::FixedPrnu, 0u);
+            list, 0x548cu, 0x1000003e7ull, NoiseClass::FixedPrnu, 0u);
     });
     ASSERT_TRUE(status.has_value());
     const auto fixedLater = ReadUint(Device(), pipeline->GetRandomVectors(), 64, 64);
@@ -1403,7 +1407,8 @@ TEST_F(CameraGpuTest, CheckpointRestoreReplaysThermalHistoryBitIdentically) {
     // must reproduce the uninterrupted products exactly.
     Result<void, String> restored = Result<void, String>::Ok();
     CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        restored = pipeline->RestoreStateCheckpoint(checkpoint.value(), cmd);
+        auto list = gpu::vulkan::Wrap(cmd);
+        restored = pipeline->RestoreStateCheckpoint(checkpoint.value(), list);
     });
     ASSERT_TRUE(restored.has_value()) << restored.error();
     ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 2, 0.2).has_value());
@@ -1969,7 +1974,7 @@ TEST_F(CameraGpuTest, StratifiedCompositorMatchesAnchorsAndCountsDisocclusion) {
         Device(), *pipeline, *strataRate, *strataDepth, spec, 0u, timingPool);
     ASSERT_TRUE(recorded.has_value()) << recorded.error();
     const auto outputs = pipeline->GetOutputs();
-    ASSERT_NE(outputs.compositedRate, nullptr);
+    ASSERT_TRUE(outputs.compositedRate.IsValid());
     const auto counters = pipeline->ReadDynamicCounters();
     ASSERT_TRUE(counters.has_value()) << counters.error();
 
@@ -2625,12 +2630,14 @@ TEST_F(CameraGpuTest, HsvDefaultsAreIdentityAndGradingChangesDisplayOnly) {
 
     // RAW and corrected never pass through HSV: bitwise identical between
     // the default chain and the graded one.
-    for (const GpuImage* product : {defaultPipeline.value()->GetOutputs().rawDn,
-                                    defaultPipeline.value()->GetOutputs().corrected}) {
+    for (const gpu::TextureRef product :
+         {defaultPipeline.value()->GetOutputs().rawDn,
+          defaultPipeline.value()->GetOutputs().corrected}) {
         const auto a = ReadFloat(Device(), product, kSize, kSize);
-        const GpuImage* graded = product == defaultPipeline.value()->GetOutputs().rawDn
-            ? huePipeline.value()->GetOutputs().rawDn
-            : huePipeline.value()->GetOutputs().corrected;
+        const gpu::TextureRef graded =
+            product.Identity() == defaultPipeline.value()->GetOutputs().rawDn.Identity()
+                ? huePipeline.value()->GetOutputs().rawDn
+                : huePipeline.value()->GetOutputs().corrected;
         const auto b = ReadFloat(Device(), graded, kSize, kSize);
         ASSERT_EQ(a.size(), b.size());
         for (u32 i = 0; i < a.size(); ++i)
