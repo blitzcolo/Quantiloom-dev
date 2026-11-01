@@ -56,7 +56,9 @@ Result<std::unique_ptr<Buffer>, String> VulkanDevice::CreateBuffer(const BufferD
         return std::unique_ptr<Buffer>(std::make_unique<VulkanBuffer>(
             GpuBuffer(context_.GetAllocator(), desc.size, ToVk(desc.usage), ToVma(desc.memory), desc.minAlignment)));
     } catch (const std::exception& e) {
-        return Fail<std::unique_ptr<Buffer>>(String("GpuBuffer creation failed: ") + e.what());
+        // The text GpuBuffer threw, unprefixed: renderer/GpuAlloc.hpp rethrows it, so a
+        // caller's catch sees what the constructor threw (p03 2.4).
+        return Fail<std::unique_ptr<Buffer>>(e.what());
     }
 }
 
@@ -78,7 +80,8 @@ Result<std::unique_ptr<Texture>, String> VulkanDevice::CreateTexture(const Textu
                      cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D_ARRAY),
             desc));
     } catch (const std::exception& e) {
-        return Fail<std::unique_ptr<Texture>>(String("GpuImage creation failed: ") + e.what());
+        // As for buffers: the GpuImage text, which already names image or view creation.
+        return Fail<std::unique_ptr<Texture>>(e.what());
     }
 }
 
@@ -275,6 +278,10 @@ u32 VulkanDevice::RtInstanceStride() const {
 
 void VulkanDevice::PackRtInstances(std::span<const RtInstance> instances, std::span<std::byte> out) const {
     WriteRtInstances(instances, out);
+}
+
+u64 VulkanDevice::BufferDeviceAddress(BufferRef buffer) const {
+    return static_cast<u64>(BufferAddress(context_.GetDevice(), buffer));
 }
 
 }  // namespace quantiloom::gpu::vulkan

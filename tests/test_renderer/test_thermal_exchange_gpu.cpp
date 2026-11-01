@@ -19,8 +19,12 @@
 
 #include "renderer/ThermalExchangePrecompute.hpp"
 
+#include "gpu/Device.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/CommandHelper.hpp"
+#include "renderer/GpuBuffer.hpp"
 #include "renderer/RenderCore.hpp"
+#include "renderer/VulkanContext.hpp"
 #include "support/VulkanTestDevice.hpp"
 #include "thermal/ThermalMesh.hpp"
 
@@ -99,7 +103,7 @@ TEST_F(ThermalExchangeGpuTest, APlateUnderOpenSkySeesNothingButSky) {
     Scene scene = MakeScene();
     AddQuad(scene, 0.0f, 5.0f, /*facingUp=*/true, 0);
 
-    SceneGeometry geometry = SceneGeometry::Build(Device(), scene);
+    SceneGeometry geometry = SceneGeometry::Build(GpuDevice(), scene);
     ASSERT_TRUE(geometry.IsValid());
 
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
@@ -110,7 +114,7 @@ TEST_F(ThermalExchangeGpuTest, APlateUnderOpenSkySeesNothingButSky) {
         GTEST_SKIP() << "thermal_exchange.spv unavailable";
     }
 
-    const auto exchange = precompute.Run(geometry.Tlas().GetHandle(), mesh.elements,
+    const auto exchange = precompute.Run(gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements,
                                          mesh.instanceElementBase, {});
     ASSERT_EQ(exchange.skyFraction.size(), 2u);
     EXPECT_NEAR(MeanSkyFraction(exchange, 0, 2), 1.0f, 1e-6f);
@@ -131,7 +135,7 @@ TEST_F(ThermalExchangeGpuTest, TwoParallelPlatesSeeEachOtherByTheAnalyticFactor)
     AddQuad(scene, 0.0f, 5.0f, /*facingUp=*/true, 0);   // elements 0..1
     AddQuad(scene, 5.0f, 5.0f, /*facingUp=*/false, 0);  // elements 2..3
 
-    SceneGeometry geometry = SceneGeometry::Build(Device(), scene);
+    SceneGeometry geometry = SceneGeometry::Build(GpuDevice(), scene);
     ASSERT_TRUE(geometry.IsValid());
 
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
@@ -144,7 +148,7 @@ TEST_F(ThermalExchangeGpuTest, TwoParallelPlatesSeeEachOtherByTheAnalyticFactor)
 
     ThermalExchangePrecompute::Params params;
     params.hemisphereRays = 1024;  // this one is a number, so pay for it
-    const auto exchange = precompute.Run(geometry.Tlas().GetHandle(), mesh.elements,
+    const auto exchange = precompute.Run(gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements,
                                          mesh.instanceElementBase, params);
     ASSERT_EQ(exchange.skyFraction.size(), 4u);
 
@@ -172,7 +176,7 @@ TEST_F(ThermalExchangeGpuTest, OpacityRebuildProducesATraceableAlphaTestedBlas) 
     AddQuad(scene, 0.0f, 5.0f, /*facingUp=*/true, 0);
     AddQuad(scene, 2.0f, 5.0f, /*facingUp=*/false, 0);
 
-    SceneGeometry geometry = SceneGeometry::Build(Device(), scene);
+    SceneGeometry geometry = SceneGeometry::Build(GpuDevice(), scene);
     ASSERT_TRUE(geometry.IsValid());
 
     // Crossing OPAQUE -> MASK replaces the BLAS. Zero coverage makes the
@@ -180,7 +184,7 @@ TEST_F(ThermalExchangeGpuTest, OpacityRebuildProducesATraceableAlphaTestedBlas) 
     // plate must see sky through the upper one. This exercises the replacement
     // BLAS address and the opacity flag rather than only inspecting host state.
     scene.materials[0].alphaMode = Material::AlphaMode::Mask;
-    ASSERT_TRUE(geometry.RefreshMaterialOpacity(Device(), scene));
+    ASSERT_TRUE(geometry.RefreshMaterialOpacity(GpuDevice(), scene));
 
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
     ThermalExchangePrecompute precompute(Device());
@@ -191,7 +195,7 @@ TEST_F(ThermalExchangeGpuTest, OpacityRebuildProducesATraceableAlphaTestedBlas) 
 
     ThermalExchangePrecompute::Params params;
     params.hemisphereRays = 256;
-    const auto exchange = precompute.Run(geometry.Tlas().GetHandle(), mesh.elements,
+    const auto exchange = precompute.Run(gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements,
                                          mesh.instanceElementBase, params);
 
     ASSERT_EQ(exchange.skyFraction.size(), 4u);
@@ -210,7 +214,7 @@ TEST_F(ThermalExchangeGpuTest, EveryRowSumsToOneWithItsSkyFraction) {
     AddQuad(scene, 5.0f, 5.0f, false, 0);
     AddQuad(scene, 2.0f, 2.0f, true, 0);
 
-    SceneGeometry geometry = SceneGeometry::Build(Device(), scene);
+    SceneGeometry geometry = SceneGeometry::Build(GpuDevice(), scene);
     ASSERT_TRUE(geometry.IsValid());
 
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
@@ -221,7 +225,7 @@ TEST_F(ThermalExchangeGpuTest, EveryRowSumsToOneWithItsSkyFraction) {
 
     ThermalExchangePrecompute::Params params;
     params.topK = 1;  // truncate hard, so the rescale is doing visible work
-    const auto exchange = precompute.Run(geometry.Tlas().GetHandle(), mesh.elements,
+    const auto exchange = precompute.Run(gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements,
                                          mesh.instanceElementBase, params);
 
     for (usize e = 0; e < mesh.elements.size(); ++e) {
@@ -244,7 +248,7 @@ TEST_F(ThermalExchangeGpuTest, ViewFactorsAreReciprocalAndRowsStillSumToOne) {
     AddQuad(scene, 5.0f, 5.0f, false, 0);
     AddQuad(scene, 2.0f, 2.0f, true, 0);
 
-    SceneGeometry geometry = SceneGeometry::Build(Device(), scene);
+    SceneGeometry geometry = SceneGeometry::Build(GpuDevice(), scene);
     ASSERT_TRUE(geometry.IsValid());
 
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
@@ -255,7 +259,7 @@ TEST_F(ThermalExchangeGpuTest, ViewFactorsAreReciprocalAndRowsStillSumToOne) {
 
     ThermalExchangePrecompute::Params params;
     params.topK = 0;  // clamped to one entry per row, never to none
-    const auto exchange = precompute.Run(geometry.Tlas().GetHandle(), mesh.elements,
+    const auto exchange = precompute.Run(gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements,
                                          mesh.instanceElementBase, params);
 
     const auto& vf = exchange.viewFactors;
@@ -285,7 +289,7 @@ TEST_F(ThermalExchangeGpuTest, AnUnoccludedPlateIsFullyLitAndAShadedOneIsNot) {
     AddQuad(scene, 0.0f, 2.0f, true, 0);    // elements 0..1, in shadow
     AddQuad(scene, 3.0f, 10.0f, false, 0);  // elements 2..3, blocking it
 
-    SceneGeometry geometry = SceneGeometry::Build(Device(), scene);
+    SceneGeometry geometry = SceneGeometry::Build(GpuDevice(), scene);
     ASSERT_TRUE(geometry.IsValid());
 
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
@@ -296,7 +300,7 @@ TEST_F(ThermalExchangeGpuTest, AnUnoccludedPlateIsFullyLitAndAShadedOneIsNot) {
 
     ThermalExchangePrecompute::Params params;
     params.sunDirection = glm::vec3(0.0f, 1.0f, 0.0f);  // straight up
-    const auto exchange = precompute.Run(geometry.Tlas().GetHandle(), mesh.elements,
+    const auto exchange = precompute.Run(gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements,
                                          mesh.instanceElementBase, params);
     ASSERT_EQ(exchange.sunVisibility.size(), 4u);
 
@@ -313,7 +317,7 @@ TEST_F(ThermalExchangeGpuTest, AnOpenPlateIsFullyLit) {
     Scene scene = MakeScene();
     AddQuad(scene, 0.0f, 5.0f, true, 0);
 
-    SceneGeometry geometry = SceneGeometry::Build(Device(), scene);
+    SceneGeometry geometry = SceneGeometry::Build(GpuDevice(), scene);
     ASSERT_TRUE(geometry.IsValid());
 
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
@@ -324,7 +328,7 @@ TEST_F(ThermalExchangeGpuTest, AnOpenPlateIsFullyLit) {
 
     ThermalExchangePrecompute::Params params;
     params.sunDirection = glm::vec3(0.0f, 1.0f, 0.0f);
-    const auto exchange = precompute.Run(geometry.Tlas().GetHandle(), mesh.elements,
+    const auto exchange = precompute.Run(gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements,
                                          mesh.instanceElementBase, params);
 
     EXPECT_NEAR(exchange.sunVisibility[0], 1.0f, 1e-6f);
@@ -347,7 +351,7 @@ TEST_F(ThermalExchangeGpuTest, PreparedRefitChunksLargeUploadsAndTracesConsecuti
         scene.nodes.push_back(filler);
     }
 
-    SceneGeometry geometry = SceneGeometry::Build(Device(), scene);
+    SceneGeometry geometry = SceneGeometry::Build(GpuDevice(), scene);
     ASSERT_TRUE(geometry.IsValid());
     ASSERT_EQ(geometry.InstanceCount(), 1025u);
 
@@ -359,7 +363,7 @@ TEST_F(ThermalExchangeGpuTest, PreparedRefitChunksLargeUploadsAndTracesConsecuti
     const auto targetVisibility = [&]() {
         const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
         const auto visibility = precompute.RunSunVisibility(
-            geometry.Tlas().GetHandle(), mesh.elements, mesh.instanceElementBase,
+            gpu::vulkan::NativeScene(geometry.Tlas().Ref()), mesh.elements, mesh.instanceElementBase,
             directions, 1, 0.0f);
         EXPECT_EQ(visibility.size(), mesh.elements.size());
         return 0.5f * (visibility[0] + visibility[1]);
@@ -367,11 +371,12 @@ TEST_F(ThermalExchangeGpuTest, PreparedRefitChunksLargeUploadsAndTracesConsecuti
 
     EXPECT_NEAR(targetVisibility(), 0.0f, 1e-6f);
 
-    const GpuBuffer& instanceInput = geometry.Tlas().InstanceBufferForDiagnostics();
-    GpuBuffer firstRecorded(Device().GetAllocator(), instanceInput.GetSize(),
+    const gpu::Buffer& instanceInput = geometry.Tlas().InstanceBufferForDiagnostics();
+    const VkBuffer instanceHandle = gpu::vulkan::NativeBuffer(instanceInput.Ref());
+    GpuBuffer firstRecorded(Device().GetAllocator(), instanceInput.Size(),
                             VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                             VMA_MEMORY_USAGE_GPU_TO_CPU);
-    GpuBuffer secondRecorded(Device().GetAllocator(), instanceInput.GetSize(),
+    GpuBuffer secondRecorded(Device().GetAllocator(), instanceInput.Size(),
                              VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                              VMA_MEMORY_USAGE_GPU_TO_CPU);
 
@@ -387,7 +392,7 @@ TEST_F(ThermalExchangeGpuTest, PreparedRefitChunksLargeUploadsAndTracesConsecuti
             readable.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
             readable.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             readable.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            readable.buffer = instanceInput.GetHandle();
+            readable.buffer = instanceHandle;
             readable.offset = 0;
             readable.size = VK_WHOLE_SIZE;
             vkCmdPipelineBarrier(cmd,
@@ -396,8 +401,8 @@ TEST_F(ThermalExchangeGpuTest, PreparedRefitChunksLargeUploadsAndTracesConsecuti
                                  0, 0, nullptr, 1, &readable, 0, nullptr);
 
             VkBufferCopy copy{};
-            copy.size = instanceInput.GetSize();
-            vkCmdCopyBuffer(cmd, instanceInput.GetHandle(), destination.GetHandle(), 1, &copy);
+            copy.size = instanceInput.Size();
+            vkCmdCopyBuffer(cmd, instanceHandle, destination.GetHandle(), 1, &copy);
 
             VkBufferMemoryBarrier hostReadable{};
             hostReadable.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
@@ -413,7 +418,9 @@ TEST_F(ThermalExchangeGpuTest, PreparedRefitChunksLargeUploadsAndTracesConsecuti
                                  0, 0, nullptr, 1, &hostReadable, 0, nullptr);
         };
 
-        geometry.RecordPreparedTlasRefit(cmd);
+        // A list from the device: the refit's build needs its ray tracing entry points.
+        const auto list = GpuDevice().WrapRecording(gpu::vulkan::ToHandle(cmd));
+        geometry.RecordPreparedTlasRefit(*list);
         snapshotInput(firstRecorded);
 
         // Change the CPU list while this command buffer is still recording.
@@ -422,7 +429,7 @@ TEST_F(ThermalExchangeGpuTest, PreparedRefitChunksLargeUploadsAndTracesConsecuti
         scene.nodes[1].transform = glm::mat4(1.0f);
         preparedSecond = geometry.PrepareTlasRefit(scene);
         if (!preparedSecond) return;
-        geometry.RecordPreparedTlasRefit(cmd);
+        geometry.RecordPreparedTlasRefit(*list);
         snapshotInput(secondRecorded);
     });
     ASSERT_TRUE(preparedSecond);
@@ -443,16 +450,16 @@ TEST_F(ThermalExchangeGpuTest, PreparedRefitChunksLargeUploadsAndTracesConsecuti
     scene.nodes[1].transform =
         glm::translate(glm::mat4(1.0f), glm::vec3(100.0f, 0.0f, 0.0f));
     ASSERT_TRUE(geometry.PrepareTlasRefit(scene));
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        geometry.RecordPreparedTlasRefit(cmd);
+    GpuDevice().ExecuteImmediate([&](gpu::CommandList& list) {
+        geometry.RecordPreparedTlasRefit(list);
     });
     EXPECT_NEAR(targetVisibility(), 1.0f, 1e-6f)
         << "the first chunked update must move the blocker out of the sun ray";
 
     scene.nodes[1].transform = glm::mat4(1.0f);
     ASSERT_TRUE(geometry.PrepareTlasRefit(scene));
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        geometry.RecordPreparedTlasRefit(cmd);
+    GpuDevice().ExecuteImmediate([&](gpu::CommandList& list) {
+        geometry.RecordPreparedTlasRefit(list);
     });
     EXPECT_NEAR(targetVisibility(), 0.0f, 1e-6f)
         << "the second update must wait for prior AS-input reads and move it back";

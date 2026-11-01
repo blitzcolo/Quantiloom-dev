@@ -1,11 +1,10 @@
 #include "TextureManager.hpp"
 #include "TextureCompressor.hpp"
-#include "GpuBuffer.hpp"
-#include "CommandHelper.hpp"
 #include "core/Log.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
+#include "renderer/GpuAlloc.hpp"
 #include "renderer/TextureTransitions.hpp"
 #include <algorithm>
+#include <span>
 #include <stdexcept>
 #include <cmath>
 
@@ -23,9 +22,9 @@ constexpr gpu::Access kSampleAccess =
 }  // namespace
 
 struct TextureManager::PendingUpload {
-    std::unique_ptr<GpuBuffer> staging;
-    std::unique_ptr<GpuImage> image;
-    VkFormat format = VK_FORMAT_UNDEFINED;
+    std::unique_ptr<gpu::Buffer> staging;
+    std::unique_ptr<gpu::Texture> image;
+    gpu::Format format = gpu::Format::Undefined;
     u32 width = 0;
     u32 height = 0;
     u32 mipLevels = 1;
@@ -38,15 +37,14 @@ struct TextureManager::PendingUpload {
 // Construction / Destruction
 // ============================================================================
 
-TextureManager::TextureManager(VulkanContext& context, VkDeviceSize uploadBatchBytes)
-    : m_context(context)
-    , m_gpu(gpu::vulkan::AdoptContext(context))
-    , m_uploadBatchBytes(std::max<VkDeviceSize>(uploadBatchBytes, 1)) {
+TextureManager::TextureManager(gpu::Device& device, u64 uploadBatchBytes)
+    : m_device(device)
+    , m_uploadBatchBytes(std::max<u64>(uploadBatchBytes, 1)) {
     // Resources are allocated lazily in UploadTextures
 }
 
 // m_samplerObjects is declared after m_images: every sampler is destroyed, then every
-// GpuImage destroys its VkImage and VkImageView (RAII)
+// gpu::Texture destroys its image and view (RAII)
 TextureManager::~TextureManager() = default;
 
 // ============================================================================
@@ -57,8 +55,8 @@ void TextureManager::UploadTextures(std::vector<Texture>& textures) {
     // Clear previous state
     m_images.clear();
     m_samplerObjects.clear();
-    m_samplers.clear();
-    m_imageViews.clear();
+    m_samplerRefs.clear();
+    m_textureRefs.clear();
     m_lastUploadBatchCount = 0;
 
     // Handle empty texture list: create dummy 1x1 white texture
@@ -67,14 +65,14 @@ void TextureManager::UploadTextures(std::vector<Texture>& textures) {
         Texture dummyTex = CreateDummyTexture();
 
         auto pending = PrepareTexture(dummyTex);
-        CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
-            RecordTextureUpload(cmd, *pending);
+        m_device.ExecuteImmediate([&](gpu::CommandList& list) {
+            RecordTextureUpload(list, *pending);
         });
         ++m_lastUploadBatchCount;
         m_images.push_back(std::move(pending->image));
         m_samplerObjects.push_back(CreateSampler(dummyTex.sampler));
-        m_samplers.push_back(gpu::vulkan::NativeSampler(m_samplerObjects.back()->Ref()));
-        m_imageViews.push_back(m_images.back()->GetView());
+        m_samplerRefs.push_back(m_samplerObjects.back()->Ref());
+        m_textureRefs.push_back(m_images.back()->Ref());
 
         return;
     }
@@ -87,21 +85,21 @@ void TextureManager::UploadTextures(std::vector<Texture>& textures) {
         std::unique_ptr<PendingUpload> upload;
     };
     std::vector<BatchEntry> batch;
-    VkDeviceSize batchBytes = 0;
+    u64 batchBytes = 0;
 
     const auto flush = [&]() {
         if (batch.empty()) return;
-        CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
+        m_device.ExecuteImmediate([&](gpu::CommandList& list) {
             for (const BatchEntry& entry : batch) {
-                RecordTextureUpload(cmd, *entry.upload);
+                RecordTextureUpload(list, *entry.upload);
             }
         });
         ++m_lastUploadBatchCount;
 
         for (BatchEntry& entry : batch) {
             std::unique_ptr<gpu::Sampler> sampler = CreateSampler(entry.source->sampler);
-            m_imageViews.push_back(entry.upload->image->GetView());
-            m_samplers.push_back(gpu::vulkan::NativeSampler(sampler->Ref()));
+            m_textureRefs.push_back(entry.upload->image->Ref());
+            m_samplerRefs.push_back(sampler->Ref());
             m_samplerObjects.push_back(std::move(sampler));
             m_images.push_back(std::move(entry.upload->image));
 
@@ -116,16 +114,16 @@ void TextureManager::UploadTextures(std::vector<Texture>& textures) {
     };
 
     for (Texture& texture : textures) {
-        const VkDeviceSize rawBytes =
-            static_cast<VkDeviceSize>(texture.width) * texture.height * 4;
-        const VkDeviceSize estimate = texture.HasBC7Data()
-            ? static_cast<VkDeviceSize>(texture.bc7Data->data.size()) : rawBytes;
+        const u64 rawBytes =
+            static_cast<u64>(texture.width) * texture.height * 4;
+        const u64 estimate = texture.HasBC7Data()
+            ? static_cast<u64>(texture.bc7Data->data.size()) : rawBytes;
         if (!batch.empty() && batchBytes + estimate > m_uploadBatchBytes) {
             flush();
         }
 
         auto pending = PrepareTexture(texture);
-        const VkDeviceSize uploadBytes = pending->staging->GetSize();
+        const u64 uploadBytes = pending->staging->Size();
         if (!batch.empty() && batchBytes + uploadBytes > m_uploadBatchBytes) {
             flush();
         }
@@ -142,7 +140,7 @@ void TextureManager::UploadTextures(std::vector<Texture>& textures) {
 
     QL_LOG_INFO("  Texture upload complete: {} textures, {} samplers, {} batch(es) "
                 "(CPU memory released)",
-                m_images.size(), m_samplers.size(), m_lastUploadBatchCount);
+                m_images.size(), m_samplerRefs.size(), m_lastUploadBatchCount);
 }
 
 i32 TextureManager::AppendTexture(const Texture& texture) {
@@ -158,8 +156,8 @@ i32 TextureManager::AppendTexture(const Texture& texture) {
     std::unique_ptr<gpu::Sampler> sampler = CreateSampler(texture.sampler);
 
     const i32 index = static_cast<i32>(m_images.size());
-    m_imageViews.push_back(gpuImage->GetView());
-    m_samplers.push_back(gpu::vulkan::NativeSampler(sampler->Ref()));
+    m_textureRefs.push_back(gpuImage->Ref());
+    m_samplerRefs.push_back(sampler->Ref());
     m_samplerObjects.push_back(std::move(sampler));
     m_images.push_back(std::move(gpuImage));
 
@@ -172,10 +170,10 @@ i32 TextureManager::AppendTexture(const Texture& texture) {
 // Internal Helper Functions
 // ============================================================================
 
-std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) const {
+std::unique_ptr<gpu::Texture> TextureManager::UploadTexture(const Texture& texture) const {
     auto pending = PrepareTexture(texture);
-    CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
-        RecordTextureUpload(cmd, *pending);
+    m_device.ExecuteImmediate([&](gpu::CommandList& list) {
+        RecordTextureUpload(list, *pending);
     });
     return std::move(pending->image);
 }
@@ -194,7 +192,7 @@ std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareTexture(
         throw std::runtime_error("Only RGBA8 textures are supported");
     }
 
-    VkDeviceSize uncompressedSize = static_cast<VkDeviceSize>(texture.width) * texture.height * 4;
+    u64 uncompressedSize = static_cast<u64>(texture.width) * texture.height * 4;
 
     if (texture.pixels.size() != uncompressedSize) {
         QL_LOG_ERROR("Texture '{}' pixel data size mismatch: expected {} bytes, got {}",
@@ -234,7 +232,7 @@ std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareTexture(
     // ========================================================================
     // Uncompressed Upload Path (original code)
     // ========================================================================
-    VkFormat format = texture.isSRGB ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    gpu::Format format = texture.isSRGB ? gpu::Format::RGBA8Srgb : gpu::Format::RGBA8Unorm;
     const char* formatName = texture.isSRGB ? "RGBA8_SRGB" : "RGBA8_UNORM";
 
     QL_LOG_INFO("  Uploading texture '{}': {}x{} {} ({} bytes)",
@@ -242,28 +240,24 @@ std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareTexture(
 
     // Step 1: Create staging buffer (CPU-accessible)
     auto pending = std::make_unique<PendingUpload>();
-    pending->staging = std::make_unique<GpuBuffer>(
-        m_context.GetAllocator(),
-        uncompressedSize,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_CPU_ONLY
-    );
+    pending->staging = CreateBufferOrThrow(
+        m_device,
+        gpu::BufferDesc{uncompressedSize, gpu::BufferUsage::TransferSrc, gpu::MemoryClass::HostOnly, 0});
 
     // Step 2: Upload CPU pixel data to staging buffer
     pending->staging->Upload(texture.pixels.data(), uncompressedSize);
 
     // Step 3: Create device-local GPU image with correct format and full mipmap chain
     u32 mipLevels = static_cast<u32>(std::floor(std::log2(std::max(texture.width, texture.height)))) + 1;
-    pending->image = std::make_unique<GpuImage>(
-        m_context.GetAllocator(),
-        m_context.GetDevice(),
-        texture.width,
-        texture.height,
-        format,  // sRGB or UNORM based on texture usage
-        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY,
-        mipLevels  // Full mipmap chain
-    );
+    gpu::TextureDesc imageDesc;
+    imageDesc.width = texture.width;
+    imageDesc.height = texture.height;
+    imageDesc.mipLevels = mipLevels;  // Full mipmap chain
+    imageDesc.format = format;  // sRGB or UNORM based on texture usage
+    imageDesc.usage = gpu::TextureUsage::TransferSrc | gpu::TextureUsage::TransferDst |
+                      gpu::TextureUsage::Sampled;
+    imageDesc.memory = gpu::MemoryClass::DeviceLocal;
+    pending->image = CreateTextureOrThrow(m_device, imageDesc);
 
     pending->format = format;
     pending->width = texture.width;
@@ -306,11 +300,11 @@ std::unique_ptr<gpu::Sampler> TextureManager::CreateSampler(const TextureSampler
     desc.minLod = 0.0f;
     desc.maxLod = gpu::kLodClampNone;  // Use all mip levels
 
-    auto sampler = m_gpu->CreateSampler(desc);
+    auto sampler = m_device.CreateSampler(desc);
     if (!sampler.has_value()) {
         // The backend's Err is the result code as a decimal
-        QL_LOG_ERROR("Failed to create VkSampler: error code {}", sampler.error());
-        throw std::runtime_error("VkSampler creation failed");
+        QL_LOG_ERROR("Failed to create texture sampler: error code {}", sampler.error());
+        throw std::runtime_error("Texture sampler creation failed");
     }
 
     return std::move(sampler.value());
@@ -371,7 +365,7 @@ std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareBC7Texture
     const BC7CompressedData& compressed) const {
 
     // Choose BC7 format based on color space
-    VkFormat format = compressed.isSRGB ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK;
+    gpu::Format format = compressed.isSRGB ? gpu::Format::BC7Srgb : gpu::Format::BC7Unorm;
     const char* formatName = compressed.isSRGB ? "BC7_SRGB" : "BC7_UNORM";
 
     QL_LOG_INFO("  Uploading BC7 texture '{}': {}x{} {} ({} bytes, ratio: {:.1f}x)",
@@ -389,31 +383,26 @@ std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareBC7Texture
     u32 mipLevels = 1;
 
     // Step 1: Create staging buffer for compressed data
-    VkDeviceSize compressedSize = static_cast<VkDeviceSize>(compressed.GetCompressedSize());
+    u64 compressedSize = static_cast<u64>(compressed.GetCompressedSize());
     auto pending = std::make_unique<PendingUpload>();
-    pending->staging = std::make_unique<GpuBuffer>(
-        m_context.GetAllocator(),
-        compressedSize,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_CPU_ONLY
-    );
+    pending->staging = CreateBufferOrThrow(
+        m_device,
+        gpu::BufferDesc{compressedSize, gpu::BufferUsage::TransferSrc, gpu::MemoryClass::HostOnly, 0});
 
     // Step 2: Copy compressed data to staging buffer
     pending->staging->Upload(compressed.data.data(), compressedSize);
 
     // Step 3: Create device-local GPU image with BC7 format
     // Note: For BC7, image dimensions should be the original texture dimensions,
-    // not the aligned dimensions. Vulkan handles the block alignment internally.
-    pending->image = std::make_unique<GpuImage>(
-        m_context.GetAllocator(),
-        m_context.GetDevice(),
-        texture.width,  // Original width (Vulkan handles alignment)
-        texture.height, // Original height
-        format,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY,
-        mipLevels
-    );
+    // not the aligned dimensions. The driver handles the block alignment internally.
+    gpu::TextureDesc imageDesc;
+    imageDesc.width = texture.width;    // Original width (the driver handles alignment)
+    imageDesc.height = texture.height;  // Original height
+    imageDesc.mipLevels = mipLevels;
+    imageDesc.format = format;
+    imageDesc.usage = gpu::TextureUsage::TransferDst | gpu::TextureUsage::Sampled;
+    imageDesc.memory = gpu::MemoryClass::DeviceLocal;
+    pending->image = CreateTextureOrThrow(m_device, imageDesc);
 
     pending->format = format;
     pending->width = texture.width;
@@ -425,12 +414,11 @@ std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareBC7Texture
     return pending;
 }
 
-void TextureManager::RecordTextureUpload(VkCommandBuffer cmd,
+void TextureManager::RecordTextureUpload(gpu::CommandList& list,
                                          const PendingUpload& upload) const {
-    auto list = gpu::vulkan::Wrap(cmd);
     // Sampled textures have per-state layouts: transfer destination, then shader read.
     const gpu::TextureRef image =
-        gpu::vulkan::Ref(*upload.image).WithLayout(gpu::TextureLayoutPolicy::Optimal);
+        upload.image->Ref().WithLayout(gpu::TextureLayoutPolicy::Optimal);
 
     rendercore::LegacyTransition(list, image, rendercore::Layout::Undefined,
                                  rendercore::Layout::TransferDst,
@@ -441,10 +429,10 @@ void TextureManager::RecordTextureUpload(VkCommandBuffer cmd,
     region.bufferImageHeight = upload.bufferImageHeight;
     region.width = upload.width;
     region.height = upload.height;
-    list.CopyBufferToTexture(gpu::vulkan::Ref(*upload.staging), image, region);
+    list.CopyBufferToTexture(upload.staging->Ref(), image, region);
 
     if (!upload.compressed) {
-        GenerateMipmaps(cmd, upload.image.get(), upload.format,
+        GenerateMipmaps(list, *upload.image, upload.format,
                         upload.width, upload.height, upload.mipLevels);
         return;
     }
@@ -461,14 +449,13 @@ void TextureManager::RecordTextureUpload(VkCommandBuffer cmd,
 // Mipmap Generation Helper
 // ============================================================================
 
-void TextureManager::GenerateMipmaps(VkCommandBuffer cmd, GpuImage* gpuImage,
-                                      VkFormat format, u32 texWidth, u32 texHeight,
+void TextureManager::GenerateMipmaps(gpu::CommandList& list, const gpu::Texture& gpuImage,
+                                      gpu::Format format, u32 texWidth, u32 texHeight,
                                       u32 mipLevels) const {
     // Generate mipmaps by blitting each level from the one above it. Every barrier
     // covers one mip level of layer 0.
-    auto list = gpu::vulkan::Wrap(cmd);
     const gpu::TextureRef image =
-        gpu::vulkan::Ref(*gpuImage).WithLayout(gpu::TextureLayoutPolicy::Optimal);
+        gpuImage.Ref().WithLayout(gpu::TextureLayoutPolicy::Optimal);
 
     u32 mipWidth = texWidth;
     u32 mipHeight = texHeight;

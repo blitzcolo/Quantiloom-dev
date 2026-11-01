@@ -129,6 +129,7 @@ add_library(quantiloom_core OBJECT
     renderer/TextureManager.hpp
     renderer/TextureTransitions.cpp
     renderer/TextureTransitions.hpp
+    renderer/GpuAlloc.hpp
     renderer/RayTracingPipeline.cpp
     renderer/RayTracingPipeline.hpp
     renderer/RtBindings.hpp

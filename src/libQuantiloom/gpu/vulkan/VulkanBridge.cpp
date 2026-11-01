@@ -69,6 +69,10 @@ GpuBuffer& AsGpuBuffer(gpu::Buffer& buffer) {
     return static_cast<VulkanBuffer&>(buffer).Native();
 }
 
+const GpuBuffer& AsGpuBuffer(const gpu::Buffer& buffer) {
+    return static_cast<const VulkanBuffer&>(buffer).Native();
+}
+
 VkPipeline NativePipeline(const gpu::ComputeKernel& kernel) {
     return static_cast<const VulkanComputeKernel&>(kernel).Native();
 }
@@ -102,6 +106,20 @@ VkSampler NativeSampler(gpu::SamplerRef ref) {
 
 VkAccelerationStructureKHR NativeScene(gpu::RtSceneRef ref) {
     return FromHandle<VkAccelerationStructureKHR>(ref.handle);
+}
+
+std::vector<VkImageView> NativeViews(std::span<const gpu::TextureRef> refs) {
+    std::vector<VkImageView> views;
+    views.reserve(refs.size());
+    for (const gpu::TextureRef& ref : refs) views.push_back(NativeView(ref));
+    return views;
+}
+
+std::vector<VkSampler> NativeSamplers(std::span<const gpu::SamplerRef> refs) {
+    std::vector<VkSampler> samplers;
+    samplers.reserve(refs.size());
+    for (const gpu::SamplerRef& ref : refs) samplers.push_back(NativeSampler(ref));
+    return samplers;
 }
 
 }  // namespace quantiloom::gpu::vulkan

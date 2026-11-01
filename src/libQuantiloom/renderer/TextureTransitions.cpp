@@ -3,6 +3,7 @@
 #include "core/Log.hpp"
 #include "gpu/CommandList.hpp"
 #include "gpu/Device.hpp"
+#include "renderer/GpuAlloc.hpp"
 
 #include <cstring>
 #include <span>
@@ -82,18 +83,14 @@ std::vector<f32> ReadbackTexture(gpu::Device& device, gpu::TextureRef texture, u
                                  u32 height) {
     if (texture.format != gpu::Format::RGBA32Float) {
         throw std::runtime_error(
-            "ReadbackImage: Only VK_FORMAT_R32G32B32A32_SFLOAT is supported in M1");
+            "ReadbackImage: Only RGBA32Float (R32G32B32A32 float) is supported in M1");
     }
 
     constexpr u32 bytesPerPixel = 4 * sizeof(f32);
     const u64 bufferSize = static_cast<u64>(width) * height * bytesPerPixel;
 
-    auto created = device.CreateBuffer(
-        gpu::BufferDesc{bufferSize, gpu::BufferUsage::TransferDst, gpu::MemoryClass::Readback, 0});
-    if (!created.has_value()) {
-        throw std::runtime_error(created.error());
-    }
-    const std::unique_ptr<gpu::Buffer> staging = std::move(created.value());
+    const std::unique_ptr<gpu::Buffer> staging = CreateBufferOrThrow(
+        device, gpu::BufferDesc{bufferSize, gpu::BufferUsage::TransferDst, gpu::MemoryClass::Readback, 0});
 
     const gpu::TextureRef source = texture.WithLayout(gpu::TextureLayoutPolicy::Optimal);
     device.ExecuteImmediate([&](gpu::CommandList& list) {

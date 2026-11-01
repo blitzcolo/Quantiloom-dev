@@ -16,7 +16,6 @@
 #include "core/Image.hpp"
 #include "io/ImageIO.hpp"
 #include "renderer/RenderCore.hpp"
-#include "renderer/VulkanContext.hpp"
 
 #include <filesystem>
 
@@ -51,11 +50,11 @@ std::string WriteVerticalRampExr(const char* name) {
 
 TEST_F(VulkanDeviceTest, EnvironmentCubemapLoadsAnEquirectangularImage) {
     const auto path = WriteVerticalRampExr("quantiloom_env_load.exr");
-    auto env = rendercore::EnvironmentCubemap::Load(Device(), path, TinyParams());
+    auto env = rendercore::EnvironmentCubemap::Load(GpuDevice(), path, TinyParams());
 
     ASSERT_TRUE(env.has_value()) << (env.has_value() ? "" : env.error());
     EXPECT_TRUE(env.value().IsValid());
-    EXPECT_NE(env.value().View(), VK_NULL_HANDLE);
+    EXPECT_TRUE(env.value().View().IsValid());
     EXPECT_EQ(env.value().FaceSize(), 16u);
     EXPECT_EQ(env.value().MipLevels(), 3u);
 }
@@ -65,17 +64,17 @@ TEST_F(VulkanDeviceTest, EnvironmentCubemapLoadsAnEquirectangularImage) {
 // silent fallback -- that decision belongs to the caller.
 TEST_F(VulkanDeviceTest, EnvironmentCubemapReportsAMissingFile) {
     auto env = rendercore::EnvironmentCubemap::Load(
-        Device(), "no_such_environment_map.exr", TinyParams());
+        GpuDevice(), "no_such_environment_map.exr", TinyParams());
 
     ASSERT_FALSE(env.has_value());
     EXPECT_NE(env.error().find("not found"), std::string::npos) << env.error();
 }
 
 TEST_F(VulkanDeviceTest, EnvironmentCubemapFallbackFillsEveryLevel) {
-    auto env = rendercore::EnvironmentCubemap::Fallback(Device(), TinyParams());
+    auto env = rendercore::EnvironmentCubemap::Fallback(GpuDevice(), TinyParams());
 
     EXPECT_TRUE(env.IsValid());
-    EXPECT_NE(env.View(), VK_NULL_HANDLE);
+    EXPECT_TRUE(env.View().IsValid());
     EXPECT_EQ(env.FaceSize(), 16u);
     EXPECT_EQ(env.MipLevels(), 3u);
 }
@@ -86,7 +85,7 @@ TEST_F(VulkanDeviceTest, EnvironmentCubemapFallbackFillsEveryLevel) {
 // 512 with 8 levels stays clear of it, which is why this never surfaced.
 TEST_F(VulkanDeviceTest, EnvironmentCubemapClampsAChainDeeperThanTheFace) {
     const auto path = WriteVerticalRampExr("quantiloom_env_deep_chain.exr");
-    auto env = rendercore::EnvironmentCubemap::Load(Device(), path, {4, 5});
+    auto env = rendercore::EnvironmentCubemap::Load(GpuDevice(), path, {4, 5});
 
     ASSERT_TRUE(env.has_value()) << (env.has_value() ? "" : env.error());
     EXPECT_EQ(env.value().MipLevels(), 3u) << "4x4 supports mips 4, 2 and 1";
@@ -95,7 +94,7 @@ TEST_F(VulkanDeviceTest, EnvironmentCubemapClampsAChainDeeperThanTheFace) {
 
 // The other end: one level is always legal, and the chain loop must not run.
 TEST_F(VulkanDeviceTest, EnvironmentCubemapAcceptsASingleLevel) {
-    auto env = rendercore::EnvironmentCubemap::Fallback(Device(), {8, 1});
+    auto env = rendercore::EnvironmentCubemap::Fallback(GpuDevice(), {8, 1});
 
     EXPECT_TRUE(env.IsValid());
     EXPECT_EQ(env.MipLevels(), 1u);
@@ -118,10 +117,10 @@ TEST_F(VulkanDeviceTest, EnvironmentCubemapDefaultsMatchTheShippedConfiguration)
 // above: a single texel is where an off-by-one in the mip chain would land.
 TEST_F(VulkanDeviceTest, EnvironmentCubemapBuildsTheShippedPlaceholder) {
     auto env = rendercore::EnvironmentCubemap::Fallback(
-        Device(), rendercore::EnvironmentCubemap::kFallbackParams);
+        GpuDevice(), rendercore::EnvironmentCubemap::kFallbackParams);
 
     EXPECT_TRUE(env.IsValid());
-    EXPECT_NE(env.View(), VK_NULL_HANDLE);
+    EXPECT_TRUE(env.View().IsValid());
     EXPECT_EQ(env.FaceSize(), 1u);
     EXPECT_EQ(env.MipLevels(), 1u);
 }

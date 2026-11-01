@@ -87,6 +87,9 @@ public:
     /// Writes one native record per instance into `out`, which holds at least
     /// instances.size() * RtInstanceStride() bytes.
     virtual void PackRtInstances(std::span<const RtInstance> instances, std::span<std::byte> out) const = 0;
+    /// The device address of a buffer created with BufferUsage::DeviceAddress
+    /// (vkGetBufferDeviceAddress); 0 for a null buffer. Metal: MTL::Buffer::gpuAddress.
+    [[nodiscard]] virtual u64 BufferDeviceAddress(BufferRef buffer) const = 0;
 };
 
 }  // namespace quantiloom::gpu

@@ -15,9 +15,12 @@
 
 #include <gtest/gtest.h>
 #include "scene/Texture.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/CommandHelper.hpp"
 #include "renderer/GpuBuffer.hpp"
+#include "renderer/GpuImage.hpp"
 #include "renderer/TextureManager.hpp"
+#include "renderer/VulkanContext.hpp"
 #include "renderer/TextureCompressor.hpp"
 #include "support/VulkanTestDevice.hpp"
 #include "core/Types.hpp"
@@ -126,6 +129,11 @@ std::vector<u8> ReadTextureMip(VulkanContext& context, const GpuImage& image,
     return result;
 }
 
+/// The native image behind a manager's texture, for the byte, mip and format checks.
+const GpuImage& DiagnosticImage(const TextureManager& textures, u32 index) {
+    return gpu::vulkan::AsGpuImage(textures.GetImageForDiagnostics(index));
+}
+
 /**
  * @brief Simple texture cache for deduplication testing
  * (Mirrors the implementation in UsdLoader.cpp)
@@ -159,7 +167,7 @@ struct TextureCache {
 class TextureUploadGpuTest : public quantiloom::testing::VulkanDeviceTest {};
 
 TEST_F(TextureUploadGpuTest, BatchesUploadsWithoutChangingIdsFormatsPixelsOrMips) {
-    TextureManager manager(Device(), /*uploadBatchBytes=*/32);
+    TextureManager manager(GpuDevice(), /*uploadBatchBytes=*/32);
     std::vector<Texture> textures;
     textures.push_back(CreateTestTexture(2, 2, "srgb"));
     textures.push_back(CreateTestTexture(2, 2, "linear"));
@@ -180,19 +188,19 @@ TEST_F(TextureUploadGpuTest, BatchesUploadsWithoutChangingIdsFormatsPixelsOrMips
     manager.UploadTextures(textures);
 
     EXPECT_EQ(manager.GetTextureCount(), 4u);
-    EXPECT_EQ(manager.GetImageViews().size(), 4u);
-    EXPECT_EQ(manager.GetSamplers().size(), 4u);
+    EXPECT_EQ(manager.TextureRefs().size(), 4u);
+    EXPECT_EQ(manager.SamplerRefs().size(), 4u);
     EXPECT_EQ(manager.GetLastUploadBatchCount(), 3u)
         << "two small textures, one oversized texture, and one tail batch";
-    EXPECT_EQ(manager.GetImageForDiagnostics(0).GetFormat(), VK_FORMAT_R8G8B8A8_SRGB);
-    EXPECT_EQ(manager.GetImageForDiagnostics(1).GetFormat(), VK_FORMAT_R8G8B8A8_UNORM);
+    EXPECT_EQ(DiagnosticImage(manager, 0).GetFormat(), VK_FORMAT_R8G8B8A8_SRGB);
+    EXPECT_EQ(DiagnosticImage(manager, 1).GetFormat(), VK_FORMAT_R8G8B8A8_UNORM);
 
-    EXPECT_EQ(ReadTextureMip(Device(), manager.GetImageForDiagnostics(0), 0, 2, 2),
+    EXPECT_EQ(ReadTextureMip(Device(), DiagnosticImage(manager, 0), 0, 2, 2),
               expectedSrgb);
-    EXPECT_EQ(ReadTextureMip(Device(), manager.GetImageForDiagnostics(1), 0, 2, 2),
+    EXPECT_EQ(ReadTextureMip(Device(), DiagnosticImage(manager, 1), 0, 2, 2),
               expectedLinear);
-    EXPECT_EQ(manager.GetImageForDiagnostics(2).GetMipLevels(), 3u);
-    EXPECT_EQ(ReadTextureMip(Device(), manager.GetImageForDiagnostics(2), 2, 1, 1),
+    EXPECT_EQ(DiagnosticImage(manager, 2).GetMipLevels(), 3u);
+    EXPECT_EQ(ReadTextureMip(Device(), DiagnosticImage(manager, 2), 2, 1, 1),
               (std::vector<u8>{32, 64, 96, 255}));
 
     EXPECT_TRUE(textures[0].pixels.empty());
@@ -202,13 +210,13 @@ TEST_F(TextureUploadGpuTest, BatchesUploadsWithoutChangingIdsFormatsPixelsOrMips
 }
 
 TEST_F(TextureUploadGpuTest, EmptySceneStillUploadsOneWhiteDummyInOneBatch) {
-    TextureManager manager(Device(), /*uploadBatchBytes=*/8);
+    TextureManager manager(GpuDevice(), /*uploadBatchBytes=*/8);
     std::vector<Texture> textures;
     manager.UploadTextures(textures);
 
     ASSERT_EQ(manager.GetTextureCount(), 1u);
     EXPECT_EQ(manager.GetLastUploadBatchCount(), 1u);
-    EXPECT_EQ(ReadTextureMip(Device(), manager.GetImageForDiagnostics(0), 0, 1, 1),
+    EXPECT_EQ(ReadTextureMip(Device(), DiagnosticImage(manager, 0), 0, 1, 1),
               (std::vector<u8>{255, 255, 255, 255}));
 }
 

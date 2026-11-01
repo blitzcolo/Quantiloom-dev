@@ -14,6 +14,8 @@
 
 #include "core/Log.hpp"
 #include "core/ResourceLocator.hpp"
+#include "gpu/Device.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/RayTracingPipeline.hpp"
 
 namespace quantiloom {
@@ -61,16 +63,20 @@ Result<std::unique_ptr<RenderDevice>, String> RenderDevice::Create(
             *impl.context, params.pipelineCachePath);
     }
 
+    // The four stages below create gpu:: objects, which need no device after they
+    // exist, so one adoption of the context serves them all.
+    const std::unique_ptr<gpu::Device> gpuDevice = gpu::vulkan::AdoptContext(*impl.context);
+
     // Generated or read from its own binary cache, and either way seconds of work
     // at the default resolution. Once per device, not once per scene.
-    impl.brdfLut = rendercore::BrdfLut::Create(*impl.context);
+    impl.brdfLut = rendercore::BrdfLut::Create(*gpuDevice);
     if (!impl.brdfLut.IsValid()) {
         return CreateResult::Err("Failed to create BRDF LUT sampler");
     }
 
-    impl.cieCMF_LUTBuffer = rendercore::CreateCieColourMatchingBuffer(*impl.context);
-    impl.rgbToSpectrumBuffer = rendercore::CreateRgbToSpectrumBuffer(*impl.context);
-    impl.fallbackEnvMap = rendercore::EnvironmentCubemap::Fallback(*impl.context);
+    impl.cieCMF_LUTBuffer = rendercore::CreateCieColourMatchingBuffer(*gpuDevice);
+    impl.rgbToSpectrumBuffer = rendercore::CreateRgbToSpectrumBuffer(*gpuDevice);
+    impl.fallbackEnvMap = rendercore::EnvironmentCubemap::Fallback(*gpuDevice);
 
     QL_LOG_INFO("  Shared render device ready");
     return CreateResult(std::move(self));

@@ -12,9 +12,8 @@
 
 #include "support/VulkanTestDevice.hpp"
 
-#include "renderer/GpuImage.hpp"
+#include "gpu/Resources.hpp"
 #include "renderer/RenderCore.hpp"
-#include "renderer/VulkanContext.hpp"
 #include "scene/Scene.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -64,7 +63,7 @@ TEST_F(VulkanDeviceTest, SceneGeometryConcatenatesPrimitivesInOrder) {
                                      MakeTriangle(1, true, true, true)}));
     scene.nodes.push_back(MakeNode(0));
 
-    auto geometry = rendercore::SceneGeometry::Build(Device(), scene);
+    auto geometry = rendercore::SceneGeometry::Build(GpuDevice(), scene);
 
     ASSERT_TRUE(geometry.IsValid());
     EXPECT_EQ(geometry.BlasCount(), 2u);
@@ -91,7 +90,7 @@ TEST_F(VulkanDeviceTest, SceneGeometryReservesSlicesForAbsentAttributes) {
                                      MakeTriangle(0, true, true, true)}));
     scene.nodes.push_back(MakeNode(0));
 
-    auto geometry = rendercore::SceneGeometry::Build(Device(), scene);
+    auto geometry = rendercore::SceneGeometry::Build(GpuDevice(), scene);
 
     ASSERT_TRUE(geometry.IsValid());
     ASSERT_EQ(geometry.Instances().size(), 2u);
@@ -111,7 +110,7 @@ TEST_F(VulkanDeviceTest, SceneGeometryInstancesNodesWithoutDuplicatingBlas) {
     scene.nodes.push_back(MakeNode(0));
     scene.nodes.push_back(MakeNode(0, glm::translate(glm::mat4(1.0f), {5.0f, 0.0f, 0.0f})));
 
-    auto geometry = rendercore::SceneGeometry::Build(Device(), scene);
+    auto geometry = rendercore::SceneGeometry::Build(GpuDevice(), scene);
 
     ASSERT_TRUE(geometry.IsValid());
     EXPECT_EQ(geometry.BlasCount(), 1u) << "one primitive, one structure";
@@ -130,14 +129,14 @@ TEST_F(VulkanDeviceTest, SceneGeometryKeepsInstanceOrderAcrossATlasRebuild) {
     scene.nodes.push_back(MakeNode(0));
     scene.nodes.push_back(MakeNode(0));
 
-    auto geometry = rendercore::SceneGeometry::Build(Device(), scene);
+    auto geometry = rendercore::SceneGeometry::Build(GpuDevice(), scene);
     ASSERT_TRUE(geometry.IsValid());
 
     const auto before = geometry.Instances();
     ASSERT_EQ(before.size(), 4u) << "two nodes times two primitives";
 
     scene.nodes[1].transform = glm::translate(glm::mat4(1.0f), {0.0f, 2.0f, 0.0f});
-    geometry.RebuildTlas(Device(), scene);
+    geometry.RebuildTlas(GpuDevice(), scene);
 
     ASSERT_TRUE(geometry.IsValid());
     ASSERT_EQ(geometry.Instances().size(), before.size());
@@ -152,14 +151,14 @@ TEST_F(VulkanDeviceTest, SceneGeometryReleasesStaticBlasScratchAndKeepsTlasRefit
     scene.meshes.push_back(MakeMesh({MakeTriangle(0, true, true, true)}));
     scene.nodes.push_back(MakeNode(0));
 
-    auto geometry = rendercore::SceneGeometry::Build(Device(), scene);
+    auto geometry = rendercore::SceneGeometry::Build(GpuDevice(), scene);
 
     ASSERT_TRUE(geometry.IsValid());
     EXPECT_FALSE(geometry.HasResidentBlasBuildScratch())
         << "static BLAS build workspace must not remain resident after the build submission";
 
     scene.nodes[0].transform = glm::translate(glm::mat4(1.0f), {1.0f, 0.0f, 0.0f});
-    EXPECT_TRUE(geometry.RefitTlas(Device(), scene))
+    EXPECT_TRUE(geometry.RefitTlas(GpuDevice(), scene))
         << "the TLAS keeps its separate scratch allocation for transform updates";
 }
 
@@ -167,7 +166,7 @@ TEST_F(VulkanDeviceTest, SceneGeometryRejectsASceneWithNoPrimitives) {
     Scene scene;
     scene.meshes.push_back(Mesh{});
 
-    auto geometry = rendercore::SceneGeometry::Build(Device(), scene);
+    auto geometry = rendercore::SceneGeometry::Build(GpuDevice(), scene);
 
     EXPECT_FALSE(geometry.IsValid()) << "nothing to trace is not an empty TLAS";
 }
@@ -180,23 +179,23 @@ TEST_F(VulkanDeviceTest, SceneGeometryRejectsASceneWithNoPrimitives) {
 // stating once where a change to them fails loudly.
 
 TEST_F(VulkanDeviceTest, RenderTargetIsAStorageImageAtTheRequestedExtent) {
-    auto target = rendercore::CreateRenderTarget(Device(), 64, 32);
+    auto target = rendercore::CreateRenderTarget(GpuDevice(), 64, 32);
 
     ASSERT_NE(target, nullptr);
-    EXPECT_EQ(target->GetExtent().width, 64u);
-    EXPECT_EQ(target->GetExtent().height, 32u);
-    EXPECT_EQ(target->GetFormat(), VK_FORMAT_R32G32B32A32_SFLOAT)
+    EXPECT_EQ(target->Ref().width, 64u);
+    EXPECT_EQ(target->Ref().height, 32u);
+    EXPECT_EQ(target->Ref().format, gpu::Format::RGBA32Float)
         << "the accumulation target has to hold HDR radiance";
-    EXPECT_NE(target->GetView(), VK_NULL_HANDLE);
+    EXPECT_NE(target->Ref().Identity(), gpu::NativeHandle{0});
 }
 
 // Resize recreates rather than resizes, because a Vulkan image's extent is fixed.
 TEST_F(VulkanDeviceTest, RenderTargetsAtDifferentExtentsAreDistinctImages) {
-    auto first = rendercore::CreateRenderTarget(Device(), 32, 32);
-    auto second = rendercore::CreateRenderTarget(Device(), 64, 64);
+    auto first = rendercore::CreateRenderTarget(GpuDevice(), 32, 32);
+    auto second = rendercore::CreateRenderTarget(GpuDevice(), 64, 64);
 
     ASSERT_NE(first, nullptr);
     ASSERT_NE(second, nullptr);
-    EXPECT_NE(first->GetImage(), second->GetImage());
-    EXPECT_EQ(second->GetExtent().width, 64u);
+    EXPECT_NE(first->Ref().image, second->Ref().image);
+    EXPECT_EQ(second->Ref().width, 64u);
 }

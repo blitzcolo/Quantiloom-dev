@@ -24,6 +24,7 @@ public:
     void Unmap() override { buffer_.Unmap(); }
     void Upload(const void* data, u64 bytes, u64 offset = 0) override { buffer_.Upload(data, bytes, offset); }
     [[nodiscard]] GpuBuffer& Native() { return buffer_; }
+    [[nodiscard]] const GpuBuffer& Native() const { return buffer_; }
 
 private:
     GpuBuffer buffer_;

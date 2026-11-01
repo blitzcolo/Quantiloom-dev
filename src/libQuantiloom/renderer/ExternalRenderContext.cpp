@@ -235,10 +235,10 @@ struct ExternalRenderContext::Impl {
     // Acceleration structures
 
     // GPU resources
-    std::unique_ptr<GpuImage> outputImage;
-    std::unique_ptr<GpuImage> depthAovImage;  // primary-hit distance, R32_SFLOAT (binding 22)
+    std::unique_ptr<gpu::Texture> outputImage;
+    std::unique_ptr<gpu::Texture> depthAovImage;  // primary-hit distance, R32_SFLOAT (binding 22)
     std::unique_ptr<GpuBuffer> lightingParamsBuffer;
-    std::unique_ptr<GpuBuffer> materialBuffer;
+    std::unique_ptr<gpu::Buffer> materialBuffer;
     std::unique_ptr<GpuBuffer> spectralCurvesBuffer;
     std::unique_ptr<GpuBuffer> cameraLightingParamsBuffer;
     std::unique_ptr<GpuBuffer> criBuffer;
@@ -249,9 +249,9 @@ struct ExternalRenderContext::Impl {
     std::optional<std::pair<SpectralCurve, SpectralCurve>> cameraSolarSources;
     std::unique_ptr<GpuBuffer> atmosHeaderBuffer;  // AtmosNNHeaderGPU (binding 17)
     std::unique_ptr<GpuBuffer> atmosDataBuffer;    // Baked LUT blob (binding 20)
-    std::unique_ptr<GpuBuffer> cieCmfBuffer;  // CIE 1931 CMF LUT for VIS_Fused mode (binding 19)
-    std::unique_ptr<GpuBuffer> rgbToSpectrumBuffer;  // Jakob-Hanika coefficients (binding 25)
-    std::unique_ptr<GpuBuffer> emissiveTriangleBuffer;  // world-space emitters for NEE (binding 23)
+    std::unique_ptr<gpu::Buffer> cieCmfBuffer;  // CIE 1931 CMF LUT for VIS_Fused mode (binding 19)
+    std::unique_ptr<gpu::Buffer> rgbToSpectrumBuffer;  // Jakob-Hanika coefficients (binding 25)
+    std::unique_ptr<gpu::Buffer> emissiveTriangleBuffer;  // world-space emitters for NEE (binding 23)
     bool emissiveTransformDirty = false;
     /// Per-element surface temperatures (binding 24). The interactive path
     /// runs no thermal solve -- a solve is an offline step, and its output is
@@ -940,7 +940,7 @@ struct ExternalRenderContext::Impl {
     /// only after a recorded run. The camera display needs no check here --
     /// CameraDisplayImage() already gates on cameraCaptureCompleted.
     [[nodiscard]] bool DisplaySourceReady(const DisplaySource& source) const {
-        if (outputImage && source.image == outputImage->GetImage())
+        if (outputImage && source.image == gpu::vulkan::NativeImage(outputImage->Ref()))
             return rawAccumulationValid;
         if (displayImage && source.image == displayImage->GetImage())
             return displayImageValid;
@@ -984,7 +984,7 @@ struct ExternalRenderContext::Impl {
             if (outputs.corrected.IsValid())
                 return outputs.corrected;
         }
-        return gpu::vulkan::Ref(*outputImage);
+        return outputImage->Ref();
     }
 
     /// The camera config asked for CLAHE as the persistent infrared tone: the
@@ -1216,9 +1216,9 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     // Initialize default lighting params
     lightingParams = CreateDefaultLightingParams();
 
-    outputImage = rendercore::CreateRenderTarget(*contextAdapter, params.width, params.height);
-    depthAovImage = rendercore::CreateRenderTarget(*contextAdapter, params.width, params.height,
-                                                   VK_FORMAT_R32_SFLOAT);
+    outputImage = rendercore::CreateRenderTarget(*gpuDevice, params.width, params.height);
+    depthAovImage = rendercore::CreateRenderTarget(*gpuDevice, params.width, params.height,
+                                                   gpu::Format::R32Float);
 
     // Create lighting params buffer
     lightingParamsBuffer = std::make_unique<GpuBuffer>(
@@ -1239,7 +1239,7 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     CreateFallbackEnvMap();
 
     // Create texture manager
-    textureManager = std::make_unique<TextureManager>(*contextAdapter);
+    textureManager = std::make_unique<TextureManager>(*gpuDevice);
 
     QL_LOG_INFO("ExternalRenderContext initialized ({}x{})", params.width, params.height);
     return Result<void, String>::Ok();
@@ -2070,7 +2070,8 @@ void ExternalRenderContext::RenderFrame(
             if (m_impl->cameraConfig.enabled) {
                 m_impl->FlushPendingGpuWork();
             } else {
-                m_impl->geometry.RecordPreparedTlasRefit(cmd);
+                m_impl->geometry.RecordPreparedTlasRefit(
+                    *m_impl->gpuDevice->WrapRecording(gpu::vulkan::ToHandle(cmd)));
                 m_impl->pendingTlasRefit = false;
             }
         }
@@ -2199,7 +2200,7 @@ void ExternalRenderContext::RenderFrame(
 
         const auto blitSource = m_impl->CurrentDisplaySource();
         // Whichever pass wrote it last is what the barrier has to wait on.
-        const gpu::Access srcWrite = (blitSource.image == m_impl->outputImage->GetImage())
+        const gpu::Access srcWrite = (blitSource.image == gpu::vulkan::NativeImage(m_impl->outputImage->Ref()))
                                          ? gpu::Access::RayTraceWrite
                                          : gpu::Access::ComputeWrite;
         m_impl->BlitToTarget(cmd, blitSource.image, targetImage, targetLayout, targetFinalLayout,
@@ -2240,7 +2241,7 @@ ExternalRenderContext::Impl::CurrentDisplaySource() const {
         return {gpu::vulkan::NativeImage(cameraDisplay), cameraConfig.optics.sensorWidthPx,
                 cameraConfig.optics.sensorHeightPx};
     }
-    return {outputImage->GetImage(), width, height};
+    return {gpu::vulkan::NativeImage(outputImage->Ref()), width, height};
 }
 
 void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage source,
@@ -2361,7 +2362,7 @@ bool ExternalRenderContext::PresentAccumulated(
     // The post-processed images still hold the last frame's result -- nothing
     // has changed the accumulation since -- so the chains are not re-run.
     const gpu::Access sourceWrite =
-        (source.image == m_impl->outputImage->GetImage())
+        (source.image == gpu::vulkan::NativeImage(m_impl->outputImage->Ref()))
             ? gpu::Access::RayTraceWrite
             : gpu::Access::ComputeWrite;
 
@@ -2451,7 +2452,7 @@ bool ExternalRenderContext::ReprocessAccumulated(
         return false;
     }
     const gpu::Access sourceWrite =
-        (source.image == m_impl->outputImage->GetImage())
+        (source.image == gpu::vulkan::NativeImage(m_impl->outputImage->Ref()))
             ? gpu::Access::RayTraceWrite
             : gpu::Access::ComputeWrite;
 
@@ -2507,7 +2508,7 @@ void ExternalRenderContext::BlitDepthTo(
     // for its transfer read. The target is the host's image; its layouts are
     // the caller's and travel verbatim.
     const gpu::TextureRef depthRef =
-        gpu::vulkan::Ref(*m_impl->depthAovImage).WithLayout(gpu::TextureLayoutPolicy::Optimal);
+        m_impl->depthAovImage->Ref().WithLayout(gpu::TextureLayoutPolicy::Optimal);
     const gpu::TextureRef targetRef = m_impl->gpuDevice->ImportHostTexture(
         gpu::vulkan::ToHandle(targetImage), HostTargetFormat(target.format), width, height);
 
@@ -2598,14 +2599,14 @@ void ExternalRenderContext::Impl::ApplyInternalExtent(u32 renderW, u32 renderH) 
     (void)gpuDevice->WaitIdle();
 
     outputImage =
-        rendercore::CreateRenderTarget(*contextAdapter, width, height);
+        rendercore::CreateRenderTarget(*gpuDevice, width, height);
     depthAovImage = rendercore::CreateRenderTarget(
-        *contextAdapter, width, height, VK_FORMAT_R32_SFLOAT);
+        *gpuDevice, width, height, gpu::Format::R32Float);
 
     // Re-bind output and depth AOV images
     if (pipeline) {
-        pipeline->BindOutputImage(*outputImage);
-        pipeline->BindDepthImage(*depthAovImage);
+        pipeline->BindOutputImage(gpu::vulkan::AsGpuImage(*outputImage));
+        pipeline->BindDepthImage(gpu::vulkan::AsGpuImage(*depthAovImage));
     }
 
     // Recreate CLAHE display image if initialized. Waits on the device, which
@@ -3006,7 +3007,7 @@ void ExternalRenderContext::Impl::UpdateMaterial(u32 materialIndex, const Materi
 
     // 3. Partial upload at offset
     VkDeviceSize offset = materialIndex * sizeof(MaterialDataCPU);
-    UploadDeferred(*materialBuffer, offset, &cpuMat, sizeof(MaterialDataCPU));
+    UploadDeferred(gpu::vulkan::AsGpuBuffer(*materialBuffer), offset, &cpuMat, sizeof(MaterialDataCPU));
 
     // 4. Rebuild the geometry only when the opacity classification actually
     //    moved. Doing it on every edit would put an acceleration-structure
@@ -3016,10 +3017,10 @@ void ExternalRenderContext::Impl::UpdateMaterial(u32 materialIndex, const Materi
         // A frame the host submitted may still be tracing the structures being
         // replaced, as RebuildAccelerationStructure has to assume too.
         (void)gpuDevice->WaitIdle();
-        if (geometry.RefreshMaterialOpacity(*contextAdapter, *scene) && pipeline) {
-            pipeline->BindAccelerationStructure(geometry.Tlas().GetHandle());
+        if (geometry.RefreshMaterialOpacity(*gpuDevice, *scene) && pipeline) {
+            pipeline->BindAccelerationStructure(gpu::vulkan::NativeScene(geometry.Tlas().Ref()));
             if (geometry.InstanceCount() > 0) {
-                pipeline->BindInstanceGeometryBuffer(geometry.InstanceInfo());
+                pipeline->BindInstanceGeometryBuffer(gpu::vulkan::AsGpuBuffer(geometry.InstanceInfo()));
             }
         }
     }
@@ -3220,8 +3221,9 @@ Result<i32, String> ExternalRenderContext::BuildEndmemberWeightTexture(
     m_impl->scene->textures.push_back(std::move(weights));
 
     if (m_impl->pipeline) {
-        m_impl->pipeline->BindTextures(m_impl->textureManager->GetImageViews(),
-                                       m_impl->textureManager->GetSamplers());
+        m_impl->pipeline->BindTextures(
+            gpu::vulkan::NativeViews(m_impl->textureManager->TextureRefs()),
+            gpu::vulkan::NativeSamplers(m_impl->textureManager->SamplerRefs()));
     }
 
     QL_LOG_INFO("BuildEndmemberWeightTexture: material '{}' unmixed into {} endmember(s), "
@@ -3470,7 +3472,7 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
         return fail("no scene loaded");
     }
 
-    const VkAccelerationStructureKHR tlas = m_impl->geometry.Tlas().GetHandle();
+    const VkAccelerationStructureKHR tlas = gpu::vulkan::NativeScene(m_impl->geometry.Tlas().Ref());
     rendercore::ThermalPreview::SolveResult result;
     try {
         // The precompute consumes the current TLAS, so the deferred refit
@@ -3544,7 +3546,7 @@ void ExternalRenderContext::Impl::FlushPendingGpuWork() {
         return;
     CommandHelper::ExecuteImmediate(*contextAdapter, [this](VkCommandBuffer cmd) {
         if (pendingTlasRefit)
-            geometry.RecordPreparedTlasRefit(cmd);
+            geometry.RecordPreparedTlasRefit(*gpuDevice->WrapRecording(gpu::vulkan::ToHandle(cmd)));
         pendingUploads.Record(cmd);
     });
     pendingTlasRefit = false;
@@ -3582,7 +3584,7 @@ Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s, bool d
         // Same handle, updated in place -- no rebind, no device idle. The
         // refit's own barriers order it against tracing already in flight.
         const bool refitted = deferRefit ? geometry.PrepareTlasRefit(*scene)
-                                         : geometry.RefitTlas(*contextAdapter, *scene);
+                                         : geometry.RefitTlas(*gpuDevice, *scene);
         pendingTlasRefit = deferRefit && refitted;
         if (!refitted) {
             // A refit is refused only when the instance count moved, which a
@@ -3590,11 +3592,11 @@ Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s, bool d
             // whatever did.
             QL_LOG_DEBUG("Timeline: refit refused, rebuilding the TLAS");
             (void)gpuDevice->WaitIdle();
-            geometry.RebuildTlas(*contextAdapter, *scene);
+            geometry.RebuildTlas(*gpuDevice, *scene);
             if (pipeline) {
-                pipeline->BindAccelerationStructure(geometry.Tlas().GetHandle());
+                pipeline->BindAccelerationStructure(gpu::vulkan::NativeScene(geometry.Tlas().Ref()));
                 if (geometry.InstanceCount() > 0) {
-                    pipeline->BindInstanceGeometryBuffer(geometry.InstanceInfo());
+                    pipeline->BindInstanceGeometryBuffer(gpu::vulkan::AsGpuBuffer(geometry.InstanceInfo()));
                 }
             }
         }
@@ -3628,7 +3630,7 @@ Result<void, String> ExternalRenderContext::Impl::RecordTimelinePose(VkCommandBu
             if (!geometry.PrepareTlasRefit(*scene))
                 return Result<void, String>::Err(
                     "timeline pose changed the instance count while recording");
-            geometry.RecordPreparedTlasRefit(cmd);
+            geometry.RecordPreparedTlasRefit(*gpuDevice->WrapRecording(gpu::vulkan::ToHandle(cmd)));
             // The recording consumed whatever a deferred refit had prepared.
             pendingTlasRefit = false;
         }
@@ -3662,7 +3664,8 @@ VkAccelerationStructureKHR ExternalRenderContext::Impl::TimelineEpochHost::Apply
         captured = true;
     }
     owner->ApplyTimelinePose(t_s);
-    return owner->geometry.IsValid() ? owner->geometry.Tlas().GetHandle() : VK_NULL_HANDLE;
+    return owner->geometry.IsValid() ? gpu::vulkan::NativeScene(owner->geometry.Tlas().Ref())
+                                     : VK_NULL_HANDLE;
 }
 
 void ExternalRenderContext::Impl::TimelineEpochHost::Restore() {
@@ -3841,14 +3844,16 @@ void ExternalRenderContext::RebuildAccelerationStructure() {
     m_impl->pendingTlasRefit = false;
     (void)m_impl->gpuDevice->WaitIdle();
 
-    m_impl->geometry.RebuildTlas(*m_impl->contextAdapter, *m_impl->scene);
+    m_impl->geometry.RebuildTlas(*m_impl->gpuDevice, *m_impl->scene);
 
     if (m_impl->pipeline) {
-        m_impl->pipeline->BindAccelerationStructure(m_impl->geometry.Tlas().GetHandle());
+        m_impl->pipeline->BindAccelerationStructure(
+            gpu::vulkan::NativeScene(m_impl->geometry.Tlas().Ref()));
         // A topology edit makes RebuildTlas replace the instance info buffer;
         // rebinding unconditionally is cheap on the already-idle device
         if (m_impl->geometry.InstanceCount() > 0) {
-            m_impl->pipeline->BindInstanceGeometryBuffer(m_impl->geometry.InstanceInfo());
+            m_impl->pipeline->BindInstanceGeometryBuffer(
+                gpu::vulkan::AsGpuBuffer(m_impl->geometry.InstanceInfo()));
         }
     }
 
@@ -3958,7 +3963,7 @@ Result<glm::vec4, String> ExternalRenderContext::ReadPixelValue(u32 x, u32 y) {
 
     // Transition outputImage to TRANSFER_SRC_OPTIMAL (it is kept in GENERAL)
     const gpu::TextureRef source =
-        gpu::vulkan::Ref(*m_impl->outputImage).WithLayout(gpu::TextureLayoutPolicy::Optimal);
+        m_impl->outputImage->Ref().WithLayout(gpu::TextureLayoutPolicy::Optimal);
     list.Barrier(gpu::TextureBarrier{source, gpu::Access::RayTraceWrite, gpu::Access::TransferRead});
 
     // Copy single pixel to staging buffer (tightly packed)
@@ -4014,7 +4019,7 @@ Result<bool, String> ExternalRenderContext::RequestPixelValue(u32 x, u32 y, u64 
         reading.x = x;
         reading.y = y;
         return m_impl->asyncPixelReadback->Submit(
-            m_impl->outputImage->GetImage(),
+            gpu::vulkan::NativeImage(m_impl->outputImage->Ref()),
             Impl::MapToRender(x, m_impl->targetWidth, m_impl->width),
             Impl::MapToRender(y, m_impl->targetHeight, m_impl->height), reading);
     } catch (const std::exception& e) {
@@ -4112,7 +4117,7 @@ Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
     // Rebind every call: RebuildTlas replaces the TLAS object outright
     const gpu::BufferRef pickOutput = gpu::vulkan::Ref(*m_impl->pickOutputBuffer);
     const gpu::BindingWrite writes[] = {
-        gpu::BindingWrite::Scene(0, gpu::vulkan::Ref(m_impl->geometry.Tlas().GetHandle())),
+        gpu::BindingWrite::Scene(0, m_impl->geometry.Tlas().Ref()),
         gpu::BindingWrite::Buffer(1, gpu::BindingKind::ReadWriteBuffer, pickOutput),
     };
     m_impl->gpuDevice->WriteBindGroup(m_impl->pickBindGroup, writes);
@@ -4201,7 +4206,7 @@ Result<Image, String> ExternalRenderContext::CaptureScreenshot() {
     // Read back entire outputImage using CommandHelper
     std::vector<f32> pixels = CommandHelper::ReadbackImage(
         *m_impl->contextAdapter,
-        m_impl->outputImage->GetImage(),
+        gpu::vulkan::NativeImage(m_impl->outputImage->Ref()),
         VK_FORMAT_R32G32B32A32_SFLOAT,
         m_impl->width,
         m_impl->height
@@ -5028,7 +5033,7 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
     // -> outputImage. Each source carries its own extent: the CLAHE image
     // sits at the CLAHE input extent and the camera product at the physical
     // sensor array extent, which need not match the render extent.
-    gpu::TextureRef sourceImage = gpu::vulkan::Ref(*m_impl->outputImage);
+    gpu::TextureRef sourceImage = m_impl->outputImage->Ref();
     u32 sourceWidth = m_impl->width;
     u32 sourceHeight = m_impl->height;
 
@@ -5110,7 +5115,7 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
 
 void ExternalRenderContext::Impl::BuildAccelerationStructures() {
     if (!scene) return;
-    geometry = rendercore::SceneGeometry::Build(*contextAdapter, *scene);
+    geometry = rendercore::SceneGeometry::Build(*gpuDevice, *scene);
 }
 
 void ExternalRenderContext::Impl::UpdateGpuResources(bool rebuildEmitters) {
@@ -5119,7 +5124,7 @@ void ExternalRenderContext::Impl::UpdateGpuResources(bool rebuildEmitters) {
     QL_LOG_INFO("Updating GPU resources...");
     const auto resources = ResourceCounts();
     const size_t bytes = scene->materials.size() * sizeof(MaterialDataCPU);
-    if (materialBuffer && materialBuffer->GetSize() == bytes) {
+    if (materialBuffer && materialBuffer->Size() == bytes) {
         // The SetWavelength path: the material count has not changed, so the
         // existing allocation stays valid. Rebuild the records on the CPU and
         // let the deferred-upload queue land them with the next recorded
@@ -5138,12 +5143,12 @@ void ExternalRenderContext::Impl::UpdateGpuResources(bool rebuildEmitters) {
                 rendercore::ConvertMaterial(material, wavelength_nm, resolved, &resources));
         }
         if (!gpuMaterials.empty())
-            UploadDeferred(*materialBuffer, 0, gpuMaterials.data(), bytes);
+            UploadDeferred(gpu::vulkan::AsGpuBuffer(*materialBuffer), 0, gpuMaterials.data(), bytes);
     } else {
         // The material buffer is replaced outright below; a queued write
         // would still name the allocation that is about to die.
         FlushPendingGpuWork();
-        materialBuffer = rendercore::BuildMaterialBuffer(*contextAdapter, *scene, wavelength_nm,
+        materialBuffer = rendercore::BuildMaterialBuffer(*gpuDevice, *scene, wavelength_nm,
                                                          materialGpuIndices, &resources);
     }
     if (rebuildEmitters)
@@ -5170,7 +5175,7 @@ ExternalRenderContext::Impl::RebuildEmissiveGeometry(const bool mayReallocate) {
         : Vector<rendercore::EmissiveTriangleGPU>{};
     const size_t bytes =
         std::max(size_t{1}, triangles.size()) * sizeof(rendercore::EmissiveTriangleGPU);
-    const bool moved = !emissiveTriangleBuffer || emissiveTriangleBuffer->GetSize() < bytes;
+    const bool moved = !emissiveTriangleBuffer || emissiveTriangleBuffer->Size() < bytes;
     if (moved) {
         if (!mayReallocate)
             return Result<void, String>::Err(
@@ -5179,7 +5184,7 @@ ExternalRenderContext::Impl::RebuildEmissiveGeometry(const bool mayReallocate) {
         // A pending upload would still name the buffer being replaced.
         FlushPendingGpuWork();
         emissiveTriangleBuffer =
-            rendercore::CreateEmissiveTriangleBuffer(*contextAdapter, triangles);
+            rendercore::CreateEmissiveTriangleBuffer(*gpuDevice, triangles);
     } else {
         if (!mayReallocate && bytes > DeferredBufferUploads::kMaxPayloadBytes)
             // An oversized list would take UploadDeferred's queue-draining
@@ -5189,7 +5194,7 @@ ExternalRenderContext::Impl::RebuildEmissiveGeometry(const bool mayReallocate) {
         const rendercore::EmissiveTriangleGPU empty{};
         const void* data = triangles.empty() ? static_cast<const void*>(&empty)
                                              : static_cast<const void*>(triangles.data());
-        UploadDeferred(*emissiveTriangleBuffer, 0, data, bytes);
+        UploadDeferred(gpu::vulkan::AsGpuBuffer(*emissiveTriangleBuffer), 0, data, bytes);
     }
 
     f32 totalPower = 0.0f;
@@ -5201,7 +5206,7 @@ ExternalRenderContext::Impl::RebuildEmissiveGeometry(const bool mayReallocate) {
     UploadLightingParams();
 
     if (pipeline && moved) {
-        pipeline->BindEmissiveTriangleBuffer(*emissiveTriangleBuffer);
+        pipeline->BindEmissiveTriangleBuffer(gpu::vulkan::AsGpuBuffer(*emissiveTriangleBuffer));
     }
     emissiveTransformDirty = false;
     return Result<void, String>::Ok();
@@ -5274,12 +5279,12 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
         atmosDataBuffer->Upload(zeroData.data(), zeroData.size() * sizeof(f32));
     }
 
-    cieCmfBuffer = rendercore::CreateCieColourMatchingBuffer(*contextAdapter);
-    rgbToSpectrumBuffer = rendercore::CreateRgbToSpectrumBuffer(*contextAdapter);
+    cieCmfBuffer = rendercore::CreateCieColourMatchingBuffer(*gpuDevice);
+    rgbToSpectrumBuffer = rendercore::CreateRgbToSpectrumBuffer(*gpuDevice);
 
     // No scene yet, so no emitters -- but the descriptor still has to be
     // written, and CreatePipeline can run before any scene is loaded.
-    emissiveTriangleBuffer = rendercore::CreateEmissiveTriangleBuffer(*contextAdapter, {});
+    emissiveTriangleBuffer = rendercore::CreateEmissiveTriangleBuffer(*gpuDevice, {});
     {
         const f32 zero = 0.0f;
         thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
@@ -5298,11 +5303,11 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
 }
 
 void ExternalRenderContext::Impl::CreateBRDFLut() {
-    brdfLut = rendercore::BrdfLut::Create(*contextAdapter);
+    brdfLut = rendercore::BrdfLut::Create(*gpuDevice);
 }
 
 void ExternalRenderContext::Impl::CreateFallbackEnvMap() {
-    envMap = rendercore::EnvironmentCubemap::Fallback(*contextAdapter);
+    envMap = rendercore::EnvironmentCubemap::Fallback(*gpuDevice);
 }
 
 void ExternalRenderContext::Impl::CreatePipeline() {
@@ -5332,7 +5337,7 @@ void ExternalRenderContext::Impl::CreatePipeline() {
     bindings.thermalSunResponse = thermalSunResponseBuffer.get();
     bindings.thermalParameterTangent = thermalParameterTangentBuffer.get();
 
-    pipeline = rendercore::CreateRayTracingPipeline(*contextAdapter, pipelineCache.get(),
+    pipeline = rendercore::CreateRayTracingPipeline(*gpuDevice, pipelineCache.get(),
                                                     bindings);
     pipeline->SetUploadQueue(&pendingUploads);
     if (cameraLightingParamsBuffer)
@@ -6230,7 +6235,7 @@ void ExternalRenderContext::Impl::CreateClaheDisplayImage() {
     // At creation the raw accumulation is the input, as it was when the
     // pipeline lived in this Impl; Record() rewrites binding 0 on the first
     // run anyway (the module's bound-input view starts null).
-    clahe->BindAll(gpu::vulkan::Ref(*outputImage), gpu::vulkan::Ref(*displayImage));
+    clahe->BindAll(outputImage->Ref(), gpu::vulkan::Ref(*displayImage));
 }
 
 void ExternalRenderContext::Impl::RecreateClaheDisplayImage() {
@@ -6513,7 +6518,7 @@ Result<void, String> ExternalRenderContext::LoadEnvironmentMap(const String& hdr
     // still be reading it.
     (void)m_impl->gpuDevice->WaitIdle();
 
-    auto loaded = rendercore::EnvironmentCubemap::Load(*m_impl->contextAdapter, hdrPath);
+    auto loaded = rendercore::EnvironmentCubemap::Load(*m_impl->gpuDevice, hdrPath);
     if (!loaded.has_value()) {
         // Whatever was bound stays bound -- freeing it would leave binding 10
         // dangling -- but it is no longer what the host asked for, so it stops
@@ -6530,7 +6535,8 @@ Result<void, String> ExternalRenderContext::LoadEnvironmentMap(const String& hdr
     m_impl->envMap = std::move(loaded.value());
 
     if (m_impl->pipeline) {
-        m_impl->pipeline->BindPrefilteredEnvMap(m_impl->envMap.View(), m_impl->envMap.Sampler());
+        m_impl->pipeline->BindPrefilteredEnvMap(gpu::vulkan::NativeView(m_impl->envMap.View()),
+                                                gpu::vulkan::NativeSampler(m_impl->envMap.Sampler()));
     }
     // A map that loaded is a map that lights: raising the flag here is what makes
     // a bare LoadEnvironmentMap call work on its own, instead of depending on

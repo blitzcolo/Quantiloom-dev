@@ -51,6 +51,7 @@ public:
         RtLevel level, u64 bytes) override;
     [[nodiscard]] u32 RtInstanceStride() const override;
     void PackRtInstances(std::span<const RtInstance> instances, std::span<std::byte> out) const override;
+    [[nodiscard]] u64 BufferDeviceAddress(BufferRef buffer) const override;
 
     [[nodiscard]] VulkanContext& Context() const { return context_; }
 

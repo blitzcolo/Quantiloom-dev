@@ -14,13 +14,10 @@
 #include "io/UsdLoader.hpp"
 #include "gpu/Device.hpp"
 #include "gpu/vulkan/VulkanBridge.hpp"
-#include "renderer/CommandHelper.hpp"
-#include "renderer/GpuBuffer.hpp"
-#include "renderer/GpuImage.hpp"
+#include "renderer/GpuAlloc.hpp"
 #include "renderer/RayTracingPipeline.hpp"
 #include "renderer/TextureManager.hpp"
 #include "renderer/TextureTransitions.hpp"
-#include "renderer/VulkanContext.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
@@ -355,12 +352,12 @@ BrdfLut& BrdfLut::operator=(BrdfLut&& other) noexcept {
     return *this;
 }
 
-VkImageView BrdfLut::View() const {
-    return m_image ? m_image->GetView() : VK_NULL_HANDLE;
+gpu::TextureRef BrdfLut::View() const {
+    return m_image ? m_image->Ref() : gpu::TextureRef{};
 }
 
-VkSampler BrdfLut::Sampler() const {
-    return m_sampler ? gpu::vulkan::NativeSampler(m_sampler->Ref()) : VK_NULL_HANDLE;
+gpu::SamplerRef BrdfLut::Sampler() const {
+    return m_sampler ? m_sampler->Ref() : gpu::SamplerRef{};
 }
 
 namespace {
@@ -387,7 +384,7 @@ String DefaultBrdfLutPath() {
 
 }  // namespace
 
-BrdfLut BrdfLut::Create(VulkanContext& ctx,
+BrdfLut BrdfLut::Create(gpu::Device& device,
                         const String& cachePath,
                         const BRDFLutGenerator::Config& config) {
     QL_LOG_INFO("Creating BRDF LUT...");
@@ -412,21 +409,19 @@ BrdfLut BrdfLut::Create(VulkanContext& ctx,
 
     const u32 size = effective.resolution;
 
-    const std::unique_ptr<gpu::Device> gpuDevice = gpu::vulkan::AdoptContext(ctx);
-
     BrdfLut result;
     result.m_resolution = size;
-    result.m_image = std::make_unique<GpuImage>(
-        ctx.GetAllocator(),
-        ctx.GetDevice(),
-        size, size,
-        VK_FORMAT_R32G32_SFLOAT,  // R = scale, G = bias
-        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY);
+    gpu::TextureDesc imageDesc;
+    imageDesc.width = size;
+    imageDesc.height = size;
+    imageDesc.format = gpu::Format::RG32Float;  // R = scale, G = bias
+    imageDesc.usage = gpu::TextureUsage::Sampled | gpu::TextureUsage::TransferDst;
+    imageDesc.memory = gpu::MemoryClass::DeviceLocal;
+    result.m_image = CreateTextureOrThrow(device, imageDesc);
     const gpu::TextureRef image =
-        gpu::vulkan::Ref(*result.m_image).WithLayout(gpu::TextureLayoutPolicy::Optimal);
+        result.m_image->Ref().WithLayout(gpu::TextureLayoutPolicy::Optimal);
 
-    LegacyTransitionImmediate(*gpuDevice, image, Layout::Undefined, Layout::TransferDst);
+    LegacyTransitionImmediate(device, image, Layout::Undefined, Layout::TransferDst);
 
     {
         std::vector<f32> interleaved(static_cast<size_t>(size) * size * 2);
@@ -438,20 +433,20 @@ BrdfLut BrdfLut::Create(VulkanContext& ctx,
             }
         }
 
-        const VkDeviceSize bytes = interleaved.size() * sizeof(f32);
-        GpuBuffer staging(ctx.GetAllocator(), bytes,
-                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        staging.Upload(interleaved.data(), bytes);
+        const u64 bytes = interleaved.size() * sizeof(f32);
+        const std::unique_ptr<gpu::Buffer> staging = CreateBufferOrThrow(
+            device, gpu::BufferDesc{bytes, gpu::BufferUsage::TransferSrc, gpu::MemoryClass::Upload, 0});
+        staging->Upload(interleaved.data(), bytes);
 
-        gpuDevice->ExecuteImmediate([&](gpu::CommandList& list) {
+        device.ExecuteImmediate([&](gpu::CommandList& list) {
             gpu::BufferTextureCopy region;
             region.width = size;
             region.height = size;
-            list.CopyBufferToTexture(gpu::vulkan::Ref(staging), image, region);
+            list.CopyBufferToTexture(staging->Ref(), image, region);
         });
     }
 
-    LegacyTransitionImmediate(*gpuDevice, image, Layout::TransferDst, Layout::ShaderReadOnly);
+    LegacyTransitionImmediate(device, image, Layout::TransferDst, Layout::ShaderReadOnly);
 
     // CLAMP_TO_EDGE on every axis, so the border colour is never sampled -- the two
     // implementations disagreed on it (opaque white against the zero-initialised
@@ -469,7 +464,7 @@ BrdfLut BrdfLut::Create(VulkanContext& ctx,
     samplerDesc.maxLod = 0.0f;
     samplerDesc.unnormalizedCoordinates = false;
 
-    auto sampler = gpuDevice->CreateSampler(samplerDesc);
+    auto sampler = device.CreateSampler(samplerDesc);
     if (sampler.has_value()) {
         result.m_sampler = std::move(sampler.value());
     } else {
@@ -488,12 +483,12 @@ namespace {
 // Upload one face of one mip level. Each call stages and submits on its own; the
 // cubemap is built once per scene load, so the simplicity is worth more than the
 // batching.
-void UploadCubemapLevel(VulkanContext& ctx, gpu::Device& device, GpuImage& target, u32 face,
+void UploadCubemapLevel(gpu::Device& device, const gpu::Texture& target, u32 face,
                         u32 mip, u32 size, const std::vector<f32>& rgba) {
-    const VkDeviceSize bytes = rgba.size() * sizeof(f32);
-    GpuBuffer staging(ctx.GetAllocator(), bytes,
-                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    staging.Upload(rgba.data(), bytes);
+    const u64 bytes = rgba.size() * sizeof(f32);
+    const std::unique_ptr<gpu::Buffer> staging = CreateBufferOrThrow(
+        device, gpu::BufferDesc{bytes, gpu::BufferUsage::TransferSrc, gpu::MemoryClass::Upload, 0});
+    staging->Upload(rgba.data(), bytes);
 
     device.ExecuteImmediate([&](gpu::CommandList& list) {
         gpu::BufferTextureCopy region;
@@ -502,8 +497,8 @@ void UploadCubemapLevel(VulkanContext& ctx, gpu::Device& device, GpuImage& targe
         region.width = size;
         region.height = size;
         list.CopyBufferToTexture(
-            gpu::vulkan::Ref(staging),
-            gpu::vulkan::Ref(target).WithLayout(gpu::TextureLayoutPolicy::Optimal), region);
+            staging->Ref(),
+            target.Ref().WithLayout(gpu::TextureLayoutPolicy::Optimal), region);
     });
 }
 
@@ -551,20 +546,20 @@ std::unique_ptr<gpu::Sampler> CreateEnvironmentSampler(gpu::Device& device) {
     return std::move(sampler.value());
 }
 
-std::unique_ptr<GpuImage> CreateCubemapImage(VulkanContext& ctx, gpu::Device& device,
-                                             const EnvironmentCubemap::Params& p) {
-    auto image = std::make_unique<GpuImage>(
-        ctx.GetAllocator(), ctx.GetDevice(),
-        p.faceSize, p.faceSize,
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY,
-        p.mipLevels,
-        6,
-        VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
-        VK_IMAGE_VIEW_TYPE_CUBE);
+std::unique_ptr<gpu::Texture> CreateCubemapImage(gpu::Device& device,
+                                                 const EnvironmentCubemap::Params& p) {
+    gpu::TextureDesc desc;
+    desc.width = p.faceSize;
+    desc.height = p.faceSize;
+    desc.layers = 6;
+    desc.mipLevels = p.mipLevels;
+    desc.format = gpu::Format::RGBA32Float;
+    desc.usage = gpu::TextureUsage::Sampled | gpu::TextureUsage::TransferDst;
+    desc.dimension = gpu::TextureDimension::Cube;
+    desc.memory = gpu::MemoryClass::DeviceLocal;
+    auto image = CreateTextureOrThrow(device, desc);
 
-    LegacyTransitionImmediate(device, gpu::vulkan::Ref(*image, 6), Layout::Undefined,
+    LegacyTransitionImmediate(device, image->Ref(), Layout::Undefined,
                               Layout::TransferDst, p.mipLevels, 6);
 
     return image;
@@ -652,15 +647,15 @@ EnvironmentCubemap& EnvironmentCubemap::operator=(EnvironmentCubemap&& other) no
     return *this;
 }
 
-VkImageView EnvironmentCubemap::View() const {
-    return m_image ? m_image->GetView() : VK_NULL_HANDLE;
+gpu::TextureRef EnvironmentCubemap::View() const {
+    return m_image ? m_image->Ref() : gpu::TextureRef{};
 }
 
-VkSampler EnvironmentCubemap::Sampler() const {
-    return m_sampler ? gpu::vulkan::NativeSampler(m_sampler->Ref()) : VK_NULL_HANDLE;
+gpu::SamplerRef EnvironmentCubemap::Sampler() const {
+    return m_sampler ? m_sampler->Ref() : gpu::SamplerRef{};
 }
 
-Result<EnvironmentCubemap, String> EnvironmentCubemap::Load(VulkanContext& ctx,
+Result<EnvironmentCubemap, String> EnvironmentCubemap::Load(gpu::Device& device,
                                                             const String& path,
                                                             const Params& requested) {
     QL_LOG_INFO("Loading environment map: {}", path);
@@ -686,17 +681,15 @@ Result<EnvironmentCubemap, String> EnvironmentCubemap::Load(VulkanContext& ctx,
         return Result<EnvironmentCubemap, String>::Err(ex.what());
     }
 
-    const std::unique_ptr<gpu::Device> gpuDevice = gpu::vulkan::AdoptContext(ctx);
-
     EnvironmentCubemap result;
     result.m_faceSize = params.faceSize;
     result.m_mipLevels = params.mipLevels;
-    result.m_image = CreateCubemapImage(ctx, *gpuDevice, params);
-    result.m_sampler = CreateEnvironmentSampler(*gpuDevice);
+    result.m_image = CreateCubemapImage(device, params);
+    result.m_sampler = CreateEnvironmentSampler(device);
 
     QL_LOG_INFO("  Uploading cubemap to GPU...");
     for (u32 face = 0; face < 6; ++face) {
-        UploadCubemapLevel(ctx, *gpuDevice, *result.m_image, face, 0, params.faceSize,
+        UploadCubemapLevel(device, *result.m_image, face, 0, params.faceSize,
                            FaceToRgba(faces[face], params.faceSize));
     }
 
@@ -705,19 +698,19 @@ Result<EnvironmentCubemap, String> EnvironmentCubemap::Load(VulkanContext& ctx,
         u32 mipSize = params.faceSize >> mip;
         if (mipSize == 0) mipSize = 1;
         for (u32 face = 0; face < 6; ++face) {
-            UploadCubemapLevel(ctx, *gpuDevice, *result.m_image, face, mip, mipSize,
+            UploadCubemapLevel(device, *result.m_image, face, mip, mipSize,
                                DownsampleFace(faces[face], params.faceSize, mip));
         }
     }
 
-    LegacyTransitionImmediate(*gpuDevice, gpu::vulkan::Ref(*result.m_image, 6),
+    LegacyTransitionImmediate(device, result.m_image->Ref(),
                               Layout::TransferDst, Layout::ShaderReadOnly, params.mipLevels, 6);
 
     QL_LOG_INFO("Environment map loaded successfully: {}", path);
     return Result<EnvironmentCubemap, String>(std::move(result));
 }
 
-EnvironmentCubemap EnvironmentCubemap::Fallback(VulkanContext& ctx, const Params& requested) {
+EnvironmentCubemap EnvironmentCubemap::Fallback(gpu::Device& device, const Params& requested) {
     const Params params = ClampToFaceSize(requested);
     QL_LOG_INFO("Creating placeholder environment map ({}x{} per face, black)...",
                 params.faceSize, params.faceSize);
@@ -727,13 +720,11 @@ EnvironmentCubemap EnvironmentCubemap::Fallback(VulkanContext& ctx, const Params
     // ride -- the shader reads .rgb only.
     constexpr f32 kBlack[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 
-    const std::unique_ptr<gpu::Device> gpuDevice = gpu::vulkan::AdoptContext(ctx);
-
     EnvironmentCubemap result;
     result.m_faceSize = params.faceSize;
     result.m_mipLevels = params.mipLevels;
-    result.m_image = CreateCubemapImage(ctx, *gpuDevice, params);
-    result.m_sampler = CreateEnvironmentSampler(*gpuDevice);
+    result.m_image = CreateCubemapImage(device, params);
+    result.m_sampler = CreateEnvironmentSampler(device);
 
     // Uniform colour, so every level is filled directly rather than downsampled.
     for (u32 mip = 0; mip < params.mipLevels; ++mip) {
@@ -749,11 +740,11 @@ EnvironmentCubemap EnvironmentCubemap::Fallback(VulkanContext& ctx, const Params
         }
 
         for (u32 face = 0; face < 6; ++face) {
-            UploadCubemapLevel(ctx, *gpuDevice, *result.m_image, face, mip, mipSize, level);
+            UploadCubemapLevel(device, *result.m_image, face, mip, mipSize, level);
         }
     }
 
-    LegacyTransitionImmediate(*gpuDevice, gpu::vulkan::Ref(*result.m_image, 6),
+    LegacyTransitionImmediate(device, result.m_image->Ref(),
                               Layout::TransferDst, Layout::ShaderReadOnly, params.mipLevels, 6);
 
     return result;
@@ -853,40 +844,40 @@ bool IsDoubleSided(const Scene& scene, u32 materialId) {
 }
 
 
-std::unique_ptr<GpuBuffer> UploadGeometryBuffer(VulkanContext& ctx, gpu::Device& device,
-                                                const void* data, size_t bytes,
-                                                VkBufferUsageFlags extraUsage = 0) {
+std::unique_ptr<gpu::Buffer> UploadGeometryBuffer(gpu::Device& device,
+                                                  const void* data, size_t bytes,
+                                                  gpu::BufferUsage extraUsage = gpu::BufferUsage::None) {
     // Device-local: every consumer is device-side -- BLAS build inputs read by
     // device address and the attribute buffers bound as SSBOs -- so the merged
     // geometry never needs to be host-visible, and host-visible memory makes
     // every vertex fetch cross the PCIe bus.
-    auto buffer = std::make_unique<GpuBuffer>(
-        ctx.GetAllocator(), bytes,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-            extraUsage,
-        VMA_MEMORY_USAGE_GPU_ONLY);
+    auto buffer = CreateBufferOrThrow(
+        device, gpu::BufferDesc{static_cast<u64>(bytes),
+                                gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst | extraUsage,
+                                gpu::MemoryClass::DeviceLocal, 0});
 
-    GpuBuffer staging(ctx.GetAllocator(), bytes,
-                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-    void* mapped = staging.Map();
+    const std::unique_ptr<gpu::Buffer> staging = CreateBufferOrThrow(
+        device, gpu::BufferDesc{static_cast<u64>(bytes), gpu::BufferUsage::TransferSrc,
+                                gpu::MemoryClass::HostOnly, 0});
+    void* mapped = staging->Map();
     std::memcpy(mapped, data, bytes);
-    staging.Unmap();
+    staging->Unmap();
 
     device.ExecuteImmediate([&](gpu::CommandList& list) {
         const gpu::BufferCopyRegion copyRegion{0, 0, static_cast<u64>(bytes)};
-        list.CopyBuffer(gpu::vulkan::Ref(staging), gpu::vulkan::Ref(*buffer),
+        list.CopyBuffer(staging->Ref(), buffer->Ref(),
                         std::span<const gpu::BufferCopyRegion>(&copyRegion, 1));
     });
     return buffer;
 }
 
-BLAS::GeometrySlice BlasGeometrySlice(const GpuBuffer& vertices,
-                                      const GpuBuffer& indices,
+BLAS::GeometrySlice BlasGeometrySlice(const gpu::Buffer& vertices,
+                                      const gpu::Buffer& indices,
                                       const InstanceGeometryInfo& offset,
                                       const GeometryPrimitive& primitive) {
     BLAS::GeometrySlice slice;
-    slice.vertices = &vertices;
-    slice.indices = &indices;
+    slice.vertices = vertices.Ref();
+    slice.indices = indices.Ref();
     slice.vertexOffset = offset.vertexOffset;
     slice.vertexCount = static_cast<u32>(primitive.positions.size());
     slice.indexOffset = offset.indexOffset;
@@ -913,7 +904,7 @@ bool SceneGeometry::AllBlasUseMergedGeometryBuffers() const {
         });
 }
 
-SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
+SceneGeometry SceneGeometry::Build(gpu::Device& device, const Scene& scene) {
     QL_LOG_INFO("Building acceleration structures...");
 
     SceneGeometry result;
@@ -990,21 +981,17 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
 
     LogMergeValidation(vertices, indices, normals);
 
-    VmaAllocator allocator = ctx.GetAllocator();
-    const std::unique_ptr<gpu::Device> gpuDevice = gpu::vulkan::AdoptContext(ctx);
-    result.m_vertices = UploadGeometryBuffer(ctx, *gpuDevice, vertices.data(),
+    result.m_vertices = UploadGeometryBuffer(device, vertices.data(),
         vertices.size() * sizeof(glm::vec3),
-        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-    result.m_indices = UploadGeometryBuffer(ctx, *gpuDevice, indices.data(),
+        gpu::BufferUsage::AccelerationStructureInput | gpu::BufferUsage::DeviceAddress);
+    result.m_indices = UploadGeometryBuffer(device, indices.data(),
         indices.size() * sizeof(u32),
-        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-    result.m_normals = UploadGeometryBuffer(ctx, *gpuDevice, normals.data(),
+        gpu::BufferUsage::AccelerationStructureInput | gpu::BufferUsage::DeviceAddress);
+    result.m_normals = UploadGeometryBuffer(device, normals.data(),
                                             normals.size() * sizeof(glm::vec3));
-    result.m_uvs = UploadGeometryBuffer(ctx, *gpuDevice, uvs.data(),
+    result.m_uvs = UploadGeometryBuffer(device, uvs.data(),
                                         uvs.size() * sizeof(glm::vec2));
-    result.m_tangents = UploadGeometryBuffer(ctx, *gpuDevice, tangents.data(),
+    result.m_tangents = UploadGeometryBuffer(device, tangents.data(),
                                              tangents.size() * sizeof(glm::vec4));
     result.m_vertexCount = nVerts;
     result.m_indexCount = nIndices;
@@ -1015,18 +1002,18 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
     for (const auto& mesh : scene.meshes) {
         for (const auto& prim : mesh.primitives) {
             result.m_blas.emplace_back(std::make_unique<BLAS>(
-                ctx,
+                device,
                 BlasGeometrySlice(*result.m_vertices, *result.m_indices,
                                   primitiveOffsets[primIdx++], prim),
                 IsOpaqueForRayTracing(scene, prim.materialId)));
         }
     }
 
-    result.m_tlas = std::make_unique<TLAS>(ctx);
+    result.m_tlas = std::make_unique<TLAS>(device);
 
-    CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
+    device.ExecuteImmediate([&](gpu::CommandList& list) {
         for (auto& blas : result.m_blas) {
-            blas->Build(cmd);
+            blas->Build(list);
         }
 
         ForEachInstance(scene, [&](const glm::mat4& transform, size_t globalPrim,
@@ -1049,7 +1036,7 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
                                        transform, IsDoubleSided(scene, info.materialId));
         });
 
-        result.m_tlas->Build(cmd);
+        result.m_tlas->Build(list);
     });
 
     // ExecuteImmediate has waited for the build submission. BLAS are static,
@@ -1063,9 +1050,9 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
     result.m_primitiveOffsets = std::move(primitiveOffsets);
 
     if (!result.m_instances.empty()) {
-        result.m_instanceInfo = std::make_unique<GpuBuffer>(
-            allocator, result.m_instances.size() * sizeof(InstanceGeometryInfo),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        result.m_instanceInfo = CreateBufferOrThrow(
+            device, gpu::BufferDesc{result.m_instances.size() * sizeof(InstanceGeometryInfo),
+                                    gpu::BufferUsage::Storage, gpu::MemoryClass::Upload, 0});
         result.m_instanceInfo->Upload(result.m_instances.data(),
                                       result.m_instances.size() * sizeof(InstanceGeometryInfo));
         QL_LOG_INFO("  Created instance geometry info buffer ({} instances)",
@@ -1077,7 +1064,7 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
     return result;
 }
 
-bool SceneGeometry::RefreshMaterialOpacity(VulkanContext& ctx, const Scene& scene) {
+bool SceneGeometry::RefreshMaterialOpacity(gpu::Device& device, const Scene& scene) {
     if (m_blas.empty()) {
         return false;
     }
@@ -1097,7 +1084,7 @@ bool SceneGeometry::RefreshMaterialOpacity(VulkanContext& ctx, const Scene& scen
                 QL_LOG_INFO("  Rebuilding BLAS {} as {}", globalPrim,
                             wanted ? "opaque" : "alpha-tested");
                 m_blas[globalPrim] = std::make_unique<BLAS>(
-                    ctx,
+                    device,
                     BlasGeometrySlice(*m_vertices, *m_indices,
                                       m_primitiveOffsets[globalPrim], prim),
                     wanted);
@@ -1115,9 +1102,9 @@ bool SceneGeometry::RefreshMaterialOpacity(VulkanContext& ctx, const Scene& scen
     // Construction selects the replacement's merged geometry slice but does
     // not create its acceleration structure. Build every replacement before
     // the TLAS reads its device address; otherwise AddInstance receives zero.
-    CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
+    device.ExecuteImmediate([&](gpu::CommandList& list) {
         for (BLAS* blas : rebuilt) {
-            blas->Build(cmd);
+            blas->Build(list);
         }
     });
     for (BLAS* blas : rebuilt) {
@@ -1126,11 +1113,11 @@ bool SceneGeometry::RefreshMaterialOpacity(VulkanContext& ctx, const Scene& scen
 
     // Every instance references a BLAS by address, so replacing one invalidates
     // the TLAS whether or not the instance list itself changed.
-    RebuildTlas(ctx, scene);
+    RebuildTlas(device, scene);
     return true;
 }
 
-void SceneGeometry::RebuildTlas(VulkanContext& ctx, const Scene& scene) {
+void SceneGeometry::RebuildTlas(gpu::Device& device, const Scene& scene) {
     if (m_blas.empty()) {
         QL_LOG_WARN("RebuildTlas: nothing built yet");
         return;
@@ -1158,9 +1145,9 @@ void SceneGeometry::RebuildTlas(VulkanContext& ctx, const Scene& scene) {
 
     QL_LOG_DEBUG("Rebuilding TLAS ({} -> {} instances)...", m_instanceCount,
                  instances.size());
-    m_tlas = std::make_unique<TLAS>(ctx);
+    m_tlas = std::make_unique<TLAS>(device);
 
-    CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
+    device.ExecuteImmediate([&](gpu::CommandList& list) {
         size_t instance = 0;
         ForEachInstance(scene, [&](const glm::mat4& transform, size_t globalPrim,
                                    size_t /*nodeIndex*/) {
@@ -1169,7 +1156,7 @@ void SceneGeometry::RebuildTlas(VulkanContext& ctx, const Scene& scene) {
             m_tlas->AddInstance(*m_blas[globalPrim], materialId, transform,
                                 IsDoubleSided(scene, materialId));
         });
-        m_tlas->Build(cmd);
+        m_tlas->Build(list);
     });
 
     const u32 newCount = static_cast<u32>(instances.size());
@@ -1177,9 +1164,8 @@ void SceneGeometry::RebuildTlas(VulkanContext& ctx, const Scene& scene) {
     if (newCount != m_instanceCount || !m_instanceInfo) {
         // New buffer object: the caller must rebind InstanceInfo() (the
         // rebuild path already runs on an idle device)
-        m_instanceInfo = std::make_unique<GpuBuffer>(
-            ctx.GetAllocator(), bytes,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        m_instanceInfo = CreateBufferOrThrow(
+            device, gpu::BufferDesc{bytes, gpu::BufferUsage::Storage, gpu::MemoryClass::Upload, 0});
     }
     m_instanceInfo->Upload(instances.data(), bytes);
 
@@ -1226,19 +1212,19 @@ bool SceneGeometry::PrepareTlasRefit(const Scene& scene) {
     return true;
 }
 
-void SceneGeometry::RecordPreparedTlasRefit(VkCommandBuffer cmd) {
+void SceneGeometry::RecordPreparedTlasRefit(gpu::CommandList& list) {
     if (!m_tlas || !m_tlas->IsBuilt()) {
         throw std::runtime_error("RecordPreparedTlasRefit called before TLAS build");
     }
-    m_tlas->Update(cmd);
+    m_tlas->Update(list);
 }
 
-bool SceneGeometry::RefitTlas(VulkanContext& ctx, const Scene& scene) {
+bool SceneGeometry::RefitTlas(gpu::Device& device, const Scene& scene) {
     if (!PrepareTlasRefit(scene)) {
         return false;
     }
-    CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
-        RecordPreparedTlasRefit(cmd);
+    device.ExecuteImmediate([&](gpu::CommandList& list) {
+        RecordPreparedTlasRefit(list);
     });
     return true;
 }
@@ -1485,10 +1471,10 @@ bool IsOpaqueForRayTracing(const Scene& scene, u32 materialId) {
     return mat.alphaMode == Material::AlphaMode::Opaque;
 }
 
-std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& scene,
-                                               const f32 wavelengthNm,
-                                               const Vector<MaterialGpuIndices>& indices,
-                                               const MaterialResourceCounts* resources) {
+std::unique_ptr<gpu::Buffer> BuildMaterialBuffer(gpu::Device& device, const Scene& scene,
+                                                 const f32 wavelengthNm,
+                                                 const Vector<MaterialGpuIndices>& indices,
+                                                 const MaterialResourceCounts* resources) {
     if (scene.materials.empty()) {
         return nullptr;
     }
@@ -1504,10 +1490,9 @@ std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& 
     }
 
     const size_t bytes = gpuMaterials.size() * sizeof(MaterialDataCPU);
-    auto buffer = std::make_unique<GpuBuffer>(ctx.GetAllocator(), bytes,
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                                  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                              VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto buffer = CreateBufferOrThrow(
+        device, gpu::BufferDesc{bytes, gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
+                                gpu::MemoryClass::Upload, 0});
     buffer->Upload(gpuMaterials.data(), bytes);
     return buffer;
 }
@@ -1516,22 +1501,22 @@ std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& 
 // Render target
 // ============================================================================
 
-std::unique_ptr<GpuImage> CreateRenderTarget(VulkanContext& ctx, const u32 width,
-                                             const u32 height, const VkFormat format) {
+std::unique_ptr<gpu::Texture> CreateRenderTarget(gpu::Device& device, const u32 width,
+                                                 const u32 height, const gpu::Format format) {
     QL_LOG_INFO("Creating render target ({}x{}, format {})...", width, height,
                 static_cast<int>(format));
 
-    auto image = std::make_unique<GpuImage>(
-        ctx.GetAllocator(), ctx.GetDevice(),
-        width, height,
-        format,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY);
+    gpu::TextureDesc desc;
+    desc.width = width;
+    desc.height = height;
+    desc.format = format;
+    desc.usage = gpu::TextureUsage::Storage | gpu::TextureUsage::TransferSrc;
+    desc.memory = gpu::MemoryClass::DeviceLocal;
+    auto image = CreateTextureOrThrow(device, desc);
 
     // GENERAL because the ray generation shader writes it as a storage image; it is
     // never sampled, only blitted or copied out.
-    LegacyTransitionImmediate(*gpu::vulkan::AdoptContext(ctx), gpu::vulkan::Ref(*image),
-                              Layout::Undefined, Layout::General);
+    LegacyTransitionImmediate(device, image->Ref(), Layout::Undefined, Layout::General);
 
     return image;
 }
@@ -1541,46 +1526,49 @@ std::unique_ptr<GpuImage> CreateRenderTarget(VulkanContext& ctx, const u32 width
 // ============================================================================
 
 std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
-    VulkanContext& ctx, const gpu::PipelineCache* cache, const PipelineBindings& bindings) {
+    gpu::Device& device, const gpu::PipelineCache* cache, const PipelineBindings& bindings) {
     QL_LOG_INFO("Creating ray tracing pipeline...");
 
+    // RayTracingPipeline still takes the context and native objects until its own
+    // migration step; the bridge names them for that one step.
     auto pipeline = std::make_unique<RayTracingPipeline>(
-        ctx, "raygen.spv", "closesthit.spv", "miss.spv", "anyhit.spv", cache);
+        gpu::vulkan::Context(device), "raygen.spv", "closesthit.spv", "miss.spv", "anyhit.spv", cache);
 
     if (bindings.outputImage) {
-        pipeline->BindOutputImage(*bindings.outputImage);            // 0
+        pipeline->BindOutputImage(gpu::vulkan::AsGpuImage(*bindings.outputImage));  // 0
     }
     if (bindings.depthImage) {
-        pipeline->BindDepthImage(*bindings.depthImage);              // 22
+        pipeline->BindDepthImage(gpu::vulkan::AsGpuImage(*bindings.depthImage));    // 22
     }
     if (bindings.geometry && bindings.geometry->IsValid()) {
         const SceneGeometry& geometry = *bindings.geometry;
-        pipeline->BindAccelerationStructure(geometry.Tlas().GetHandle());  // 1
-        pipeline->BindGeometryBuffers(geometry.Vertices(), geometry.Indices(),
-                                      &geometry.UVs());              // 3, 4, 8
-        pipeline->BindTangentBuffer(geometry.Tangents());            // 9
-        pipeline->BindNormalBuffer(geometry.Normals());              // 16
+        pipeline->BindAccelerationStructure(gpu::vulkan::NativeScene(geometry.Tlas().Ref()));  // 1
+        pipeline->BindGeometryBuffers(gpu::vulkan::AsGpuBuffer(geometry.Vertices()),
+                                      gpu::vulkan::AsGpuBuffer(geometry.Indices()),
+                                      &gpu::vulkan::AsGpuBuffer(geometry.UVs()));   // 3, 4, 8
+        pipeline->BindTangentBuffer(gpu::vulkan::AsGpuBuffer(geometry.Tangents()));  // 9
+        pipeline->BindNormalBuffer(gpu::vulkan::AsGpuBuffer(geometry.Normals()));    // 16
         if (geometry.InstanceCount() > 0) {
-            pipeline->BindInstanceGeometryBuffer(geometry.InstanceInfo());  // 18
+            pipeline->BindInstanceGeometryBuffer(gpu::vulkan::AsGpuBuffer(geometry.InstanceInfo()));  // 18
         }
     }
     if (bindings.lightingParams) {
         pipeline->BindLUTBuffer(*bindings.lightingParams);           // 2
     }
     if (bindings.materials) {
-        pipeline->BindMaterialBuffer(*bindings.materials);           // 5
+        pipeline->BindMaterialBuffer(gpu::vulkan::AsGpuBuffer(*bindings.materials));  // 5
     }
     if (bindings.textures) {
-        pipeline->BindTextures(bindings.textures->GetImageViews(),
-                               bindings.textures->GetSamplers());    // 6, 7
+        pipeline->BindTextures(gpu::vulkan::NativeViews(bindings.textures->TextureRefs()),
+                               gpu::vulkan::NativeSamplers(bindings.textures->SamplerRefs()));  // 6, 7
     }
     if (bindings.environment) {
-        pipeline->BindPrefilteredEnvMap(bindings.environment->View(),
-                                        bindings.environment->Sampler());  // 10, 21
+        pipeline->BindPrefilteredEnvMap(gpu::vulkan::NativeView(bindings.environment->View()),
+                                        gpu::vulkan::NativeSampler(bindings.environment->Sampler()));  // 10, 21
     }
     if (bindings.brdfLut) {
-        pipeline->BindBRDFLut(bindings.brdfLut->View(),
-                              bindings.brdfLut->Sampler());          // 11, 12
+        pipeline->BindBRDFLut(gpu::vulkan::NativeView(bindings.brdfLut->View()),
+                              gpu::vulkan::NativeSampler(bindings.brdfLut->Sampler()));  // 11, 12
     }
 
     // These binders take a pointer and handle null themselves.
@@ -1600,13 +1588,13 @@ std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
         pipeline->BindThermalSunResponseBuffer(*bindings.thermalSunResponse);  // 26
     }
     if (bindings.emissiveTriangles) {
-        pipeline->BindEmissiveTriangleBuffer(*bindings.emissiveTriangles);  // 23
+        pipeline->BindEmissiveTriangleBuffer(gpu::vulkan::AsGpuBuffer(*bindings.emissiveTriangles));  // 23
     }
     if (bindings.cieColourMatching) {
-        pipeline->BindCIE_CMF_LUT(*bindings.cieColourMatching);      // 19
+        pipeline->BindCIE_CMF_LUT(gpu::vulkan::AsGpuBuffer(*bindings.cieColourMatching));  // 19
     }
     if (bindings.rgbToSpectrum) {
-        pipeline->BindRgbToSpectrumTable(*bindings.rgbToSpectrum);   // 25
+        pipeline->BindRgbToSpectrumTable(gpu::vulkan::AsGpuBuffer(*bindings.rgbToSpectrum));  // 25
     }
     if (bindings.cameraMeasurementImage) {
         pipeline->BindCameraMeasurementImage(*bindings.cameraMeasurementImage); // 28
@@ -1649,7 +1637,7 @@ SensorBandAdjustment SensorAdjustmentForMode(const SpectralMode mode,
 // CIE colour matching functions
 // ============================================================================
 
-std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx) {
+std::unique_ptr<gpu::Buffer> CreateCieColourMatchingBuffer(gpu::Device& device) {
     // w carries D65, scaled so that a spectrum equal to it integrates to Y = 1
     // through the shader's own estimator:
     //
@@ -1685,9 +1673,8 @@ std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx) {
     }
 
     const size_t bytes = table.size() * sizeof(glm::vec4);
-    auto buffer = std::make_unique<GpuBuffer>(ctx.GetAllocator(), bytes,
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                              VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto buffer = CreateBufferOrThrow(
+        device, gpu::BufferDesc{bytes, gpu::BufferUsage::Storage, gpu::MemoryClass::Upload, 0});
     buffer->Upload(table.data(), bytes);
 
     QL_LOG_INFO("  CIE CMF LUT created ({} samples, 380-780 nm, D65 in w)", CIE_CMF_LUT_SIZE);
@@ -1698,7 +1685,7 @@ std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx) {
 // RGB -> spectrum coefficients
 // ============================================================================
 
-std::unique_ptr<GpuBuffer> CreateRgbToSpectrumBuffer(VulkanContext& ctx, const String& cachePath) {
+std::unique_ptr<gpu::Buffer> CreateRgbToSpectrumBuffer(gpu::Device& device, const String& cachePath) {
     const String path = cachePath.empty() ? DefaultDerivedTablePath("rgb2spec_srgb_64.bin") : cachePath;
     const u32 res = kRgbToSpectrumResolution;
     const size_t nodeCount = static_cast<size_t>(3) * res * res * res;
@@ -1725,9 +1712,8 @@ std::unique_ptr<GpuBuffer> CreateRgbToSpectrumBuffer(VulkanContext& ctx, const S
     }
 
     const size_t bytes = packed.size() * sizeof(glm::vec4);
-    auto buffer = std::make_unique<GpuBuffer>(ctx.GetAllocator(), bytes,
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                              VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto buffer = CreateBufferOrThrow(
+        device, gpu::BufferDesc{bytes, gpu::BufferUsage::Storage, gpu::MemoryClass::Upload, 0});
     buffer->Upload(packed.data(), bytes);
 
     QL_LOG_INFO("  RGB->spectrum table uploaded ({} nodes, {:.1f} MB)", nodeCount,
@@ -1844,8 +1830,8 @@ Vector<EmissiveTriangleGPU> CollectEmissiveTriangles(const Scene& scene) {
     return triangles;
 }
 
-std::unique_ptr<GpuBuffer> CreateEmissiveTriangleBuffer(
-    VulkanContext& ctx, const Vector<EmissiveTriangleGPU>& triangles) {
+std::unique_ptr<gpu::Buffer> CreateEmissiveTriangleBuffer(
+    gpu::Device& device, const Vector<EmissiveTriangleGPU>& triangles) {
     // One zero-filled entry when there are none: the descriptor must point at
     // something, and emissiveTriangleCount is what stops the shader reading it.
     const EmissiveTriangleGPU empty{};
@@ -1854,10 +1840,9 @@ std::unique_ptr<GpuBuffer> CreateEmissiveTriangleBuffer(
     const size_t bytes = (triangles.empty() ? 1 : triangles.size()) *
                          sizeof(EmissiveTriangleGPU);
 
-    auto buffer = std::make_unique<GpuBuffer>(ctx.GetAllocator(), bytes,
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                                  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                              VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto buffer = CreateBufferOrThrow(
+        device, gpu::BufferDesc{bytes, gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
+                                gpu::MemoryClass::Upload, 0});
     buffer->Upload(data, bytes);
     return buffer;
 }

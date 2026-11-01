@@ -1,13 +1,14 @@
 /**
  * @file AccelerationStructure.hpp
- * @brief Vulkan ray tracing acceleration structure management (BLAS and TLAS)
+ * @brief Ray tracing acceleration structure management (BLAS and TLAS)
  *
  * Provides BLAS and TLAS classes for building and managing ray tracing acceleration structures:
  * - BLAS (Bottom-Level AS): Per-geometry acceleration structures for triangle meshes
  * - TLAS (Top-Level AS): Scene-level acceleration structure for instancing BLAS with transforms
  *
  * Acceleration structures enable fast ray-triangle intersection queries in hardware.
- * Quantiloom uses the Vulkan Ray Tracing Pipeline extension (VK_KHR_ray_tracing_pipeline).
+ * Both levels are gpu::RtAccelerationStructure objects; which barriers surround a build
+ * and when a refit replaces a rebuild is decided here (gpu/AGENTS.md).
  *
  * Build workflow:
  * 1. Create BLAS for each GeometryPrimitive in the scene
@@ -17,12 +18,12 @@
  * 5. Bind TLAS to ray tracing pipeline
  *
  * Memory management:
- * - BLAS/TLAS buffers managed via VMA (automatic cleanup)
+ * - Every structure, scratch and instance buffer is a gpu:: owner (automatic cleanup)
  * - Scratch buffers created temporarily for build operations
  * - Device addresses stored for shader access
  *
- * @note Requires VK_KHR_ray_tracing_pipeline and VK_KHR_acceleration_structure extensions
- * @note Build operations must be recorded into command buffers and submitted to GPU
+ * @note Requires a device with hardware ray tracing (DeviceInfo::hardwareRayTracing)
+ * @note Build operations are recorded into a gpu::CommandList that a gpu::Device handed out
  * @note BLAS must outlive TLAS (TLAS references BLAS device addresses)
  *
  * @author blitzcolo
@@ -31,15 +32,16 @@
 #pragma once
 
 #include "core/Types.hpp"
-#include "VulkanContext.hpp"
-#include "GpuBuffer.hpp"
+#include "gpu/GpuTypes.hpp"
+#include "gpu/Resources.hpp"
+#include "gpu/RtScene.hpp"
 #include "scene/Mesh.hpp"
-#include <vulkan/vulkan.h>
+#include <cstddef>
 #include <vector>
 #include <memory>
 
 namespace quantiloom::gpu {
-class Buffer;
+class CommandList;
 class Device;
 class RtAccelerationStructure;
 }  // namespace quantiloom::gpu
@@ -62,7 +64,7 @@ namespace quantiloom {
  *
  * Build process:
  * 1. Constructor receives a slice of the scene's merged vertex/index buffers
- * 2. Build() records VkAccelerationStructureBuildGeometryInfoKHR into command buffer
+ * 2. Build() records one acceleration structure build into a command list
  * 3. GPU executes build asynchronously (requires synchronization before TLAS build)
  *
  * Memory layout:
@@ -79,9 +81,9 @@ namespace quantiloom {
  * }
  *
  * // Build all BLAS on GPU
- * CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
+ * device.ExecuteImmediate([&](gpu::CommandList& list) {
  *     for (auto& blas : blasList) {
- *         blas.Build(cmd);
+ *         blas.Build(list);
  *     }
  * });
  * @endcode
@@ -92,13 +94,13 @@ namespace quantiloom {
  *
  * @see TLAS for scene-level acceleration structure
  * @see GeometryPrimitive for input geometry data
- * @see GpuBuffer for buffer management
+ * @see gpu::Buffer for buffer management
  */
 class BLAS {
 public:
     struct GeometrySlice {
-        const GpuBuffer* vertices = nullptr;
-        const GpuBuffer* indices = nullptr;
+        gpu::BufferRef vertices;  ///< SceneGeometry's merged vertex buffer
+        gpu::BufferRef indices;   ///< SceneGeometry's merged index buffer
         u32 vertexOffset = 0;  ///< In glm::vec3 elements
         u32 vertexCount = 0;
         u32 indexOffset = 0;   ///< In u32 elements
@@ -109,7 +111,7 @@ public:
     ///                geometry. False for a material with alphaMode MASK or BLEND,
     ///                whose coverage is decided per texel. Frozen at build time --
     ///                see IsOpaque() and SceneGeometry::RefreshMaterialOpacity.
-    BLAS(VulkanContext& context, GeometrySlice geometry, bool opaque = true);
+    BLAS(gpu::Device& device, GeometrySlice geometry, bool opaque = true);
     ~BLAS();
 
     // Non-copyable, movable
@@ -118,8 +120,10 @@ public:
     BLAS(BLAS&& other) noexcept;
     BLAS& operator=(BLAS&& other) noexcept;
 
-    // Build BLAS from mesh data (records commands into cmd buffer)
-    void Build(VkCommandBuffer cmd);
+    // Build BLAS from mesh data. The list must be one a gpu::Device handed out
+    // (ExecuteImmediate, WrapRecording, a CommandPool's buffer): it carries the
+    // ray tracing entry points the build needs.
+    void Build(gpu::CommandList& list);
 
     // Release the temporary build workspace after the submission containing
     // Build() has completed. Static BLAS are never updated in place, so keeping
@@ -127,35 +131,30 @@ public:
     void ReleaseBuildScratch();
 
     // Accessors
-    [[nodiscard]] VkAccelerationStructureKHR GetHandle() const;
-    [[nodiscard]] VkDeviceAddress GetDeviceAddress() const { return m_deviceAddress; }
+    /// The structure and the device address a TLAS instance names it by; empty
+    /// before Build and after a move.
+    [[nodiscard]] gpu::RtSceneRef Ref() const;
     [[nodiscard]] bool IsBuilt() const { return m_built; }
     [[nodiscard]] bool HasBuildScratch() const { return m_scratchBuffer != nullptr; }
 
-    [[nodiscard]] bool UsesGeometryBuffers(const GpuBuffer& vertices,
-                                           const GpuBuffer& indices) const {
-        return m_geometry.vertices == &vertices && m_geometry.indices == &indices;
+    [[nodiscard]] bool UsesGeometryBuffers(const gpu::Buffer& vertices,
+                                           const gpu::Buffer& indices) const {
+        return m_geometry.vertices == vertices.Ref() && m_geometry.indices == indices.Ref();
     }
 
 private:
-    // m_context adopted on the first Build (Phase B of the RHI migration).
-    gpu::Device& Gpu();
-
-    VulkanContext& m_context;
-    std::unique_ptr<gpu::Device> m_gpu;
+    // The caller's device; it outlives the BLAS (SceneGeometry and its owner).
+    gpu::Device& m_device;
 
     std::unique_ptr<gpu::Buffer> m_scratchBuffer;  // Scratch space for build
     // The acceleration structure with its storage. Declared last, so it is
     // destroyed first: the structure, then its storage, then the scratch.
     std::unique_ptr<gpu::RtAccelerationStructure> m_structure;
 
-    // Device address
-    VkDeviceAddress m_deviceAddress = 0;
-
     // Build state
     bool m_built = false;
 
-    // What VK_GEOMETRY_OPAQUE_BIT_KHR was set to when this was built. Opacity
+    // What the geometry's opaque flag was when this was built. Opacity
     // is baked into the acceleration structure, so changing a material's
     // alphaMode means rebuilding, and this is what says whether we have to.
     bool m_opaque = true;
@@ -176,7 +175,7 @@ public:
 
 class TLAS {
 public:
-    explicit TLAS(VulkanContext& context);
+    explicit TLAS(gpu::Device& device);
     ~TLAS();
 
     // Non-copyable, movable
@@ -190,8 +189,8 @@ public:
     // doubleSided: If true, disable backface culling; if false, enable hardware culling
     void AddInstance(const BLAS& blas, u32 materialId, const glm::mat4& transform = glm::mat4(1.0f), bool doubleSided = true);
 
-    // Build TLAS from instances (records commands into cmd buffer)
-    void Build(VkCommandBuffer cmd);
+    // Build TLAS from instances (records into a list from a gpu::Device, as for BLAS)
+    void Build(gpu::CommandList& list);
 
     // Overwrite one instance's transform in the CPU-side list (before Update)
     void SetInstanceTransform(size_t index, const glm::mat4& transform);
@@ -199,31 +198,32 @@ public:
     // Refit in place: record the instance-list upload and an UPDATE-mode build
     // (src == dst == this AS). Transform-only edits; the instance count, BLAS
     // references and flags must be unchanged since Build. The upload is part
-    // of @p cmd, so the caller can place it between old and new traces without
+    // of @p list, so the caller can place it between old and new traces without
     // a host wait or a host write racing an earlier update.
     // Orders of magnitude cheaper than a rebuild -- no allocation, no
     // teardown -- which is what makes interactive dragging possible.
-    void Update(VkCommandBuffer cmd);
+    void Update(gpu::CommandList& list);
 
     // Accessors
-    [[nodiscard]] VkAccelerationStructureKHR GetHandle() const;
+    /// The structure a descriptor binds; empty before Build and after a move.
+    [[nodiscard]] gpu::RtSceneRef Ref() const;
     [[nodiscard]] bool IsBuilt() const { return m_built; }
     [[nodiscard]] size_t InstanceCount() const { return m_instances.size(); }
     /// Exposed for synchronization regression tests that snapshot the exact
     /// GPU input between two updates recorded into one command buffer.
-    [[nodiscard]] const GpuBuffer& InstanceBufferForDiagnostics() const {
+    [[nodiscard]] const gpu::Buffer& InstanceBufferForDiagnostics() const {
         return *m_instanceBuffer;
     }
 
 private:
-    // m_context adopted on the first Build (Phase B of the RHI migration).
-    gpu::Device& Gpu();
+    /// The instance list as the native records the build reads (Device::PackRtInstances).
+    [[nodiscard]] std::vector<std::byte> PackedInstances() const;
 
-    VulkanContext& m_context;
-    std::unique_ptr<gpu::Device> m_gpu;
+    // The caller's device; it outlives the TLAS, as for BLAS.
+    gpu::Device& m_device;
 
     // Buffers
-    std::unique_ptr<GpuBuffer> m_instanceBuffer;     // Instance data
+    std::unique_ptr<gpu::Buffer> m_instanceBuffer;   // Instance data
     std::unique_ptr<gpu::Buffer> m_scratchBuffer;    // Scratch space for build and refits
     // The acceleration structure with its storage. Declared last, so it is
     // destroyed first: the structure, then its storage, then the buffers above.
@@ -232,8 +232,8 @@ private:
     // Build state
     bool m_built = false;
 
-    // Instance data (accumulated before Build)
-    std::vector<VkAccelerationStructureInstanceKHR> m_instances;
+    // Instance data (accumulated before Build), packed before every upload
+    std::vector<gpu::RtInstance> m_instances;
 };
 
 } // namespace quantiloom

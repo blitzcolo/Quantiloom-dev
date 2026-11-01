@@ -13,8 +13,8 @@
 
 #include "support/VulkanTestDevice.hpp"
 
+#include "gpu/GpuTypes.hpp"
 #include "renderer/RenderCore.hpp"
-#include "renderer/VulkanContext.hpp"
 
 #include <filesystem>
 
@@ -41,11 +41,11 @@ std::string TempCachePath(const char* name) {
 
 TEST_F(VulkanDeviceTest, BrdfLutUploadsAndOwnsItsSampler) {
     const auto cache = TempCachePath("quantiloom_brdf_lut_upload.bin");
-    auto lut = rendercore::BrdfLut::Create(Device(), cache, TinyConfig());
+    auto lut = rendercore::BrdfLut::Create(GpuDevice(), cache, TinyConfig());
 
     ASSERT_TRUE(lut.IsValid());
-    EXPECT_NE(lut.View(), VK_NULL_HANDLE);
-    EXPECT_NE(lut.Sampler(), VK_NULL_HANDLE);
+    EXPECT_TRUE(lut.View().IsValid());
+    EXPECT_TRUE(lut.Sampler().IsValid());
 }
 
 // The image used to be created at a hardcoded 512 while the generator read the
@@ -53,7 +53,7 @@ TEST_F(VulkanDeviceTest, BrdfLutUploadsAndOwnsItsSampler) {
 // mismatched image. Both call sites had that shape.
 TEST_F(VulkanDeviceTest, BrdfLutSizesTheImageFromTheConfig) {
     const auto cache = TempCachePath("quantiloom_brdf_lut_resolution.bin");
-    auto lut = rendercore::BrdfLut::Create(Device(), cache, TinyConfig());
+    auto lut = rendercore::BrdfLut::Create(GpuDevice(), cache, TinyConfig());
 
     ASSERT_TRUE(lut.IsValid());
     EXPECT_EQ(lut.Resolution(), 16u);
@@ -65,13 +65,13 @@ TEST_F(VulkanDeviceTest, BrdfLutWritesAndReusesItsCache) {
     const auto cache = TempCachePath("quantiloom_brdf_lut_cache.bin");
     ASSERT_FALSE(std::filesystem::exists(cache));
 
-    { auto first = rendercore::BrdfLut::Create(Device(), cache, TinyConfig());
+    { auto first = rendercore::BrdfLut::Create(GpuDevice(), cache, TinyConfig());
       ASSERT_TRUE(first.IsValid()); }
 
     ASSERT_TRUE(std::filesystem::exists(cache));
     EXPECT_TRUE(BRDFLutGenerator::LoadFromBinary(cache, nullptr).has_value());
 
-    auto second = rendercore::BrdfLut::Create(Device(), cache, TinyConfig());
+    auto second = rendercore::BrdfLut::Create(GpuDevice(), cache, TinyConfig());
     EXPECT_TRUE(second.IsValid());
 }
 
@@ -79,10 +79,10 @@ TEST_F(VulkanDeviceTest, BrdfLutWritesAndReusesItsCache) {
 // and one of them ignored the create result. Moving must not double-destroy it.
 TEST_F(VulkanDeviceTest, BrdfLutSurvivesAMove) {
     const auto cache = TempCachePath("quantiloom_brdf_lut_move.bin");
-    auto lut = rendercore::BrdfLut::Create(Device(), cache, TinyConfig());
+    auto lut = rendercore::BrdfLut::Create(GpuDevice(), cache, TinyConfig());
     ASSERT_TRUE(lut.IsValid());
 
-    const VkSampler sampler = lut.Sampler();
+    const gpu::SamplerRef sampler = lut.Sampler();
     rendercore::BrdfLut moved = std::move(lut);
 
     EXPECT_EQ(moved.Sampler(), sampler);

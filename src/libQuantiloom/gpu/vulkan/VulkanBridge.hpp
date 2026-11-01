@@ -6,6 +6,9 @@
 
 #include <vulkan/vulkan.h>
 
+#include <span>
+#include <vector>
+
 namespace quantiloom {
 class VulkanContext;
 class GpuImage;
@@ -32,6 +35,7 @@ namespace quantiloom::gpu::vulkan {
 [[nodiscard]] VulkanContext& Context(gpu::Device& device);
 [[nodiscard]] const GpuImage& AsGpuImage(const gpu::Texture& texture);
 [[nodiscard]] GpuBuffer& AsGpuBuffer(gpu::Buffer& buffer);
+[[nodiscard]] const GpuBuffer& AsGpuBuffer(const gpu::Buffer& buffer);  // Transitional; deleted in S19
 [[nodiscard]] VkPipeline NativePipeline(const gpu::ComputeKernel& kernel);
 [[nodiscard]] VkPipelineLayout NativeLayout(const gpu::KernelLayout& layout);
 [[nodiscard]] VkDescriptorSet NativeSet(gpu::BindGroup group);
@@ -45,5 +49,10 @@ namespace quantiloom::gpu::vulkan {
 [[nodiscard]] gpu::TextureRef SampledRef(VkImageView view);               // Transitional; deleted in S19
 [[nodiscard]] VkSampler NativeSampler(gpu::SamplerRef ref);               // Transitional; deleted in S19
 [[nodiscard]] VkAccelerationStructureKHR NativeScene(gpu::RtSceneRef ref);  // Transitional; deleted in S19
+
+// RayTracingPipeline::BindTextures' native arrays, from TextureManager's refs, until it takes the
+// refs itself.
+[[nodiscard]] std::vector<VkImageView> NativeViews(std::span<const gpu::TextureRef> refs);  // Transitional; deleted in S15
+[[nodiscard]] std::vector<VkSampler> NativeSamplers(std::span<const gpu::SamplerRef> refs);  // Transitional; deleted in S15
 
 }  // namespace quantiloom::gpu::vulkan

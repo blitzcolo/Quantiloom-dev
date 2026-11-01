@@ -245,7 +245,7 @@ struct OfflineRenderer::Impl {
     std::unique_ptr<gpu::Device> gpuDevice;
     Scene loadedScene;
     rendercore::SceneGeometry geometry;
-    std::unique_ptr<GpuImage> outputImage;
+    std::unique_ptr<gpu::Texture> outputImage;
     LightingParams lightingParams{};
     std::unique_ptr<GpuBuffer> lightingParamsBuffer;
     std::unique_ptr<TextureManager> textureManager;
@@ -254,9 +254,9 @@ struct OfflineRenderer::Impl {
     std::unique_ptr<GpuBuffer> solarSpectralLUTBuffer;
     std::unique_ptr<GpuBuffer> atmosHeaderBuffer;
     std::unique_ptr<GpuBuffer> atmosDataBuffer;
-    std::unique_ptr<GpuBuffer> cieCMF_LUTBuffer;
-    std::unique_ptr<GpuBuffer> rgbToSpectrumBuffer;
-    std::unique_ptr<GpuBuffer> emissiveTriangleBuffer;
+    std::unique_ptr<gpu::Buffer> cieCMF_LUTBuffer;
+    std::unique_ptr<gpu::Buffer> rgbToSpectrumBuffer;
+    std::unique_ptr<gpu::Buffer> emissiveTriangleBuffer;
     /// Per-element surface temperatures from the thermal solver. Always
     /// created -- an unbound descriptor is not a valid one -- with a single
     /// zero entry when no solve ran.
@@ -265,7 +265,7 @@ struct OfflineRenderer::Impl {
     /// Binding 27, the what-if field. The offline path never previews anything,
     /// so this is always the inert record: step 0 and one zero tangent.
     std::unique_ptr<GpuBuffer> thermalParameterTangentBuffer;
-    std::unique_ptr<GpuBuffer> materialBuffer;
+    std::unique_ptr<gpu::Buffer> materialBuffer;
     rendercore::BrdfLut brdfLut;
     rendercore::EnvironmentCubemap envMap;
     /// Loaded by BuildPipeline unless the cache is borrowed; pipelineCache names
@@ -296,8 +296,8 @@ struct OfflineRenderer::Impl {
     const rendercore::EnvironmentCubemap* fallbackEnvMapRef = nullptr;
     /// Either the shared fallback or `envMap` above, decided in BuildPipeline.
     const rendercore::EnvironmentCubemap* envMapRef = nullptr;
-    const GpuBuffer* cieCMF_LUTRef = nullptr;
-    const GpuBuffer* rgbToSpectrumRef = nullptr;
+    const gpu::Buffer* cieCMF_LUTRef = nullptr;
+    const gpu::Buffer* rgbToSpectrumRef = nullptr;
     bool borrowingDevice = false;
 
     ~Impl() {
@@ -392,8 +392,6 @@ struct OfflineRenderer::Impl {
 // ============================================================================
 
 SetupResult OfflineRenderer::Impl::BuildScene() {
-    VulkanContext& context = *contextRef;
-
     QL_LOG_INFO("Loading scene...");
 
     rendercore::SceneLoadInfo sceneInfo;
@@ -474,12 +472,12 @@ SetupResult OfflineRenderer::Impl::BuildScene() {
     // instances, and the per-instance offset table the vertex shading indexes
     // with the hit's instance -- all of it derived from the scene, all of it shared
     // with the interactive context.
-    geometry = rendercore::SceneGeometry::Build(context, loadedScene);
+    geometry = rendercore::SceneGeometry::Build(*gpuDevice, loadedScene);
     if (!geometry.IsValid()) {
         return SetupResult::Err("Scene has no geometry to trace");
     }
 
-    outputImage = rendercore::CreateRenderTarget(context, params.width, params.height);
+    outputImage = rendercore::CreateRenderTarget(*gpuDevice, params.width, params.height);
 
     return SetupResult::Ok();
 }
@@ -548,19 +546,20 @@ VkAccelerationStructureKHR OfflineRenderer::Impl::OfflineEpochHost::ApplyEpoch(c
     }
     owner->timeline.Apply(owner->loadedScene, t_s);
     if (owner->geometry.IsValid()) {
-        if (!owner->geometry.RefitTlas(*owner->contextRef, owner->loadedScene)) {
-            owner->geometry.RebuildTlas(*owner->contextRef, owner->loadedScene);
+        if (!owner->geometry.RefitTlas(*owner->gpuDevice, owner->loadedScene)) {
+            owner->geometry.RebuildTlas(*owner->gpuDevice, owner->loadedScene);
         }
     }
-    return owner->geometry.IsValid() ? owner->geometry.Tlas().GetHandle() : VK_NULL_HANDLE;
+    return owner->geometry.IsValid() ? gpu::vulkan::NativeScene(owner->geometry.Tlas().Ref())
+                                     : VK_NULL_HANDLE;
 }
 
 void OfflineRenderer::Impl::OfflineEpochHost::Restore() {
     if (!captured) return;
     owner->timeline.Apply(owner->loadedScene, restore_s);
     if (owner->geometry.IsValid()) {
-        if (!owner->geometry.RefitTlas(*owner->contextRef, owner->loadedScene)) {
-            owner->geometry.RebuildTlas(*owner->contextRef, owner->loadedScene);
+        if (!owner->geometry.RefitTlas(*owner->gpuDevice, owner->loadedScene)) {
+            owner->geometry.RebuildTlas(*owner->gpuDevice, owner->loadedScene);
         }
     }
     captured = false;
@@ -846,7 +845,7 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
     // putting them on the device, in the order the file comment describes.
 
     QL_LOG_INFO("Uploading textures to GPU...");
-    textureManager = std::make_unique<TextureManager>(context);
+    textureManager = std::make_unique<TextureManager>(*gpuDevice);
     textureManager->UploadTextures(loadedScene.textures);
     QL_LOG_INFO("  {} textures uploaded", textureManager->GetTextureCount());
 
@@ -993,7 +992,7 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
     // get wrong and no "VIS_FUSED will produce INCORRECT colors" fallback to hit.
     // The table is the same for every scene, so a shared device already has one.
     if (!cieCMF_LUTRef) {
-        cieCMF_LUTBuffer = rendercore::CreateCieColourMatchingBuffer(context);
+        cieCMF_LUTBuffer = rendercore::CreateCieColourMatchingBuffer(*gpuDevice);
         cieCMF_LUTRef = cieCMF_LUTBuffer.get();
     }
 
@@ -1003,7 +1002,7 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
     // Fitted, not compiled in: see core/RgbToSpectrum.hpp. Also scene
     // independent, so a shared device fits it once for a whole batch.
     if (!rgbToSpectrumRef) {
-        rgbToSpectrumBuffer = rendercore::CreateRgbToSpectrumBuffer(context);
+        rgbToSpectrumBuffer = rendercore::CreateRgbToSpectrumBuffer(*gpuDevice);
         rgbToSpectrumRef = rgbToSpectrumBuffer.get();
     }
 
@@ -1084,7 +1083,7 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
         textureManager ? textureManager->GetTextureCount() : 0,
         spectra.curves.size(), spectra.refractiveIndices.size()};
     materialBuffer = rendercore::BuildMaterialBuffer(
-        context, loadedScene, params.wavelengthNm, materialIndices, &materialResources);
+        *gpuDevice, loadedScene, params.wavelengthNm, materialIndices, &materialResources);
     if (!materialBuffer) {
         return SetupResult::Err("Scene has no materials");
     }
@@ -1109,7 +1108,7 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
 
     // A shared device generated it once for the whole batch.
     if (!brdfLutRef) {
-        brdfLut = rendercore::BrdfLut::Create(context);
+        brdfLut = rendercore::BrdfLut::Create(*gpuDevice);
         if (!brdfLut.IsValid()) {
             return SetupResult::Err("Failed to create BRDF LUT sampler");
         }
@@ -1135,7 +1134,7 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
         if (fallbackEnvMapRef) {
             envMapRef = fallbackEnvMapRef;
         } else {
-            envMap = rendercore::EnvironmentCubemap::Fallback(context);
+            envMap = rendercore::EnvironmentCubemap::Fallback(*gpuDevice);
             envMapRef = &envMap;
         }
         // Resolve assumed a map it can see named would load. The lighting buffer
@@ -1161,7 +1160,7 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
                     "-- image-based lighting is off");
         useFallback();
     } else {
-        auto loaded = rendercore::EnvironmentCubemap::Load(context, envMapPath);
+        auto loaded = rendercore::EnvironmentCubemap::Load(*gpuDevice, envMapPath);
         if (loaded.has_value()) {
             envMap = std::move(loaded.value());
             envMapRef = &envMap;
@@ -1207,7 +1206,7 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     bindings.thermalSunResponse = thermalSunResponseBuffer.get();
     bindings.thermalParameterTangent = thermalParameterTangentBuffer.get();
 
-    pipeline = rendercore::CreateRayTracingPipeline(context, pipelineCache, bindings);
+    pipeline = rendercore::CreateRayTracingPipeline(*gpuDevice, pipelineCache, bindings);
     pipeline->SetFusionTransport(spectra.fusionTransport);
 
     CameraData cameraData = resolved.camera.GetCameraData();
@@ -1330,7 +1329,7 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
             ? rendercore::CollectEmissiveTriangles(impl.loadedScene)
             : Vector<rendercore::EmissiveTriangleGPU>{};
         impl.emissiveTriangleBuffer =
-            rendercore::CreateEmissiveTriangleBuffer(*impl.contextRef, emissiveTris);
+            rendercore::CreateEmissiveTriangleBuffer(*impl.gpuDevice, emissiveTris);
         impl.lightingParams.emissiveTriangleCount =
             static_cast<u32>(emissiveTris.size());
         impl.lightingParams.emissiveTotalPower =
@@ -1983,7 +1982,7 @@ OfflineRenderer::Impl::RenderCameraWavelength(f64 wavelengthNm, u64 acquisitionI
                 host.lightingParams.enableEnvironmentMap = environment;
                 host.lightingParamsBuffer->Upload(&host.lightingParams, sizeof(LightingParams));
             }
-            host.pipeline->BindOutputImage(*host.outputImage);
+            host.pipeline->BindOutputImage(gpu::vulkan::AsGpuImage(*host.outputImage));
             host.pipeline->SetCameraData(original);
             host.pipeline->SetCameraProjection(nullptr);
             host.pipeline->SetSpecConstants(static_cast<u32>(host.params.mode),
@@ -2259,12 +2258,14 @@ Result<void, String> OfflineRenderer::SetTimelineTime(const f64 t_s) {
 
     const Vector<u32> moved = impl.timeline.Apply(impl.loadedScene, t_s);
     if (!moved.empty() && impl.geometry.IsValid()) {
-        if (!impl.geometry.RefitTlas(*impl.contextRef, impl.loadedScene)) {
-            impl.geometry.RebuildTlas(*impl.contextRef, impl.loadedScene);
+        if (!impl.geometry.RefitTlas(*impl.gpuDevice, impl.loadedScene)) {
+            impl.geometry.RebuildTlas(*impl.gpuDevice, impl.loadedScene);
             if (impl.pipeline) {
-                impl.pipeline->BindAccelerationStructure(impl.geometry.Tlas().GetHandle());
+                impl.pipeline->BindAccelerationStructure(
+                    gpu::vulkan::NativeScene(impl.geometry.Tlas().Ref()));
                 if (impl.geometry.InstanceCount() > 0) {
-                    impl.pipeline->BindInstanceGeometryBuffer(impl.geometry.InstanceInfo());
+                    impl.pipeline->BindInstanceGeometryBuffer(
+                        gpu::vulkan::AsGpuBuffer(impl.geometry.InstanceInfo()));
                 }
             }
         }
@@ -2289,7 +2290,7 @@ Result<void, String> OfflineRenderer::SetTimelineTime(const f64 t_s) {
                     ? rendercore::CollectEmissiveTriangles(impl.loadedScene)
                     : Vector<rendercore::EmissiveTriangleGPU>{};
             impl.emissiveTriangleBuffer =
-                rendercore::CreateEmissiveTriangleBuffer(*impl.contextRef, emissiveTris);
+                rendercore::CreateEmissiveTriangleBuffer(*impl.gpuDevice, emissiveTris);
             impl.lightingParams.emissiveTriangleCount =
                 static_cast<u32>(emissiveTris.size());
             impl.lightingParams.emissiveTotalPower =
@@ -2298,7 +2299,8 @@ Result<void, String> OfflineRenderer::SetTimelineTime(const f64 t_s) {
                 impl.lightingParamsBuffer->Upload(&impl.lightingParams, sizeof(LightingParams));
             }
             if (impl.pipeline) {
-                impl.pipeline->BindEmissiveTriangleBuffer(*impl.emissiveTriangleBuffer);
+                impl.pipeline->BindEmissiveTriangleBuffer(
+                    gpu::vulkan::AsGpuBuffer(*impl.emissiveTriangleBuffer));
             }
         }
     }
@@ -2339,7 +2341,7 @@ OfflineRenderer::QueryOpticalPaths(const Vector<dataset::OpticalProbe>& probes, 
                 host.pipeline->BeginFusionRecording(0, 0, 0, 0);
                 host.pipeline->SetCameraProjection(nullptr);
                 host.pipeline->SetCameraData(saved);
-                host.pipeline->BindOutputImage(*host.outputImage);
+                host.pipeline->BindOutputImage(gpu::vulkan::AsGpuImage(*host.outputImage));
                 host.pipeline->SetSpecConstants(static_cast<u32>(host.params.mode),
                                                 saved.debug_mode != 0);
             }
@@ -2373,8 +2375,8 @@ OfflineRenderer::QueryOpticalPaths(const Vector<dataset::OpticalProbe>& probes, 
                 rays[i] = {c.origin, static_cast<f32>(probe.wavelengthNm), direction,
                            probe.branchMask};
             }
-            auto image = rendercore::CreateRenderTarget(*host.contextRef, count, 1);
-            host.pipeline->BindOutputImage(*image);
+            auto image = rendercore::CreateRenderTarget(*host.gpuDevice, count, 1);
+            host.pipeline->BindOutputImage(gpu::vulkan::AsGpuImage(*image));
             host.pipeline->SetCameraData(*pose);
             host.pipeline->SetSpecConstants(static_cast<u32>(SpectralMode::Single), false);
             host.pipeline->SetSamplingParams(0, 0, 1, 17, 17);
@@ -3080,8 +3082,8 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
 
     std::vector<f32> pixels = CommandHelper::ReadbackImage(
         context,
-        outputImage->GetImage(),
-        outputImage->GetFormat(),
+        gpu::vulkan::AsGpuImage(*outputImage).GetImage(),
+        gpu::vulkan::AsGpuImage(*outputImage).GetFormat(),
         width,
         height
     );
