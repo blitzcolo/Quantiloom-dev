@@ -14,10 +14,13 @@
 
 #pragma once
 
-#include "renderer/VulkanContext.hpp"
 #include "thermal/ThermalStepper.hpp"
 
 #include <memory>
+
+namespace quantiloom::gpu {
+class Device;
+}
 
 namespace quantiloom::rendercore {
 
@@ -25,7 +28,7 @@ class GpuThermalStepper final : public thermal::IThermalStepper {
 public:
     static constexpr u32 kMaxNodes = 32;
 
-    explicit GpuThermalStepper(VulkanContext& context);
+    explicit GpuThermalStepper(gpu::Device& device);
     ~GpuThermalStepper() override;
 
     GpuThermalStepper(const GpuThermalStepper&) = delete;

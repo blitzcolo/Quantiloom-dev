@@ -1,12 +1,12 @@
 #pragma once
 
 #include "core/Types.hpp"
+#include "gpu/GpuTypes.hpp"
 
 #include <memory>
 
-namespace quantiloom {
-class GpuImage;
-class VulkanContext;
+namespace quantiloom::gpu {
+class Device;
 }
 
 namespace quantiloom::rendercore {
@@ -37,14 +37,14 @@ public:
     static constexpr u32 kHistogramBins = 65536;
 
     [[nodiscard]] static Result<std::unique_ptr<GpuDisplayRange>, String>
-    Create(VulkanContext& context);
+    Create(gpu::Device& device);
     ~GpuDisplayRange();
 
     GpuDisplayRange(const GpuDisplayRange&) = delete;
     GpuDisplayRange& operator=(const GpuDisplayRange&) = delete;
 
     [[nodiscard]] Result<DisplayRange, String> Compute(
-        const GpuImage& image, u32 width, u32 height,
+        gpu::TextureRef image, u32 width, u32 height,
         f32 percentileLow, f32 percentileHigh);
 
 private:

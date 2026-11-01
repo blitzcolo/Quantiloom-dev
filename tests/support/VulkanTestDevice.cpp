@@ -1,5 +1,6 @@
 #include "support/VulkanTestDevice.hpp"
 
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/VulkanContext.hpp"
 
 #include <exception>
@@ -10,6 +11,7 @@ namespace quantiloom::testing {
 namespace {
 
 std::unique_ptr<VulkanContext> g_device;
+std::unique_ptr<gpu::Device> g_gpuDevice;
 std::string g_reason;
 bool g_attempted = false;
 
@@ -48,7 +50,15 @@ const std::string& VulkanDeviceUnavailableReason() {
     return g_reason;
 }
 
+gpu::Device* SharedGpuDevice() {
+    if (!g_gpuDevice && SharedVulkanDevice() != nullptr) {
+        g_gpuDevice = gpu::vulkan::AdoptContext(*g_device);
+    }
+    return g_gpuDevice.get();
+}
+
 void ReleaseSharedVulkanDevice() {
+    g_gpuDevice.reset();
     g_device.reset();
 }
 
@@ -60,6 +70,10 @@ void VulkanDeviceTest::SetUp() {
 
 VulkanContext& VulkanDeviceTest::Device() const {
     return *SharedVulkanDevice();
+}
+
+gpu::Device& VulkanDeviceTest::GpuDevice() const {
+    return *SharedGpuDevice();
 }
 
 } // namespace quantiloom::testing

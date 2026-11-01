@@ -46,7 +46,7 @@ class ThermalStepGpuTest : public quantiloom::testing::VulkanDeviceTest {};
 }  // namespace
 
 TEST_F(ThermalStepGpuTest, ALumpedBodyCoolsExponentially) {
-    GpuThermalStepper gpuStepper(Device());
+    GpuThermalStepper gpuStepper(GpuDevice());
     if (!gpuStepper.IsValid()) {
         GTEST_SKIP() << "thermal_step.spv unavailable";
     }
@@ -93,7 +93,7 @@ TEST_F(ThermalStepGpuTest, ALumpedBodyCoolsExponentially) {
 }
 
 TEST_F(ThermalStepGpuTest, AHeldBackFaceProducesTheLinearSteadyProfile) {
-    GpuThermalStepper gpuStepper(Device());
+    GpuThermalStepper gpuStepper(GpuDevice());
     if (!gpuStepper.IsValid()) {
         GTEST_SKIP() << "thermal_step.spv unavailable";
     }
@@ -136,7 +136,7 @@ TEST_F(ThermalStepGpuTest, AHeldBackFaceProducesTheLinearSteadyProfile) {
 }
 
 TEST_F(ThermalStepGpuTest, ASurfaceUnderAColdSkySettlesBelowTheAir) {
-    GpuThermalStepper gpuStepper(Device());
+    GpuThermalStepper gpuStepper(GpuDevice());
     if (!gpuStepper.IsValid()) {
         GTEST_SKIP() << "thermal_step.spv unavailable";
     }
@@ -176,7 +176,7 @@ TEST_F(ThermalStepGpuTest, ASurfaceUnderAColdSkySettlesBelowTheAir) {
 }
 
 TEST_F(ThermalStepGpuTest, ADiurnalRunMatchesTheCpuStepper) {
-    GpuThermalStepper gpuStepper(Device());
+    GpuThermalStepper gpuStepper(GpuDevice());
     if (!gpuStepper.IsValid()) {
         GTEST_SKIP() << "thermal_step.spv unavailable";
     }
@@ -291,7 +291,7 @@ TEST_F(ThermalStepGpuTest, AReflectingNeighbourMatchesTheCpuStepperAcrossBatches
     // state. A low emissivity is what makes that reflected part large enough to
     // see, and four batches are what make a GPU host that forgot to read it
     // back -- or to seed from it -- disagree with one uninterrupted CPU run.
-    GpuThermalStepper gpuStepper(Device());
+    GpuThermalStepper gpuStepper(GpuDevice());
     if (!gpuStepper.IsValid()) {
         GTEST_SKIP() << "thermal_step.spv unavailable";
     }
@@ -379,7 +379,7 @@ TEST_F(ThermalStepGpuTest, AThinMetalSheetMatchesTheCpuStepper) {
     // rounding into a 1.3 K drift over this day with nothing else going on --
     // one element, open sky, no exchange. The tangent shares the matrix, so it
     // is compared on the same footing.
-    GpuThermalStepper gpuStepper(Device());
+    GpuThermalStepper gpuStepper(GpuDevice());
     if (!gpuStepper.IsValid()) {
         GTEST_SKIP() << "thermal_step.spv unavailable";
     }
@@ -438,7 +438,7 @@ TEST_F(ThermalStepGpuTest, AWetSurfaceMatchesTheCpuStepper) {
     // Evaporation is the one term with an exponential in it, so it is the one
     // where f32 and f64 could plausibly part company. Magnus over a day, on a
     // surface wet enough that the latent flux dominates the balance.
-    GpuThermalStepper gpuStepper(Device());
+    GpuThermalStepper gpuStepper(GpuDevice());
     if (!gpuStepper.IsValid()) {
         GTEST_SKIP() << "thermal_step.spv unavailable";
     }
@@ -510,7 +510,7 @@ TEST_F(ThermalStepGpuTest, AWetSurfaceMatchesTheCpuStepper) {
 }
 
 TEST_F(ThermalStepGpuTest, MaterialsWithNoConductivityAreNeverWritten) {
-    GpuThermalStepper gpuStepper(Device());
+    GpuThermalStepper gpuStepper(GpuDevice());
     if (!gpuStepper.IsValid()) {
         GTEST_SKIP() << "thermal_step.spv unavailable";
     }
@@ -547,7 +547,7 @@ TEST_F(ThermalStepGpuTest, MaterialsWithNoConductivityAreNeverWritten) {
 }
 
 TEST_F(ThermalStepGpuTest, StaticResourcesAreReusedAndContentChangesInvalidateThem) {
-    GpuThermalStepper gpuStepper(Device());
+    GpuThermalStepper gpuStepper(GpuDevice());
     if (!gpuStepper.IsValid()) {
         GTEST_SKIP() << "thermal_step.spv unavailable";
     }
@@ -590,7 +590,7 @@ TEST_F(ThermalStepGpuTest, StaticResourcesAreReusedAndContentChangesInvalidateTh
         return state;
     };
     const auto expectColdMatch = [&](const ThermalState& cached) {
-        GpuThermalStepper coldStepper(Device());
+        GpuThermalStepper coldStepper(GpuDevice());
         ASSERT_TRUE(coldStepper.IsValid());
         const ThermalState cold = run(coldStepper);
         EXPECT_EQ(cached.temperature_K, cold.temperature_K);
@@ -647,7 +647,7 @@ TEST_F(ThermalStepGpuTest, StaticResourcesAreReusedAndContentChangesInvalidateTh
 }
 
 TEST_F(ThermalStepGpuTest, MoreThanMaxNodesIsRefused) {
-    GpuThermalStepper gpuStepper(Device());
+    GpuThermalStepper gpuStepper(GpuDevice());
     if (!gpuStepper.IsValid()) {
         GTEST_SKIP() << "thermal_step.spv unavailable";
     }

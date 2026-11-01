@@ -13,6 +13,7 @@
 
 #include "renderer/ExternalRenderContext.hpp"
 #include "core/ResourceLocator.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/ConfigResolve.hpp"
 #include "renderer/ShaderBinary.hpp"
 #include "renderer/SkyDome.hpp"
@@ -27,6 +28,7 @@
 #include "DeferredBufferUploads.hpp"
 #include "AsyncPixelReadback.hpp"
 #include "GpuImage.hpp"
+#include "GpuClahe.hpp"
 #include "GpuDisplayRange.hpp"
 #include "TextureManager.hpp"
 #include "CommandHelper.hpp"
@@ -172,6 +174,11 @@ void NoteTargetFormat(GpuTargetFormat format) {
 struct ExternalRenderContext::Impl {
     // Context adapter (provides VulkanContext interface for external handles)
     std::unique_ptr<VulkanContextAdapter> contextAdapter;
+
+    // The adopted compute RHI view of the adapter's context. Declared
+    // immediately after contextAdapter so it is destroyed right after every
+    // module that holds gpu:: objects and before the adapter itself.
+    std::unique_ptr<gpu::Device> gpuDevice;
 
     // The facade that owns this Impl. Used by internal steps that need a
     // public facade call (the camera scheduler poses the timeline through
@@ -435,29 +442,12 @@ struct ExternalRenderContext::Impl {
     // never-written; without this flag a present would blit undefined
     // contents. Reset wherever the image is recreated.
     bool displayImageValid = false;
-    std::unique_ptr<GpuBuffer> claheHistogramBuffer;  // Per-tile histograms
-    std::unique_ptr<GpuBuffer> claheCdfBuffer;        // Per-tile CDFs
-    std::unique_ptr<GpuBuffer> claheMinMaxBuffer;     // Per-tile min/max for normalization
+    // The CLAHE passes and their tile buffers; owns everything except the
+    // displayImage itself, which this Impl keeps (the blit and capture paths
+    // read it). Null until the first enable creates it.
+    std::unique_ptr<rendercore::GpuClahe> clahe;
     std::unique_ptr<rendercore::GpuDisplayRange> displayRange;
     bool displayRangeInitAttempted = false;
-    VkDescriptorSetLayout claheDescriptorSetLayout = VK_NULL_HANDLE;
-    VkPipelineLayout clahePipelineLayout = VK_NULL_HANDLE;
-    VkDescriptorPool claheDescriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet claheDescriptorSet = VK_NULL_HANDLE;
-    VkPipeline claheHistogramPipeline = VK_NULL_HANDLE;
-    VkPipeline claheCdfPipeline = VK_NULL_HANDLE;
-    VkPipeline claheApplyPipeline = VK_NULL_HANDLE;
-    VkShaderModule claheHistogramShader = VK_NULL_HANDLE;
-    VkShaderModule claheCdfShader = VK_NULL_HANDLE;
-    VkShaderModule claheApplyShader = VK_NULL_HANDLE;
-    bool claheInitialized = false;
-    // Last input view written to claheDescriptorSet binding 0. The view only
-    // changes when the render target is recreated or the camera chain starts
-    // feeding CLAHE -- moments that drain the device first -- so the write is
-    // skipped while it is current: vkUpdateDescriptorSets on a set a submitted
-    // frame may still be executing is a VUID-03047 violation, and every frame
-    // used to take it for a view that had not moved.
-    VkImageView claheBoundInputView = VK_NULL_HANDLE;
 
     // Viewport pick (1x1 inline ray-query dispatch; see Pick())
     std::unique_ptr<GpuBuffer> pickOutputBuffer;  // host-visible, one PickResultGpu
@@ -684,53 +674,12 @@ struct ExternalRenderContext::Impl {
         depthAovImage.reset();
         pixelReadbackBuffer.reset();
 
-        // Cleanup CLAHE resources
+        // Cleanup CLAHE resources (the module owns its pipelines and buffers;
+        // displayImage above is this Impl's and goes with the other images).
         displayRange.reset();
+        clahe.reset();
         displayImage.reset();
         displayImageValid = false;
-        claheBoundInputView = VK_NULL_HANDLE;
-        claheHistogramBuffer.reset();
-        claheCdfBuffer.reset();
-        claheMinMaxBuffer.reset();
-        if (device != VK_NULL_HANDLE) {
-            if (claheHistogramPipeline != VK_NULL_HANDLE) {
-                vkDestroyPipeline(device, claheHistogramPipeline, nullptr);
-                claheHistogramPipeline = VK_NULL_HANDLE;
-            }
-            if (claheCdfPipeline != VK_NULL_HANDLE) {
-                vkDestroyPipeline(device, claheCdfPipeline, nullptr);
-                claheCdfPipeline = VK_NULL_HANDLE;
-            }
-            if (claheApplyPipeline != VK_NULL_HANDLE) {
-                vkDestroyPipeline(device, claheApplyPipeline, nullptr);
-                claheApplyPipeline = VK_NULL_HANDLE;
-            }
-            if (claheHistogramShader != VK_NULL_HANDLE) {
-                vkDestroyShaderModule(device, claheHistogramShader, nullptr);
-                claheHistogramShader = VK_NULL_HANDLE;
-            }
-            if (claheCdfShader != VK_NULL_HANDLE) {
-                vkDestroyShaderModule(device, claheCdfShader, nullptr);
-                claheCdfShader = VK_NULL_HANDLE;
-            }
-            if (claheApplyShader != VK_NULL_HANDLE) {
-                vkDestroyShaderModule(device, claheApplyShader, nullptr);
-                claheApplyShader = VK_NULL_HANDLE;
-            }
-            if (claheDescriptorPool != VK_NULL_HANDLE) {
-                vkDestroyDescriptorPool(device, claheDescriptorPool, nullptr);
-                claheDescriptorPool = VK_NULL_HANDLE;
-            }
-            if (clahePipelineLayout != VK_NULL_HANDLE) {
-                vkDestroyPipelineLayout(device, clahePipelineLayout, nullptr);
-                clahePipelineLayout = VK_NULL_HANDLE;
-            }
-            if (claheDescriptorSetLayout != VK_NULL_HANDLE) {
-                vkDestroyDescriptorSetLayout(device, claheDescriptorSetLayout, nullptr);
-                claheDescriptorSetLayout = VK_NULL_HANDLE;
-            }
-        }
-        claheInitialized = false;
 
         // Destroy pick resources
         pickOutputBuffer.reset();
@@ -942,7 +891,7 @@ struct ExternalRenderContext::Impl {
     void CreateFallbackEnvMap();
     void CreatePipeline();
 
-    void CreateCLAHEPipeline();
+    void CreateClaheDisplayImage();
     void ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height);
     void ComputeImageMinMax(f32& outMin, f32& outMax);
 
@@ -1016,9 +965,9 @@ struct ExternalRenderContext::Impl {
     /// The camera display product once an acquisition has completed, else
     /// null (the image exists before the first acquisition but holds no
     /// measurement).
-    [[nodiscard]] const GpuImage* CameraDisplayImage() const {
+    [[nodiscard]] gpu::TextureRef CameraDisplayImage() const {
         if (!cameraConfig.enabled || !cameraGpuPipeline || !cameraCaptureCompleted)
-            return nullptr;
+            return {};
         return cameraGpuPipeline->GetOutputs().display;
     }
 
@@ -1034,22 +983,23 @@ struct ExternalRenderContext::Impl {
             return false;
         const auto outputs = cameraGpuPipeline->GetOutputs();
         return cameraConfig.device.detector == camera::DetectorKind::Thermal
-                   ? outputs.agcSource != nullptr
-                   : outputs.corrected != nullptr;
+                   ? outputs.agcSource.IsValid()
+                   : outputs.corrected.IsValid();
     }
 
     /// The image CLAHE reads: the camera's agcSource (infrared camera -- the
     /// pre-AGC scalar the camera chain would have tone-mapped), the corrected
     /// product for a visible camera, else the raw accumulation.
-    [[nodiscard]] const GpuImage* ClaheInputImage() const {
+    [[nodiscard]] gpu::TextureRef ClaheInputImage() const {
         if (cameraConfig.enabled && cameraGpuPipeline) {
             const auto outputs = cameraGpuPipeline->GetOutputs();
-            if (cameraConfig.device.detector == camera::DetectorKind::Thermal && outputs.agcSource)
+            if (cameraConfig.device.detector == camera::DetectorKind::Thermal &&
+                outputs.agcSource.IsValid())
                 return outputs.agcSource;
-            if (outputs.corrected)
+            if (outputs.corrected.IsValid())
                 return outputs.corrected;
         }
-        return outputImage.get();
+        return gpu::vulkan::Ref(*outputImage);
     }
 
     /// The camera config asked for CLAHE as the persistent infrared tone: the
@@ -1074,8 +1024,8 @@ struct ExternalRenderContext::Impl {
     }
 
     /// (Re)create the CLAHE display image at the current ClaheTarget extent
-    /// and rebind it. Called when CLAHE initializes, the render extent
-    /// changes, or the camera configuration changes the input size.
+    /// and bind the CLAHE set to it. Called when CLAHE initializes, the render
+    /// extent changes, or the camera configuration changes the input size.
     void RecreateClaheDisplayImage();
 
     /// Copy @p source onto the target image and leave it in @p targetFinalLayout.
@@ -1259,10 +1209,14 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     adapterHandles.allocator = FromGpuHandle<VmaAllocator>(params.device.vmaAllocator);
 
     try {
+        // Any module holding gpu:: objects must release the adopted device
+        // before the adapter it names is replaced.
+        gpuDevice.reset();
         contextAdapter = std::make_unique<VulkanContextAdapter>(adapterHandles, true);
     } catch (const std::exception& e) {
         return Result<void, String>::Err(String("Failed to create VulkanContextAdapter: ") + e.what());
     }
+    gpuDevice = gpu::vulkan::AdoptContext(*contextAdapter);
 
     perfLogger = std::make_unique<PerformanceLogger>(*contextAdapter);
     cameraTracePerf = std::make_unique<PerformanceLogger>(*contextAdapter);
@@ -2154,7 +2108,7 @@ void ExternalRenderContext::RenderFrame(
         // Only update every N frames to reduce readback overhead, but always update
         // on frame 1 (after first render) and whenever cache is invalid
         constexpr u32 minMaxUpdateInterval = 10; // Update every 10 frames
-        if (m_impl->claheInitialized &&
+        if (m_impl->clahe &&
             (m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
             m_impl->accumulatedSamples > 0 &&
             (!m_impl->hasCachedMinMax ||
@@ -2258,7 +2212,7 @@ void ExternalRenderContext::RenderFrame(
         // at the render extent, before the magnifying blit, so a reduced scale
         // makes them cheaper too -- and CLAHE never sees an upsampled image.
         if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
-            m_impl->claheInitialized && m_impl->displayImage && m_impl->ClaheInputReady()) {
+            m_impl->clahe && m_impl->displayImage && m_impl->ClaheInputReady()) {
             const auto claheExtent = m_impl->ClaheInputExtent();
             m_impl->ExecuteCLAHE(cmd, claheExtent.width, claheExtent.height);
         }
@@ -2296,13 +2250,14 @@ ExternalRenderContext::Impl::CurrentDisplaySource() const {
     // tone) -> camera display -> raw accumulation. The camera product sits at
     // the physical sensor extent, which BlitToTarget magnifies to the target
     // like any other source.
-    if (displayImage && claheInitialized && displayImageValid && ClaheInputReady() &&
+    if (displayImage && clahe && displayImageValid && ClaheInputReady() &&
         (displayParams.enabled || CameraClahePersistent())) {
         const auto extent = ClaheInputExtent();
         return {displayImage->GetImage(), extent.width, extent.height};
     }
-    if (const GpuImage* cameraDisplay = CameraDisplayImage()) {
-        return {cameraDisplay->GetImage(), cameraConfig.optics.sensorWidthPx,
+    const gpu::TextureRef cameraDisplay = CameraDisplayImage();
+    if (cameraDisplay.IsValid()) {
+        return {gpu::vulkan::NativeImage(cameraDisplay), cameraConfig.optics.sensorWidthPx,
                 cameraConfig.optics.sensorHeightPx};
     }
     return {outputImage->GetImage(), width, height};
@@ -2500,7 +2455,7 @@ bool ExternalRenderContext::ReprocessAccumulated(
         return false;
     }
     const bool claheWillRun = (m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
-                              m_impl->claheInitialized && m_impl->ClaheInputReady();
+                              m_impl->clahe && m_impl->ClaheInputReady();
     if (!claheWillRun && !m_impl->DisplaySourceReady(m_impl->CurrentDisplaySource())) {
         return false;
     }
@@ -2521,7 +2476,7 @@ bool ExternalRenderContext::ReprocessAccumulated(
     // prompted the reprocess. Only a cache that has never been filled needs
     // computing: CLAHE enabled for the first time after the trace stopped.
     if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
-        m_impl->claheInitialized && !m_impl->hasCachedMinMax && m_impl->ClaheInputReady()) {
+        m_impl->clahe && !m_impl->hasCachedMinMax && m_impl->ClaheInputReady()) {
         m_impl->ComputeImageMinMax(m_impl->cachedImageMin, m_impl->cachedImageMax);
         m_impl->hasCachedMinMax = true;
     }
@@ -2538,7 +2493,7 @@ bool ExternalRenderContext::ReprocessAccumulated(
     }
 
     if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
-        m_impl->claheInitialized && m_impl->displayImage && m_impl->ClaheInputReady()) {
+        m_impl->clahe && m_impl->displayImage && m_impl->ClaheInputReady()) {
         const auto claheExtent = m_impl->ClaheInputExtent();
         m_impl->ExecuteCLAHE(cmd, claheExtent.width, claheExtent.height);
     }
@@ -2746,7 +2701,7 @@ void ExternalRenderContext::Impl::ApplyInternalExtent(u32 renderW, u32 renderH) 
     // Recreate CLAHE display image if initialized. Waits on the device, which
     // ApplyInternalExtent already did above; the extent follows the CLAHE
     // input (physical sensor array when the camera is enabled).
-    if (claheInitialized && displayImage) {
+    if (clahe && displayImage) {
         RecreateClaheDisplayImage();
     }
 
@@ -4463,8 +4418,14 @@ void ExternalRenderContext::SetDisplayEnhancementParams(
     }
 
     // Initialize the pipeline if enabling for the first time
-    if (params.enabled && !wasEnabled && !m_impl->claheInitialized) {
-        m_impl->CreateCLAHEPipeline();
+    if (params.enabled && !wasEnabled && !m_impl->clahe) {
+        auto created = rendercore::GpuClahe::Create(*m_impl->gpuDevice);
+        if (created) {
+            m_impl->clahe = std::move(created.value());
+            m_impl->CreateClaheDisplayImage();
+        } else {
+            QL_LOG_WARN("{}", created.error());
+        }
     }
 
     QL_LOG_DEBUG("Display enhancement: enabled={}, tone={}, palette={}, clipLimit={}, "
@@ -4662,8 +4623,9 @@ ExternalRenderContext::TryUpdateCameraReadoutConfig(const camera::CameraConfig& 
         m_impl->FlushPendingGpuWork();
         Result<void, String> status = Result<void, String>::Ok();
         CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+            auto list = gpu::vulkan::Wrap(cmd);
             status = m_impl->cameraGpuPipeline->RecordReadoutReprocess(
-                cmd, m_impl->EffectiveCameraConfig());
+                list, m_impl->EffectiveCameraConfig());
         });
         if (!status) {
             m_impl->cameraConfig = std::move(previous);
@@ -4797,7 +4759,8 @@ Result<void, String> ExternalRenderContext::CheckpointCameraHistory() {
             "camera history checkpoint was not recorded");
     m_impl->FlushPendingGpuWork();
     CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-        recorded = m_impl->cameraGpuPipeline->RecordStateCheckpoint(cmd);
+        auto list = gpu::vulkan::Wrap(cmd);
+        recorded = m_impl->cameraGpuPipeline->RecordStateCheckpoint(list);
     });
     if (!recorded)
         return Result<void, String>::Err(recorded.error());
@@ -4835,7 +4798,8 @@ Result<void, String> ExternalRenderContext::RestoreCameraHistoryCheckpoint() {
     Result<void, String> restored = Result<void, String>::Ok();
     m_impl->FlushPendingGpuWork();
     CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-        restored = m_impl->cameraGpuPipeline->RestoreStateCheckpoint(record.gpu, cmd);
+        auto list = gpu::vulkan::Wrap(cmd);
+        restored = m_impl->cameraGpuPipeline->RestoreStateCheckpoint(record.gpu, list);
     });
     if (!restored)
         return restored;
@@ -5071,11 +5035,12 @@ Result<camera::CameraOutput, String> ExternalRenderContext::CaptureCameraProduct
                              : 1u;
     const auto outputs = m_impl->cameraGpuPipeline->GetOutputs();
 
-    const auto readProductImage = [&](const GpuImage* source) -> Result<Image, String> {
-        if (!source)
+    const auto readProductImage = [&](gpu::TextureRef source) -> Result<Image, String> {
+        if (!source.IsValid())
             return Result<Image, String>::Err("GPU camera product image is unavailable");
         const auto rgba =
-            CommandHelper::ReadbackImage(*m_impl->contextAdapter, source->GetImage(),
+            CommandHelper::ReadbackImage(*m_impl->contextAdapter,
+                                         gpu::vulkan::NativeImage(source),
                                          VK_FORMAT_R32G32B32A32_SFLOAT, width, height);
         if (rgba.size() != static_cast<size_t>(width) * height * 4u)
             return Result<Image, String>::Err("GPU camera product readback has the wrong size");
@@ -5121,7 +5086,7 @@ Result<camera::CameraOutput, String> ExternalRenderContext::CaptureCameraProduct
         return signal;
     };
     const auto makeProduct =
-        [&](const GpuImage* source,
+        [&](gpu::TextureRef source,
             camera::SignalDescriptor signal) -> Result<camera::CameraProduct, String> {
         auto image = readProductImage(source);
         if (!image)
@@ -5180,9 +5145,10 @@ Result<camera::CameraOutput, String> ExternalRenderContext::CaptureCameraProduct
         // In the persistent-Clahe mode the on-screen display is the CLAHE
         // pipeline's output, not the camera chain's grey scalar; export what
         // the viewer sees.
-        const GpuImage* displaySource = (m_impl->CameraClahePersistent() && m_impl->displayImage)
-                                            ? m_impl->displayImage.get()
-                                            : outputs.display;
+        const gpu::TextureRef displaySource =
+            (m_impl->CameraClahePersistent() && m_impl->displayImage)
+                ? gpu::vulkan::Ref(*m_impl->displayImage)
+                : outputs.display;
         auto display =
             makeProduct(displaySource, descriptor(camera::SignalKind::DisplaySrgb, "encoded sRGB"));
         if (!display)
@@ -5242,21 +5208,22 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
     // -> outputImage. Each source carries its own extent: the CLAHE image
     // sits at the CLAHE input extent and the camera product at the physical
     // sensor array extent, which need not match the render extent.
-    const GpuImage* sourceImage = m_impl->outputImage.get();
+    gpu::TextureRef sourceImage = gpu::vulkan::Ref(*m_impl->outputImage);
     u32 sourceWidth = m_impl->width;
     u32 sourceHeight = m_impl->height;
 
     // Priority 1: CLAHE output (includes all effects)
     if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
-        m_impl->claheInitialized && m_impl->displayImage && m_impl->ClaheInputReady()) {
-        sourceImage = m_impl->displayImage.get();
+        m_impl->clahe && m_impl->displayImage && m_impl->ClaheInputReady()) {
+        sourceImage = gpu::vulkan::Ref(*m_impl->displayImage);
         const auto extent = m_impl->ClaheInputExtent();
         sourceWidth = extent.width;
         sourceHeight = extent.height;
         QL_LOG_DEBUG("CaptureDisplayImage: Using displayImage (CLAHE enabled)");
     }
     // Priority 2: Camera display product (physical sensor extent)
-    else if (const GpuImage* camera = m_impl->CameraDisplayImage()) {
+    else if (const gpu::TextureRef camera = m_impl->CameraDisplayImage();
+             camera.IsValid()) {
         sourceImage = camera;
         sourceWidth = m_impl->cameraConfig.optics.sensorWidthPx;
         sourceHeight = m_impl->cameraConfig.optics.sensorHeightPx;
@@ -5270,7 +5237,7 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
     // Read back the appropriate image using CommandHelper
     std::vector<f32> pixels = CommandHelper::ReadbackImage(
         *m_impl->contextAdapter,
-        sourceImage->GetImage(),
+        gpu::vulkan::NativeImage(sourceImage),
         VK_FORMAT_R32G32B32A32_SFLOAT,
         sourceWidth,
         sourceHeight
@@ -5773,7 +5740,7 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
                                         : atmosHeaderBuffer.get(),
         cameraBaselineAtmosDataBuffer ? cameraBaselineAtmosDataBuffer.get()
                                       : atmosDataBuffer.get());
-    auto gpu = rendercore::GpuCameraPipeline::Create(*contextAdapter, physicalW, physicalH);
+    auto gpu = rendercore::GpuCameraPipeline::Create(*gpuDevice, physicalW, physicalH);
     if (!gpu)
         return Result<void, String>::Err(gpu.error());
     if (auto configured = gpu.value()->Configure(cameraConfig); !configured)
@@ -6056,7 +6023,8 @@ ExternalRenderContext::Impl::RecordCameraDisplayReprocess(VkCommandBuffer cmd) {
     if (!cameraGpuPipeline || cmd == VK_NULL_HANDLE)
         return Result<void, String>::Err("camera display reprocess needs the GPU camera pipeline");
     pendingUploads.Record(cmd);
-    return cameraGpuPipeline->RecordDisplayReprocess(cmd, EffectiveCameraConfig());
+    auto list = gpu::vulkan::Wrap(cmd);
+    return cameraGpuPipeline->RecordDisplayReprocess(list, EffectiveCameraConfig());
 }
 
 Result<void, String>
@@ -6068,6 +6036,7 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
     // by EnsureCameraResources below is caught by the second Record before
     // the strata loop.
     pendingUploads.Record(cmd);
+    auto gpuList = gpu::vulkan::Wrap(cmd);
     if (auto ready = EnsureCameraResources(); !ready)
         return ready;
     // Settle the previous committed tick's AE/AWB feedback first. The
@@ -6284,22 +6253,26 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
     rendercore::DynamicExposureInput dynamic;
     const auto& readoutConfig = captureConfig.readout;
     const bool rolling = readoutConfig.shutter == camera::ShutterKind::Rolling;
-    dynamic.strataRate = cameraMeasurementImage.get();
-    dynamic.strataDepth = cameraMeasurementDepthImage.get();
+    dynamic.strataRate = gpu::vulkan::Ref(*cameraMeasurementImage);
+    dynamic.strataDepth = gpu::vulkan::Ref(*cameraMeasurementDepthImage);
     dynamic.layerCameras = layerCameras.data();
     dynamic.strataCount = strataCount;
     dynamic.strataLayers = rendercore::kCameraTimeStrataMax;
     dynamic.firstRowMidSeconds = cameraAcquisitionTimeSeconds;
     dynamic.exposureSeconds = readoutConfig.exposureSeconds;
     dynamic.rowDelaySeconds = rolling ? readoutConfig.rowDelaySeconds : 0.0;
-    const rendercore::GpuCameraPipeline::TimingQueries timing{cameraTimingPool, 0u};
+    const rendercore::GpuCameraPipeline::TimingQueries timing{
+        gpu::vulkan::Ref(cameraTimingPool,
+                         rendercore::GpuCameraPipeline::kTimingQueryCount),
+        0u};
     const auto readout =
         fastRgb
             ? cameraGpuPipeline->RecordFastRgbMeasurement(
-                  cmd, *cameraBaselineImage, cameraAcquisitionIndex, cameraAcquisitionTimeSeconds)
-            : cameraGpuPipeline->RecordMeasurement(cmd, *cameraMeasurementImage,
-                                                   cameraAcquisitionIndex,
-                                                   cameraAcquisitionTimeSeconds, timing, dynamic);
+                  gpuList, gpu::vulkan::Ref(*cameraBaselineImage),
+                  cameraAcquisitionIndex, cameraAcquisitionTimeSeconds)
+            : cameraGpuPipeline->RecordMeasurement(
+                  gpuList, gpu::vulkan::Ref(*cameraMeasurementImage),
+                  cameraAcquisitionIndex, cameraAcquisitionTimeSeconds, timing, dynamic);
     if (cameraFullPerf)
         cameraFullPerf->EndFrame(cmd);
     if (!readout)
@@ -6326,8 +6299,8 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
         copy.size = 4u * sizeof(u32);
         vkCmdCopyBuffer(cmd, cameraDynamicCounterBuffer->GetHandle(),
                         cameraDynamicReadback->GetHandle(), 1, &copy);
-        cameraGpuPipeline->RecordDynamicCounterCopy(cmd, cameraDynamicReadback->GetHandle(),
-                                                    4u * sizeof(u32));
+        cameraGpuPipeline->RecordDynamicCounterCopy(
+            gpuList, gpu::vulkan::Ref(*cameraDynamicReadback), 4u * sizeof(u32));
         VkMemoryBarrier hostRead{};
         hostRead.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         hostRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -6495,214 +6468,12 @@ void ExternalRenderContext::Impl::CreatePickPipeline() {
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
 }
 
-void ExternalRenderContext::Impl::CreateCLAHEPipeline() {
-    if (claheInitialized) return;
-
-    QL_LOG_INFO("Creating CLAHE compute pipeline...");
-
-    auto device = this->device;
-    auto allocator = contextAdapter->GetAllocator();
-
-    // Helper function to load shader file
-    auto loadShaderFile = [](const String& path) -> std::vector<u32> {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) {
-            return {};
-        }
-        size_t fileSize = static_cast<size_t>(file.tellg());
-        if (fileSize == 0 || fileSize % 4 != 0) {
-            return {};
-        }
-        std::vector<u32> code(fileSize / 4);
-        file.seekg(0);
-        file.read(reinterpret_cast<char*>(code.data()), fileSize);
-        return code;
-    };
-
-    // The three shaders must come from one directory: a histogram from the
-    // SDK install beside a cdf from the source tree may not be the same
-    // build. Search by candidate base, not by file.
-    std::vector<u32> histogramCode, cdfCode, applyCode;
-    for (const auto& basePath : rendercore::SpirvSearchPaths("clahe_histogram.spv")) {
-        // Convert path to string and replace "histogram" with cdf/apply
-        String histPath = basePath.string();
-        String cdfPath = histPath;
-        String applyPath = histPath;
-        size_t pos = histPath.find("histogram");
-        if (pos != String::npos) {
-            cdfPath.replace(pos, 9, "cdf");
-            applyPath.replace(pos, 9, "apply");
-        }
-
-        histogramCode = loadShaderFile(histPath);
-        if (!histogramCode.empty()) {
-            cdfCode = loadShaderFile(cdfPath);
-            applyCode = loadShaderFile(applyPath);
-            if (!cdfCode.empty() && !applyCode.empty()) {
-                QL_LOG_DEBUG("CLAHE: Loaded shaders from {}", histPath);
-                break;
-            }
-        }
-    }
-
-    if (histogramCode.empty() || cdfCode.empty() || applyCode.empty()) {
-        QL_LOG_WARN("CLAHE: Could not load shader files, CLAHE disabled");
-        return;
-    }
-
-    // Create shader modules
-    auto createShaderModule = [device](const std::vector<u32>& code) -> VkShaderModule {
-        VkShaderModuleCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        createInfo.codeSize = code.size() * sizeof(u32);
-        createInfo.pCode = code.data();
-        VkShaderModule module;
-        if (vkCreateShaderModule(device, &createInfo, nullptr, &module) != VK_SUCCESS) {
-            return VK_NULL_HANDLE;
-        }
-        return module;
-    };
-
-    claheHistogramShader = createShaderModule(histogramCode);
-    claheCdfShader = createShaderModule(cdfCode);
-    claheApplyShader = createShaderModule(applyCode);
-
-    if (claheHistogramShader == VK_NULL_HANDLE ||
-        claheCdfShader == VK_NULL_HANDLE ||
-        claheApplyShader == VK_NULL_HANDLE) {
-        QL_LOG_WARN("CLAHE: Failed to create shader modules");
-        return;
-    }
-
-    // Create descriptor set layout
-    // binding 0: inputImage (storage image)
-    // binding 1: outputImage (storage image)
-    // binding 2: histogramBuffer (storage buffer)
-    // binding 3: cdfBuffer (storage buffer)
-    // binding 4: minMaxBuffer (storage buffer)
-    std::vector<VkDescriptorSetLayoutBinding> bindings(5);
-
-    bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-    bindings[1].binding = 1;
-    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-    bindings[2].binding = 2;
-    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[2].descriptorCount = 1;
-    bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-    bindings[3].binding = 3;
-    bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[3].descriptorCount = 1;
-    bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-    bindings[4].binding = 4;
-    bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[4].descriptorCount = 1;
-    bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-    VkDescriptorSetLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = static_cast<u32>(bindings.size());
-    layoutInfo.pBindings = bindings.data();
-
-    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &claheDescriptorSetLayout) != VK_SUCCESS) {
-        QL_LOG_WARN("CLAHE: Failed to create descriptor set layout");
-        return;
-    }
-
-    // Create pipeline layout with push constants
-    // Push constants match CLAHEPushConstants in shader
-    struct CLAHEPushConstants {
-        u32 imageWidth;
-        u32 imageHeight;
-        u32 tileCountX;
-        u32 tileCountY;
-        f32 clipLimit;
-        u32 luminanceOnly;
-        f32 inputMin;
-        f32 inputMax;
-        u32 passIndex;
-        u32 padding[3];
-    };
-
-    VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushConstantRange.offset = 0;
-    pushConstantRange.size = sizeof(CLAHEPushConstants);
-
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &claheDescriptorSetLayout;
-    pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
-
-    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &clahePipelineLayout) != VK_SUCCESS) {
-        QL_LOG_WARN("CLAHE: Failed to create pipeline layout");
-        return;
-    }
-
-    // Create compute pipelines for each pass
-    auto createComputePipeline = [device, this](VkShaderModule shader) -> VkPipeline {
-        VkPipelineShaderStageCreateInfo stageInfo{};
-        stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        stageInfo.module = shader;
-        stageInfo.pName = "main";
-
-        VkComputePipelineCreateInfo pipelineInfo{};
-        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-        pipelineInfo.stage = stageInfo;
-        pipelineInfo.layout = clahePipelineLayout;
-
-        VkPipeline pipeline;
-        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
-            return VK_NULL_HANDLE;
-        }
-        return pipeline;
-    };
-
-    claheHistogramPipeline = createComputePipeline(claheHistogramShader);
-    claheCdfPipeline = createComputePipeline(claheCdfShader);
-    claheApplyPipeline = createComputePipeline(claheApplyShader);
-
-    if (claheHistogramPipeline == VK_NULL_HANDLE ||
-        claheCdfPipeline == VK_NULL_HANDLE ||
-        claheApplyPipeline == VK_NULL_HANDLE) {
-        QL_LOG_WARN("CLAHE: Failed to create compute pipelines");
-        return;
-    }
-
-    // Create descriptor pool
-    std::vector<VkDescriptorPoolSize> poolSizes = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3}
-    };
-
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = static_cast<u32>(poolSizes.size());
-    poolInfo.pPoolSizes = poolSizes.data();
-    poolInfo.maxSets = 1;
-
-    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &claheDescriptorPool) != VK_SUCCESS) {
-        QL_LOG_WARN("CLAHE: Failed to create descriptor pool");
-        return;
-    }
-
-    // Create display image (same format as outputImage) at the CLAHE input
-    // extent: the physical sensor array when the camera is enabled, else the
-    // render extent.
+void ExternalRenderContext::Impl::CreateClaheDisplayImage() {
+    // The display image is this Impl's (the blit and capture paths read it),
+    // so it is created here and only bound into the CLAHE set.
     const auto claheExtent = ClaheInputExtent();
     displayImage = std::make_unique<GpuImage>(
-        allocator,
+        contextAdapter->GetAllocator(),
         device,
         claheExtent.width, claheExtent.height,
         VK_FORMAT_R32G32B32A32_SFLOAT,
@@ -6718,113 +6489,14 @@ void ExternalRenderContext::Impl::CreateCLAHEPipeline() {
         VK_IMAGE_LAYOUT_GENERAL
     );
 
-    // Create buffers for CLAHE
-    // Max 64x64 tiles, 256 bins per tile
-    constexpr u32 maxTiles = 64 * 64;
-    constexpr u32 histogramBins = 256;
-
-    claheHistogramBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        maxTiles * histogramBins * sizeof(u32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
-
-    claheCdfBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        maxTiles * histogramBins * sizeof(f32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
-
-    claheMinMaxBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        maxTiles * 2 * sizeof(f32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
-
-    // Allocate descriptor set
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = claheDescriptorPool;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &claheDescriptorSetLayout;
-
-    if (vkAllocateDescriptorSets(device, &allocInfo, &claheDescriptorSet) != VK_SUCCESS) {
-        QL_LOG_WARN("CLAHE: Failed to allocate descriptor set");
-        return;
-    }
-
-    // Update descriptor set
-    VkDescriptorImageInfo inputImageInfo{};
-    inputImageInfo.imageView = outputImage->GetView();
-    inputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-    VkDescriptorImageInfo outputImageInfo{};
-    outputImageInfo.imageView = displayImage->GetView();
-    outputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-    VkDescriptorBufferInfo histogramBufferInfo{};
-    histogramBufferInfo.buffer = claheHistogramBuffer->GetHandle();
-    histogramBufferInfo.offset = 0;
-    histogramBufferInfo.range = VK_WHOLE_SIZE;
-
-    VkDescriptorBufferInfo cdfBufferInfo{};
-    cdfBufferInfo.buffer = claheCdfBuffer->GetHandle();
-    cdfBufferInfo.offset = 0;
-    cdfBufferInfo.range = VK_WHOLE_SIZE;
-
-    VkDescriptorBufferInfo minMaxBufferInfo{};
-    minMaxBufferInfo.buffer = claheMinMaxBuffer->GetHandle();
-    minMaxBufferInfo.offset = 0;
-    minMaxBufferInfo.range = VK_WHOLE_SIZE;
-
-    std::vector<VkWriteDescriptorSet> writes(5);
-
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = claheDescriptorSet;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    writes[0].pImageInfo = &inputImageInfo;
-
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = claheDescriptorSet;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorCount = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    writes[1].pImageInfo = &outputImageInfo;
-
-    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[2].dstSet = claheDescriptorSet;
-    writes[2].dstBinding = 2;
-    writes[2].descriptorCount = 1;
-    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[2].pBufferInfo = &histogramBufferInfo;
-
-    writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[3].dstSet = claheDescriptorSet;
-    writes[3].dstBinding = 3;
-    writes[3].descriptorCount = 1;
-    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[3].pBufferInfo = &cdfBufferInfo;
-
-    writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[4].dstSet = claheDescriptorSet;
-    writes[4].dstBinding = 4;
-    writes[4].descriptorCount = 1;
-    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[4].pBufferInfo = &minMaxBufferInfo;
-
-    vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
-
-    claheInitialized = true;
-    QL_LOG_INFO("CLAHE: Compute pipeline created successfully");
+    // At creation the raw accumulation is the input, as it was when the
+    // pipeline lived in this Impl; Record() rewrites binding 0 on the first
+    // run anyway (the module's bound-input view starts null).
+    clahe->BindAll(gpu::vulkan::Ref(*outputImage), gpu::vulkan::Ref(*displayImage));
 }
 
 void ExternalRenderContext::Impl::RecreateClaheDisplayImage() {
-    if (!claheInitialized || claheDescriptorSet == VK_NULL_HANDLE || !contextAdapter) {
+    if (!clahe || !contextAdapter) {
         return;
     }
     // Replacing a descriptor-backed image a submitted frame may still read;
@@ -6846,29 +6518,17 @@ void ExternalRenderContext::Impl::RecreateClaheDisplayImage() {
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_GENERAL
     );
-
-    VkDescriptorImageInfo outputImageInfo{};
-    outputImageInfo.imageView = displayImage->GetView();
-    outputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = claheDescriptorSet;
-    write.dstBinding = 1;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    write.pImageInfo = &outputImageInfo;
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    clahe->SetOutput(gpu::vulkan::Ref(*displayImage));
     // A fresh allocation holds nothing worth presenting until a run writes it.
     displayImageValid = false;
 }
 
 void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
-    const GpuImage* input = ClaheInputImage();
+    const gpu::TextureRef input = ClaheInputImage();
     const auto extent = ClaheInputExtent();
     if (!displayRangeInitAttempted) {
         displayRangeInitAttempted = true;
-        auto created = rendercore::GpuDisplayRange::Create(*contextAdapter);
+        auto created = rendercore::GpuDisplayRange::Create(*gpuDevice);
         if (created) {
             displayRange = std::move(created.value());
         } else {
@@ -6878,7 +6538,7 @@ void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
     }
     if (displayRange) {
         auto range =
-            displayRange->Compute(*input, extent.width, extent.height, displayParams.percentileLow,
+            displayRange->Compute(input, extent.width, extent.height, displayParams.percentileLow,
                                   displayParams.percentileHigh);
         if (range) {
             outMin = range.value().min;
@@ -6892,7 +6552,7 @@ void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
     // the camera is enabled, else the raw accumulation.
     std::vector<f32> pixels = CommandHelper::ReadbackImage(
         *contextAdapter,
-        input->GetImage(),
+        gpu::vulkan::NativeImage(input),
         VK_FORMAT_R32G32B32A32_SFLOAT,
         extent.width,
         extent.height
@@ -6998,212 +6658,16 @@ void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
 }
 
 void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height) {
-    if (!claheInitialized) return;
+    if (!clahe) return;
 
     // The camera's agcSource product (infrared) or corrected product
     // (visible) feeds CLAHE when the camera is enabled; otherwise the raw
     // accumulation. Callers only run CLAHE once a camera acquisition has
     // completed, so the input product is present whenever the camera is.
-    // Update descriptor set binding 0 (input image) -- only when the view
-    // actually moved; see claheBoundInputView above.
-    VkImageView inputView = ClaheInputImage()->GetView();
-    if (inputView != claheBoundInputView) {
-        VkDescriptorImageInfo inputImageInfo{};
-        inputImageInfo.imageView = inputView;
-        inputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        inputImageInfo.sampler = VK_NULL_HANDLE;
-
-        VkWriteDescriptorSet inputWrite{};
-        inputWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        inputWrite.dstSet = claheDescriptorSet;
-        inputWrite.dstBinding = 0;
-        inputWrite.dstArrayElement = 0;
-        inputWrite.descriptorCount = 1;
-        inputWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        inputWrite.pImageInfo = &inputImageInfo;
-
-        vkUpdateDescriptorSets(device, 1, &inputWrite, 0, nullptr);
-        claheBoundInputView = inputView;
-    }
-
-    // tileSize from UI represents tile grid dimension (e.g., 8 = 8x8 grid)
-    // NOT pixels per tile
-    u32 tileCountX = static_cast<u32>(displayParams.tileSize);
-    u32 tileCountY = static_cast<u32>(displayParams.tileSize);
-
-    // Clamp to max tiles (matching buffer allocation)
-    tileCountX = std::min(tileCountX, 64u);
-    tileCountY = std::min(tileCountY, 64u);
-
-    // Ensure at least 1 tile
-    tileCountX = std::max(tileCountX, 1u);
-    tileCountY = std::max(tileCountY, 1u);
-
-    //QL_LOG_DEBUG("CLAHE: Executing with {}x{} tiles on {}x{} image",
-    //             tileCountX, tileCountY, width, height);
-
-    // Use cached min/max values from previous frame
-    // This avoids GPU sync issues during command buffer recording
-    // First frame uses default values until cache is populated
-    f32 inputMin = cachedImageMin;
-    f32 inputMax = cachedImageMax;
-
-    // Push constants structure (must match shader)
-    struct CLAHEPushConstants {
-        u32 imageWidth;
-        u32 imageHeight;
-        u32 tileCountX;
-        u32 tileCountY;
-        f32 clipLimit;
-        u32 luminanceOnly;
-        f32 inputMin;
-        f32 inputMax;
-        u32 passIndex;
-        u32 toneMode;
-        u32 palette;
-        u32 padding;
-    };
-
-    CLAHEPushConstants pushConstants{};
-    pushConstants.imageWidth = width;
-    pushConstants.imageHeight = height;
-    pushConstants.tileCountX = tileCountX;
-    pushConstants.tileCountY = tileCountY;
-    pushConstants.clipLimit = displayParams.clipLimit;
-    pushConstants.luminanceOnly = displayParams.luminanceOnly ? 1 : 0;
-    pushConstants.toneMode = static_cast<u32>(displayParams.toneMode);
-    pushConstants.palette = static_cast<u32>(displayParams.palette);
-    pushConstants.inputMin = inputMin;
-    pushConstants.inputMax = inputMax;
-
-    // A linear stretch is the window and nothing else, so the two passes that
-    // exist to build a CDF have nothing to contribute -- and skipping them
-    // makes the cheapest tone operator also the cheapest to run.
-    const bool needsHistogram = displayParams.toneMode != DisplayToneMode::Linear;
-
-    VkMemoryBarrier memBarrier{};
-    memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-
-    // Memory barrier: wait for the input's last writer and make the write
-    // visible to the compute passes that read the image -- pass 1's histogram
-    // is a compute read in both tone modes, so the destination is the compute
-    // stage with shader read|write even when a buffer fill (transfer) is the
-    // next command: the fill is ordered by its own buffer barrier below.
-    memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-
-    vkCmdPipelineBarrier(
-        cmd,
-        cameraConfig.enabled ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
-                             : VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        0,
-        1, &memBarrier,
-        0, nullptr,
-        0, nullptr
-    );
-
-    if (needsHistogram) {
-
-    // Clear histogram buffer to zero before Pass 1
-    // Without this, garbage data from uninitialized GPU memory causes
-    // corrupted histograms and eventual TDR timeout (GPU crash)
-    vkCmdFillBuffer(cmd, claheHistogramBuffer->GetHandle(), 0, VK_WHOLE_SIZE, 0);
-
-    // Buffer barrier: fill write → compute shader read/write
-    VkBufferMemoryBarrier fillBarrier{};
-    fillBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    fillBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    fillBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    fillBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    fillBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    fillBarrier.buffer = claheHistogramBuffer->GetHandle();
-    fillBarrier.offset = 0;
-    fillBarrier.size = VK_WHOLE_SIZE;
-
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        0,
-        0, nullptr,
-        1, &fillBarrier,
-        0, nullptr
-    );
-
-    // Pass 1: Build histograms
-    // Dispatch one workgroup per tile
-    pushConstants.passIndex = 0;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, claheHistogramPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            clahePipelineLayout, 0, 1,
-                            &claheDescriptorSet, 0, nullptr);
-    vkCmdPushConstants(cmd, clahePipelineLayout,
-                       VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                       sizeof(pushConstants), &pushConstants);
-    vkCmdDispatch(cmd, tileCountX, tileCountY, 1);
-
-    // Barrier between passes
-    memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        0,
-        1, &memBarrier,
-        0, nullptr,
-        0, nullptr
-    );
-
-    // Pass 2: Clip, redistribute, compute CDF
-    pushConstants.passIndex = 1;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, claheCdfPipeline);
-    vkCmdPushConstants(cmd, clahePipelineLayout,
-                       VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                       sizeof(pushConstants), &pushConstants);
-    vkCmdDispatch(cmd, tileCountX, tileCountY, 1);
-
-    // Barrier between passes
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        0,
-        1, &memBarrier,
-        0, nullptr,
-        0, nullptr
-    );
-
-    }  // needsHistogram
-
-    // Pass 3: Apply the mapping, then the palette
-    pushConstants.passIndex = 2;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, claheApplyPipeline);
-    // Bound here as well as in pass 1, because pass 1 does not always run.
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            clahePipelineLayout, 0, 1,
-                            &claheDescriptorSet, 0, nullptr);
-    vkCmdPushConstants(cmd, clahePipelineLayout,
-                       VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                       sizeof(pushConstants), &pushConstants);
-    // Dispatch one thread per pixel
-    u32 groupCountX = (width + 15) / 16;
-    u32 groupCountY = (height + 15) / 16;
-    vkCmdDispatch(cmd, groupCountX, groupCountY, 1);
-
-    // Final barrier: CLAHE output ready for blit
-    memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0,
-        1, &memBarrier,
-        0, nullptr,
-        0, nullptr
-    );
+    auto list = gpu::vulkan::Wrap(cmd);
+    clahe->Record(list, ClaheInputImage(), rendercore::ClaheRun{
+        width, height, displayParams, cachedImageMin, cachedImageMax,
+        cameraConfig.enabled ? gpu::Access::ComputeWrite : gpu::Access::RayTraceWrite});
 
     // The pass recorded above writes the image this frame; a present or
     // reprocess that picks it later is reading real content.

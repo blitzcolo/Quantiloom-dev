@@ -6,12 +6,12 @@
 #include "renderer/GpuThermalStepper.hpp"
 
 #include "core/Log.hpp"
-#include "renderer/CommandHelper.hpp"
-#include "renderer/GpuBuffer.hpp"
-#include "renderer/ShaderBinary.hpp"
+#include "gpu/CommandList.hpp"
+#include "gpu/Device.hpp"
 
 #include <algorithm>
 #include <cstring>
+#include <stdexcept>
 #include <type_traits>
 
 
@@ -68,10 +68,10 @@ static_assert(sizeof(StepPushConstants) == 72);
 
 /// Bindings the compute shader declares. Buffers 9 and 10 are the baked
 /// short-wave gains and 11 is the tangent dT/dv; all three are always bound,
-/// with placeholders when there is nothing to put there -- Vulkan has no
-/// notion of an optional descriptor here. 12 is the long-wave radiosity
-/// ping-pong and 13 the irradiance each element gathered, the two halves of
-/// the diffuse-grey exchange CpuCrankNicolsonStepper sweeps.
+/// with placeholders when there is nothing to put there -- a descriptor must
+/// be valid either way. 12 is the long-wave radiosity ping-pong and 13 the
+/// irradiance each element gathered, the two halves of the diffuse-grey
+/// exchange CpuCrankNicolsonStepper sweeps.
 constexpr u32 kBindingCount = 14;
 
 constexpr f32 kStefanBoltzmann = 5.670374419e-8f;
@@ -79,17 +79,18 @@ constexpr f32 kStefanBoltzmann = 5.670374419e-8f;
 }  // namespace
 
 struct GpuThermalStepper::Impl {
-    VulkanContext& context;
-    VkDevice device = VK_NULL_HANDLE;
+    gpu::Device& device;
 
-    VkShaderModule shader = VK_NULL_HANDLE;
-    VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
-    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    VkPipeline pipeline = VK_NULL_HANDLE;
-    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    // Owned gpu:: resources, committed together by Create(). Destruction order
+    // is pool, kernel, layouts, so a later destruction never names an object
+    // an earlier one still needs.
+    std::unique_ptr<gpu::BindingLayout> bindingLayout;
+    std::unique_ptr<gpu::KernelLayout> kernelLayout;
+    std::unique_ptr<gpu::ComputeKernel> kernel;
+    std::unique_ptr<gpu::BindGroupPool> pool;
+    gpu::BindGroup bindGroup;
 
-    // The static inputs keep an exact copy of the bytes uploaded to Vulkan.
+    // The static inputs keep an exact copy of the bytes uploaded to the GPU.
     // The timeline mutates its epoch/material/sun-table storage in place, so
     // pointer identity cannot say whether any of these bindings is current.
     Vector<ThermalElementGpu> cachedElements;
@@ -105,20 +106,20 @@ struct GpuThermalStepper::Impl {
     // GPU buffers survive StepMany calls. Static buffers are uploaded only
     // when the exact bytes above change; dynamic buffers are uploaded on every
     // call but keep their allocations while their sizes are unchanged.
-    std::unique_ptr<GpuBuffer> elementBuffer;
-    std::unique_ptr<GpuBuffer> materialBuffer;
-    std::unique_ptr<GpuBuffer> csrRowStartBuffer;
-    std::unique_ptr<GpuBuffer> csrColumnBuffer;
-    std::unique_ptr<GpuBuffer> csrValueBuffer;
-    std::unique_ptr<GpuBuffer> skyFractionBuffer;
-    std::unique_ptr<GpuBuffer> sunVisBuffer;
-    std::unique_ptr<GpuBuffer> reflectedGainBuffer;
-    std::unique_ptr<GpuBuffer> diffuseGainBuffer;
-    std::unique_ptr<GpuBuffer> stateBuffer;
-    std::unique_ptr<GpuBuffer> surfaceBuffer;
-    std::unique_ptr<GpuBuffer> sensitivityBuffer;
-    std::unique_ptr<GpuBuffer> radiosityBuffer;
-    std::unique_ptr<GpuBuffer> irradianceBuffer;
+    std::unique_ptr<gpu::Buffer> elementBuffer;
+    std::unique_ptr<gpu::Buffer> materialBuffer;
+    std::unique_ptr<gpu::Buffer> csrRowStartBuffer;
+    std::unique_ptr<gpu::Buffer> csrColumnBuffer;
+    std::unique_ptr<gpu::Buffer> csrValueBuffer;
+    std::unique_ptr<gpu::Buffer> skyFractionBuffer;
+    std::unique_ptr<gpu::Buffer> sunVisBuffer;
+    std::unique_ptr<gpu::Buffer> reflectedGainBuffer;
+    std::unique_ptr<gpu::Buffer> diffuseGainBuffer;
+    std::unique_ptr<gpu::Buffer> stateBuffer;
+    std::unique_ptr<gpu::Buffer> surfaceBuffer;
+    std::unique_ptr<gpu::Buffer> sensitivityBuffer;
+    std::unique_ptr<gpu::Buffer> radiosityBuffer;
+    std::unique_ptr<gpu::Buffer> irradianceBuffer;
 
     u32 lastElementCount = 0;
     u32 lastNodeCount = 0;
@@ -131,103 +132,60 @@ struct GpuThermalStepper::Impl {
     usize staticInputGeneration = 0;
     usize bufferAllocationCount = 0;
 
-    explicit Impl(VulkanContext& ctx) : context(ctx), device(ctx.GetDevice()) {}
-
-    ~Impl() {
-        if (pipeline) vkDestroyPipeline(device, pipeline, nullptr);
-        if (pipelineLayout) vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-        if (descriptorPool) vkDestroyDescriptorPool(device, descriptorPool, nullptr);
-        if (descriptorSetLayout) {
-            vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
-        }
-        if (shader) vkDestroyShaderModule(device, shader, nullptr);
-    }
+    explicit Impl(gpu::Device& dev) : device(dev) {}
 
     bool Create() {
-        const Vector<u32> code = LoadSpirv("thermal_step.spv");
-        if (code.empty()) {
+        const StringView kShaderNames[] = {"thermal_step"};
+        auto shaders = device.Shaders().Load(kShaderNames);
+        if (!shaders.has_value()) {
             QL_LOG_WARN("GPU thermal stepper: thermal_step.spv not found");
             return false;
         }
 
-        VkShaderModuleCreateInfo moduleInfo{};
-        moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        moduleInfo.codeSize = code.size() * sizeof(u32);
-        moduleInfo.pCode = code.data();
-        if (vkCreateShaderModule(device, &moduleInfo, nullptr, &shader) != VK_SUCCESS) {
-            return false;
-        }
+        // One slot per binding thermal_step.comp.hlsl declares (:52-80):
+        // t0-t6 read-only, u7-u8 read-write, t9-t10 read-only, u11-u13
+        // read-write.
+        constexpr gpu::BindingSlot kSlots[] = {
+            {0, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+            {1, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+            {2, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+            {3, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+            {4, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+            {5, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+            {6, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+            {7, gpu::BindingKind::ReadWriteBuffer, 1, false},
+            {8, gpu::BindingKind::ReadWriteBuffer, 1, false},
+            {9, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+            {10, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+            {11, gpu::BindingKind::ReadWriteBuffer, 1, false},
+            {12, gpu::BindingKind::ReadWriteBuffer, 1, false},
+            {13, gpu::BindingKind::ReadWriteBuffer, 1, false},
+        };
 
-        // Bindings 0-6 and 9-10 read-only, 7-8 and 11-13 read-write
-        Vector<VkDescriptorSetLayoutBinding> bindings(kBindingCount);
-        for (u32 i = 0; i < kBindingCount; ++i) {
-            bindings[i] = {};
-            bindings[i].binding = i;
-            bindings[i].descriptorCount = 1;
-            bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-            bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        }
+        auto bindingLayoutResult = device.CreateBindingLayout(
+            gpu::BindingLayoutDesc{0, std::span<const gpu::BindingSlot>(kSlots)});
+        if (!bindingLayoutResult.has_value()) return false;
 
-        VkDescriptorSetLayoutCreateInfo layoutInfo{};
-        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutInfo.bindingCount = kBindingCount;
-        layoutInfo.pBindings = bindings.data();
-        if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr,
-                                        &descriptorSetLayout) != VK_SUCCESS) {
-            return false;
-        }
+        const gpu::BindingLayout* spaces[] = {bindingLayoutResult.value().get()};
+        auto kernelLayoutResult = device.CreateKernelLayout(gpu::KernelLayoutDesc{
+            std::span<const gpu::BindingLayout* const>(spaces), sizeof(StepPushConstants)});
+        if (!kernelLayoutResult.has_value()) return false;
 
-        VkPushConstantRange pushRange{};
-        pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        pushRange.offset = 0;
-        pushRange.size = sizeof(StepPushConstants);
+        auto kernelResult = device.CreateComputeKernel(
+            gpu::ComputeKernelDesc{&shaders.value()[0], kernelLayoutResult.value().get()});
+        if (!kernelResult.has_value()) return false;
 
-        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        pipelineLayoutInfo.setLayoutCount = 1;
-        pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
-        pipelineLayoutInfo.pushConstantRangeCount = 1;
-        pipelineLayoutInfo.pPushConstantRanges = &pushRange;
-        if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr,
-                                   &pipelineLayout) != VK_SUCCESS) {
-            return false;
-        }
+        auto poolResult = device.CreateBindGroupPool(*bindingLayoutResult.value(), 1);
+        if (!poolResult.has_value()) return false;
 
-        VkPipelineShaderStageCreateInfo stageInfo{};
-        stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        stageInfo.module = shader;
-        stageInfo.pName = "main";
+        auto groups = poolResult.value()->Allocate(1);
+        if (!groups.has_value()) return false;
 
-        VkComputePipelineCreateInfo pipelineInfo{};
-        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-        pipelineInfo.stage = stageInfo;
-        pipelineInfo.layout = pipelineLayout;
-        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo,
-                                     nullptr, &pipeline) != VK_SUCCESS) {
-            pipeline = VK_NULL_HANDLE;
-            return false;
-        }
-
-        VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kBindingCount};
-        VkDescriptorPoolCreateInfo poolInfo{};
-        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.poolSizeCount = 1;
-        poolInfo.pPoolSizes = &poolSize;
-        poolInfo.maxSets = 1;
-        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
-            return false;
-        }
-
-        VkDescriptorSetAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = descriptorPool;
-        allocInfo.descriptorSetCount = 1;
-        allocInfo.pSetLayouts = &descriptorSetLayout;
-        if (vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet) != VK_SUCCESS) {
-            descriptorSet = VK_NULL_HANDLE;
-            return false;
-        }
+        this->bindingLayout = std::move(bindingLayoutResult.value());
+        this->kernelLayout = std::move(kernelLayoutResult.value());
+        this->kernel = std::move(kernelResult.value());
+        this->pool = std::move(poolResult.value());
+        bindGroup = groups.value()[0];
         return true;
     }
 
@@ -238,22 +196,27 @@ struct GpuThermalStepper::Impl {
                (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0);
     }
 
-    bool EnsureBuffer(std::unique_ptr<GpuBuffer>& buffer, VkDeviceSize size,
-                      VkBufferUsageFlags usage) {
-        size = std::max(size, VkDeviceSize{1});
-        if (buffer && buffer->GetSize() == size) return false;
-        buffer = std::make_unique<GpuBuffer>(context.GetAllocator(), size, usage,
-                                             VMA_MEMORY_USAGE_CPU_TO_GPU);
+    bool EnsureBuffer(std::unique_ptr<gpu::Buffer>& buffer, u64 size,
+                      gpu::BufferUsage usage) {
+        size = std::max(size, u64{1});
+        if (buffer && buffer->Ref().size == size) return false;
+        auto created = device.CreateBuffer(gpu::BufferDesc{size, usage, gpu::MemoryClass::Upload, 0});
+        if (!created.has_value()) {
+            // StepMany returns void, so a failed allocation throws rather
+            // than leaving the state silently unstepped.
+            throw std::runtime_error(created.error());
+        }
+        buffer = std::move(created.value());
         ++bufferAllocationCount;
         return true;
     }
 
     template <typename T>
-    bool UpdateStaticBuffer(std::unique_ptr<GpuBuffer>& buffer, Vector<T>& cached,
+    bool UpdateStaticBuffer(std::unique_ptr<gpu::Buffer>& buffer, Vector<T>& cached,
                             const Vector<T>& values, bool& staticChanged) {
         const bool handleChanged = EnsureBuffer(
             buffer, std::max(values.size(), usize{1}) * sizeof(T),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            gpu::BufferUsage::Storage);
         if (handleChanged || !SameBytes(cached, values)) {
             if (values.empty()) {
                 const T zero{};
@@ -268,9 +231,9 @@ struct GpuThermalStepper::Impl {
     }
 
     template <typename T>
-    bool UploadDynamicBuffer(std::unique_ptr<GpuBuffer>& buffer,
+    bool UploadDynamicBuffer(std::unique_ptr<gpu::Buffer>& buffer,
                              const Vector<T>& values,
-                             VkBufferUsageFlags usage) {
+                             gpu::BufferUsage usage) {
         const bool handleChanged = EnsureBuffer(
             buffer, std::max(values.size(), usize{1}) * sizeof(T), usage);
         if (values.empty()) {
@@ -381,7 +344,7 @@ struct GpuThermalStepper::Impl {
         }
         descriptorsChanged |= UploadDynamicBuffer(
             stateBuffer, stateF32,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            gpu::BufferUsage::Storage | gpu::BufferUsage::TransferSrc);
 
         // Tangent: same layout as the state, uploaded only when the caller is
         // carrying one. A one-float placeholder otherwise -- the descriptor
@@ -396,7 +359,7 @@ struct GpuThermalStepper::Impl {
         }
         descriptorsChanged |= UploadDynamicBuffer(
             sensitivityBuffer, sensitivityF32,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            gpu::BufferUsage::Storage | gpu::BufferUsage::TransferSrc);
 
         // Surface ping-pong: 2 * n floats
         // Seed both halves from the initial surface temperatures
@@ -406,7 +369,7 @@ struct GpuThermalStepper::Impl {
             surfInit[n + e] = stateF32[static_cast<usize>(e) * nodes];   // parity 1
         }
         descriptorsChanged |= UploadDynamicBuffer(
-            surfaceBuffer, surfInit, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            surfaceBuffer, surfInit, gpu::BufferUsage::Storage);
 
         // Long-wave radiosity ping-pong, 2 * n floats, both halves seeded with
         // J = eps sigma T^4 + (1 - eps) H from the irradiance the state carries
@@ -432,42 +395,32 @@ struct GpuThermalStepper::Impl {
             radiosityInit[n + e] = J;   // parity 1
         }
         descriptorsChanged |= UploadDynamicBuffer(
-            radiosityBuffer, radiosityInit, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            radiosityBuffer, radiosityInit, gpu::BufferUsage::Storage);
         descriptorsChanged |= UploadDynamicBuffer(
             irradianceBuffer, irradianceInit,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            gpu::BufferUsage::Storage | gpu::BufferUsage::TransferSrc);
 
         if (!descriptorsChanged) return;
 
         // Buffer handles only change on creation or resize. Contents can be
         // refreshed without rewriting the descriptor set.
-        const VkDescriptorBufferInfo infos[kBindingCount] = {
-            {elementBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
-            {materialBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
-            {csrRowStartBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
-            {csrColumnBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
-            {csrValueBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
-            {skyFractionBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
-            {sunVisBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
-            {stateBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
-            {surfaceBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
-            {reflectedGainBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
-            {diffuseGainBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
-            {sensitivityBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
-            {radiosityBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
-            {irradianceBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
+        const gpu::BindingWrite writes[kBindingCount] = {
+            gpu::BindingWrite::Buffer(0, gpu::BindingKind::ReadOnlyBuffer, elementBuffer->Ref()),
+            gpu::BindingWrite::Buffer(1, gpu::BindingKind::ReadOnlyBuffer, materialBuffer->Ref()),
+            gpu::BindingWrite::Buffer(2, gpu::BindingKind::ReadOnlyBuffer, csrRowStartBuffer->Ref()),
+            gpu::BindingWrite::Buffer(3, gpu::BindingKind::ReadOnlyBuffer, csrColumnBuffer->Ref()),
+            gpu::BindingWrite::Buffer(4, gpu::BindingKind::ReadOnlyBuffer, csrValueBuffer->Ref()),
+            gpu::BindingWrite::Buffer(5, gpu::BindingKind::ReadOnlyBuffer, skyFractionBuffer->Ref()),
+            gpu::BindingWrite::Buffer(6, gpu::BindingKind::ReadOnlyBuffer, sunVisBuffer->Ref()),
+            gpu::BindingWrite::Buffer(7, gpu::BindingKind::ReadWriteBuffer, stateBuffer->Ref()),
+            gpu::BindingWrite::Buffer(8, gpu::BindingKind::ReadWriteBuffer, surfaceBuffer->Ref()),
+            gpu::BindingWrite::Buffer(9, gpu::BindingKind::ReadOnlyBuffer, reflectedGainBuffer->Ref()),
+            gpu::BindingWrite::Buffer(10, gpu::BindingKind::ReadOnlyBuffer, diffuseGainBuffer->Ref()),
+            gpu::BindingWrite::Buffer(11, gpu::BindingKind::ReadWriteBuffer, sensitivityBuffer->Ref()),
+            gpu::BindingWrite::Buffer(12, gpu::BindingKind::ReadWriteBuffer, radiosityBuffer->Ref()),
+            gpu::BindingWrite::Buffer(13, gpu::BindingKind::ReadWriteBuffer, irradianceBuffer->Ref()),
         };
-        Vector<VkWriteDescriptorSet> writes(kBindingCount);
-        for (u32 i = 0; i < kBindingCount; ++i) {
-            writes[i] = {};
-            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i].dstSet = descriptorSet;
-            writes[i].dstBinding = i;
-            writes[i].descriptorCount = 1;
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i].pBufferInfo = &infos[i];
-        }
-        vkUpdateDescriptorSets(device, kBindingCount, writes.data(), 0, nullptr);
+        device.WriteBindGroup(bindGroup, std::span<const gpu::BindingWrite>(writes));
     }
 
     void ReadBack(thermal::ThermalState& state,
@@ -510,18 +463,18 @@ struct GpuThermalStepper::Impl {
     }
 };
 
-GpuThermalStepper::GpuThermalStepper(VulkanContext& context)
-    : m_impl(std::make_unique<Impl>(context)) {
+GpuThermalStepper::GpuThermalStepper(gpu::Device& device)
+    : m_impl(std::make_unique<Impl>(device)) {
     if (!m_impl->Create()) {
-        m_impl->pipeline = VK_NULL_HANDLE;
+        m_impl->kernel.reset();
+        m_impl->bindGroup = {};
     }
 }
 
 GpuThermalStepper::~GpuThermalStepper() = default;
 
 bool GpuThermalStepper::IsValid() const {
-    return m_impl && m_impl->pipeline != VK_NULL_HANDLE &&
-           m_impl->descriptorSet != VK_NULL_HANDLE;
+    return m_impl && m_impl->kernel && m_impl->bindGroup.IsValid();
 }
 
 usize GpuThermalStepper::StaticInputGenerationForTesting() const {
@@ -586,11 +539,9 @@ void GpuThermalStepper::StepMany(thermal::ThermalState& state,
         const usize batchSize = std::min(static_cast<usize>(kMaxDispatchBatch),
                                          steps.size() - offset);
 
-        CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->pipeline);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                    m_impl->pipelineLayout, 0, 1,
-                                    &m_impl->descriptorSet, 0, nullptr);
+        m_impl->device.ExecuteImmediate([&](gpu::CommandList& cmd) {
+            cmd.SetKernel(*m_impl->kernel);
+            cmd.SetBindGroup(*m_impl->kernelLayout, 0, m_impl->bindGroup);
 
             for (usize s = 0; s < batchSize; ++s) {
                 const thermal::ThermalBatchStep& step = steps[offset + s];
@@ -615,32 +566,19 @@ void GpuThermalStepper::StepMany(thermal::ThermalState& state,
                 pc.hasReflectedGain = m_impl->hasReflectedGain ? 1u : 0u;
                 pc.carryTangent = m_impl->carryTangent ? 1u : 0u;
 
-                vkCmdPushConstants(cmd, m_impl->pipelineLayout,
-                                   VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                                   sizeof(pc), &pc);
-                vkCmdDispatch(cmd, groups, 1, 1);
+                cmd.PushConstants(*m_impl->kernelLayout, pc);
+                cmd.Dispatch(groups, 1, 1);
                 parity = 1 - parity;
 
                 if (s + 1 < batchSize) {
-                    VkMemoryBarrier barrier{};
-                    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-                    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-                    barrier.dstAccessMask =
-                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-                    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                                         1, &barrier, 0, nullptr, 0, nullptr);
+                    cmd.Barrier(gpu::GlobalBarrier{gpu::Access::ComputeWrite,
+                                                   gpu::Access::ComputeRead |
+                                                       gpu::Access::ComputeWrite});
                 }
             }
 
             // Final barrier for host readback
-            VkMemoryBarrier hostBarrier{};
-            hostBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-            hostBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            hostBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                 VK_PIPELINE_STAGE_HOST_BIT, 0,
-                                 1, &hostBarrier, 0, nullptr, 0, nullptr);
+            cmd.Barrier(gpu::GlobalBarrier{gpu::Access::ComputeWrite, gpu::Access::HostRead});
         });
     }
 

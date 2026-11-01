@@ -173,8 +173,30 @@ add_library(quantiloom_core OBJECT
     renderer/GpuCameraPipeline.hpp
     renderer/GpuDisplayRange.cpp
     renderer/GpuDisplayRange.hpp
+    renderer/GpuClahe.cpp
+    renderer/GpuClahe.hpp
     renderer/ShaderBinary.cpp
     renderer/ShaderBinary.hpp
+    # Internal compute RHI -- no QL_API, nothing installed (gpu/AGENTS.md)
+    gpu/GpuTypes.hpp
+    gpu/Resources.hpp
+    gpu/Binding.hpp
+    gpu/Kernel.hpp
+    gpu/CommandList.hpp
+    gpu/Device.hpp
+    gpu/ShaderLibrary.hpp
+    gpu/ShaderLibrary.cpp
+    gpu/NeutralHeaders.cpp
+    gpu/vulkan/VulkanMapping.hpp
+    gpu/vulkan/VulkanMapping.cpp
+    gpu/vulkan/VulkanResources.hpp
+    gpu/vulkan/VulkanResources.cpp
+    gpu/vulkan/VulkanCommandList.hpp
+    gpu/vulkan/VulkanCommandList.cpp
+    gpu/vulkan/VulkanDevice.hpp
+    gpu/vulkan/VulkanDevice.cpp
+    gpu/vulkan/VulkanBridge.hpp
+    gpu/vulkan/VulkanBridge.cpp
     renderer/VulkanDeviceRequirements.cpp
     renderer/VulkanDeviceRequirements.hpp
     renderer/interop/VulkanInterop.cpp
@@ -462,6 +484,8 @@ target_precompile_headers(quantiloom_core PRIVATE
     <vulkan/vulkan.h>
     <glm/glm.hpp>
 )
+# The neutrality check must see only what gpu/ headers include themselves.
+set_source_files_properties(gpu/NeutralHeaders.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
 # ============================================================================
 # libQuantiloom -- the SDK artifact

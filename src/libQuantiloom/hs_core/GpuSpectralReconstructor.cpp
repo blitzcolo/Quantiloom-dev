@@ -6,17 +6,17 @@
  */
 
 #include "hs_core/GpuSpectralReconstructor.hpp"
-#include "renderer/VulkanContext.hpp"
-#include "renderer/GpuBuffer.hpp"
-#include "renderer/CommandHelper.hpp"
-#include "renderer/ShaderBinary.hpp"
-#include "core/Log.hpp"
 
-#include <chrono>
-#include <fstream>
-#include <vector>
-#include <cstring>
+#include "core/Log.hpp"
+#include "gpu/CommandList.hpp"
+#include "gpu/Device.hpp"
+
 #include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <span>
+#include <utility>
+#include <vector>
 #include <cmath>
 
 namespace quantiloom {
@@ -55,6 +55,7 @@ struct ReconstructPushConstants {
     u32 _pad1;
     u32 _pad2;
 };
+static_assert(sizeof(ReconstructPushConstants) == 8u * sizeof(u32));
 
 // ============================================================================
 // Reconstruction Mapping (must match spectral_reconstruct.comp, binding 4)
@@ -113,6 +114,34 @@ GpuMappingEntry BuildMappingEntry(u32 targetBand, f32 targetWl,
     return entry;
 }
 
+/**
+ * @brief Convert InterpolationMethod to shader mode value
+ */
+u32 InterpolationModeValue(InterpolationMethod method) {
+    switch (method) {
+        case InterpolationMethod::Linear:     return 0;
+        case InterpolationMethod::CatmullRom: return 1;
+        case InterpolationMethod::Akima:      return 2;
+        default:                              return 1;  // Default to Catmull-Rom
+    }
+}
+
+/**
+ * @brief Create a buffer, reporting an allocation failure as OutOfMemory
+ *
+ * That is the status ReconstructCustom returns for a failed buffer allocation.
+ */
+Result<std::unique_ptr<gpu::Buffer>, GpuReconstructorStatus> CreateBuffer(
+    gpu::Device& device, u64 size, gpu::BufferUsage usage, gpu::MemoryClass memory) {
+    auto buffer = device.CreateBuffer(gpu::BufferDesc{size, usage, memory, 0});
+    if (!buffer.has_value()) {
+        LOG_ERROR("GpuSpectralReconstructor: Buffer allocation failed: {}", buffer.error());
+        return Result<std::unique_ptr<gpu::Buffer>, GpuReconstructorStatus>::Err(
+            GpuReconstructorStatus::OutOfMemory);
+    }
+    return std::move(buffer.value());
+}
+
 } // namespace
 
 // ============================================================================
@@ -120,14 +149,14 @@ GpuMappingEntry BuildMappingEntry(u32 targetBand, f32 targetWl,
 // ============================================================================
 
 struct GpuSpectralReconstructor::Impl {
-    VulkanContext& context;
+    gpu::Device& device;
 
-    // Compute pipeline resources
-    VkPipeline pipeline = VK_NULL_HANDLE;
-    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
-    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-    VkShaderModule shaderModule = VK_NULL_HANDLE;
+    // Owned gpu:: resources; destruction order is pool, kernel, layouts, so a
+    // later destruction never names an object an earlier one still needs.
+    std::unique_ptr<gpu::BindingLayout> bindingLayout;
+    std::unique_ptr<gpu::KernelLayout> kernelLayout;
+    std::unique_ptr<gpu::ComputeKernel> kernel;
+    std::unique_ptr<gpu::BindGroupPool> pool;
 
     bool initialized = false;
 
@@ -136,196 +165,18 @@ struct GpuSpectralReconstructor::Impl {
     u64 lastMemoryUsage = 0;
     u64 lastPixelCount = 0;
 
-    explicit Impl(VulkanContext& ctx) : context(ctx) {}
+    explicit Impl(gpu::Device& dev) : device(dev) {}
 
     ~Impl() {
         Cleanup();
     }
 
     void Cleanup() {
-        VkDevice device = context.GetDevice();
-
-        if (pipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(device, pipeline, nullptr);
-            pipeline = VK_NULL_HANDLE;
-        }
-        if (pipelineLayout != VK_NULL_HANDLE) {
-            vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-            pipelineLayout = VK_NULL_HANDLE;
-        }
-        if (descriptorSetLayout != VK_NULL_HANDLE) {
-            vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
-            descriptorSetLayout = VK_NULL_HANDLE;
-        }
-        if (descriptorPool != VK_NULL_HANDLE) {
-            vkDestroyDescriptorPool(device, descriptorPool, nullptr);
-            descriptorPool = VK_NULL_HANDLE;
-        }
-        if (shaderModule != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(device, shaderModule, nullptr);
-            shaderModule = VK_NULL_HANDLE;
-        }
-
+        pool.reset();
+        kernel.reset();
+        kernelLayout.reset();
+        bindingLayout.reset();
         initialized = false;
-    }
-
-    /**
-     * @brief Load SPIR-V shader from file
-     */
-    Vector<u32> LoadShaderFile(const String& path) {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) {
-            LOG_ERROR("GpuSpectralReconstructor: Failed to open shader: {}", path);
-            return {};
-        }
-
-        usize fileSize = static_cast<usize>(file.tellg());
-        if (fileSize == 0 || fileSize % 4 != 0) {
-            LOG_ERROR("GpuSpectralReconstructor: Invalid SPIR-V file size: {}", fileSize);
-            return {};
-        }
-
-        Vector<u32> code(fileSize / 4);
-        file.seekg(0);
-        file.read(reinterpret_cast<char*>(code.data()), fileSize);
-
-        return code;
-    }
-
-    /**
-     * @brief Create shader module from SPIR-V code
-     */
-    VkShaderModule CreateShaderModule(const Vector<u32>& code) {
-        VkShaderModuleCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        createInfo.codeSize = code.size() * sizeof(u32);
-        createInfo.pCode = code.data();
-
-        VkShaderModule module;
-        if (vkCreateShaderModule(context.GetDevice(), &createInfo, nullptr, &module) != VK_SUCCESS) {
-            return VK_NULL_HANDLE;
-        }
-
-        return module;
-    }
-
-    /**
-     * @brief Create descriptor set layout for compute shader bindings
-     */
-    bool CreateDescriptorSetLayout() {
-        // Bindings:
-        // 0: sparseCube (storage buffer, readonly)
-        // 1: fullCube (storage buffer, writeonly)
-        // 2: srcWavelengths (storage buffer, readonly)
-        // 3: dstWavelengths (storage buffer, readonly)
-        // 4: mapping (storage buffer, readonly) - optional
-
-        Vector<VkDescriptorSetLayoutBinding> bindings(5);
-
-        for (u32 i = 0; i < 5; ++i) {
-            bindings[i].binding = i;
-            bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            bindings[i].descriptorCount = 1;
-            bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-            bindings[i].pImmutableSamplers = nullptr;
-        }
-
-        VkDescriptorSetLayoutCreateInfo layoutInfo{};
-        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutInfo.bindingCount = static_cast<u32>(bindings.size());
-        layoutInfo.pBindings = bindings.data();
-
-        if (vkCreateDescriptorSetLayout(context.GetDevice(), &layoutInfo, nullptr,
-                                        &descriptorSetLayout) != VK_SUCCESS) {
-            LOG_ERROR("GpuSpectralReconstructor: Failed to create descriptor set layout");
-            return false;
-        }
-
-        return true;
-    }
-
-    /**
-     * @brief Create pipeline layout with push constants
-     */
-    bool CreatePipelineLayout() {
-        VkPushConstantRange pushConstantRange{};
-        pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        pushConstantRange.offset = 0;
-        pushConstantRange.size = sizeof(ReconstructPushConstants);
-
-        VkPipelineLayoutCreateInfo layoutInfo{};
-        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        layoutInfo.setLayoutCount = 1;
-        layoutInfo.pSetLayouts = &descriptorSetLayout;
-        layoutInfo.pushConstantRangeCount = 1;
-        layoutInfo.pPushConstantRanges = &pushConstantRange;
-
-        if (vkCreatePipelineLayout(context.GetDevice(), &layoutInfo, nullptr,
-                                   &pipelineLayout) != VK_SUCCESS) {
-            LOG_ERROR("GpuSpectralReconstructor: Failed to create pipeline layout");
-            return false;
-        }
-
-        return true;
-    }
-
-    /**
-     * @brief Create descriptor pool for allocating descriptor sets
-     */
-    bool CreateDescriptorPool() {
-        VkDescriptorPoolSize poolSize{};
-        poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        poolSize.descriptorCount = 5;  // 5 bindings
-
-        VkDescriptorPoolCreateInfo poolInfo{};
-        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.poolSizeCount = 1;
-        poolInfo.pPoolSizes = &poolSize;
-        poolInfo.maxSets = 1;
-
-        if (vkCreateDescriptorPool(context.GetDevice(), &poolInfo, nullptr,
-                                   &descriptorPool) != VK_SUCCESS) {
-            LOG_ERROR("GpuSpectralReconstructor: Failed to create descriptor pool");
-            return false;
-        }
-
-        return true;
-    }
-
-    /**
-     * @brief Create compute pipeline
-     */
-    bool CreateComputePipeline() {
-        VkPipelineShaderStageCreateInfo stageInfo{};
-        stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        stageInfo.module = shaderModule;
-        stageInfo.pName = "main";
-
-        VkComputePipelineCreateInfo pipelineInfo{};
-        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-        pipelineInfo.stage = stageInfo;
-        pipelineInfo.layout = pipelineLayout;
-
-        if (vkCreateComputePipelines(context.GetDevice(), VK_NULL_HANDLE, 1,
-                                     &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
-            LOG_ERROR("GpuSpectralReconstructor: Failed to create compute pipeline");
-            return false;
-        }
-
-        return true;
-    }
-
-    /**
-     * @brief Convert InterpolationMethod to shader mode value
-     */
-    u32 GetInterpolationMode(InterpolationMethod method) {
-        switch (method) {
-            case InterpolationMethod::Linear:     return 0;
-            case InterpolationMethod::CatmullRom: return 1;
-            case InterpolationMethod::Akima:      return 2;
-            default:                              return 1;  // Default to Catmull-Rom
-        }
     }
 };
 
@@ -333,8 +184,8 @@ struct GpuSpectralReconstructor::Impl {
 // GpuSpectralReconstructor - Public Interface
 // ============================================================================
 
-GpuSpectralReconstructor::GpuSpectralReconstructor(VulkanContext& context)
-    : m_impl(std::make_unique<Impl>(context)) {
+GpuSpectralReconstructor::GpuSpectralReconstructor(gpu::Device& device)
+    : m_impl(std::make_unique<Impl>(device)) {
     LOG_DEBUG("GpuSpectralReconstructor created");
 }
 
@@ -350,44 +201,60 @@ GpuReconstructorStatus GpuSpectralReconstructor::Initialize() {
 
     LOG_INFO("GpuSpectralReconstructor: Initializing...");
 
-    // The one resource locator serves every shader the SDK loads, so an
-    // installed SDK finds this even when the working directory is elsewhere.
-    const Vector<u32> shaderCode = rendercore::LoadSpirv("spectral_reconstruct.spv");
-
-    if (shaderCode.empty()) {
-        LOG_ERROR("GpuSpectralReconstructor: Could not find spectral_reconstruct.spv");
+    // The one resource locator serves every shader the SDK loads, and the
+    // logical name is the CMake OUT_NAME, so the same lookup later finds a
+    // .metallib when a Metal device asks for the set.
+    const StringView kShaderNames[] = {"spectral_reconstruct"};
+    auto shaders = m_impl->device.Shaders().Load(kShaderNames);
+    if (!shaders.has_value()) {
+        LOG_ERROR("GpuSpectralReconstructor: Could not load spectral_reconstruct: {}", shaders.error());
         return GpuReconstructorStatus::ShaderCompileFailed;
     }
 
-    // Create shader module
-    m_impl->shaderModule = m_impl->CreateShaderModule(shaderCode);
-    if (m_impl->shaderModule == VK_NULL_HANDLE) {
-        return GpuReconstructorStatus::ShaderCompileFailed;
-    }
+    // One slot per HLSL declaration in spectral_reconstruct.comp.hlsl, all
+    // buffers: t0 sparseCube :49, u1 fullCube :52, t2 srcWavelengths :55,
+    // t3 dstWavelengths :59, t4 mappingData :72.
+    constexpr gpu::BindingSlot kSlots[] = {
+        {0, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+        {1, gpu::BindingKind::ReadWriteBuffer, 1, false},
+        {2, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+        {3, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+        {4, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+    };
 
-    // Create descriptor set layout
-    if (!m_impl->CreateDescriptorSetLayout()) {
-        m_impl->Cleanup();
+    auto bindingLayout = m_impl->device.CreateBindingLayout(
+        gpu::BindingLayoutDesc{0, std::span<const gpu::BindingSlot>(kSlots)});
+    if (!bindingLayout.has_value()) {
+        LOG_ERROR("GpuSpectralReconstructor: Failed to create descriptor set layout: {}",
+                  bindingLayout.error());
         return GpuReconstructorStatus::PipelineCreateFailed;
     }
 
-    // Create pipeline layout
-    if (!m_impl->CreatePipelineLayout()) {
-        m_impl->Cleanup();
+    const gpu::BindingLayout* spaces[] = {bindingLayout.value().get()};
+    auto kernelLayout = m_impl->device.CreateKernelLayout(gpu::KernelLayoutDesc{
+        std::span<const gpu::BindingLayout* const>(spaces), sizeof(ReconstructPushConstants)});
+    if (!kernelLayout.has_value()) {
+        LOG_ERROR("GpuSpectralReconstructor: Failed to create pipeline layout: {}", kernelLayout.error());
         return GpuReconstructorStatus::PipelineCreateFailed;
     }
 
-    // Create descriptor pool
-    if (!m_impl->CreateDescriptorPool()) {
-        m_impl->Cleanup();
+    auto kernel = m_impl->device.CreateComputeKernel(
+        gpu::ComputeKernelDesc{&shaders.value()[0], kernelLayout.value().get()});
+    if (!kernel.has_value()) {
+        LOG_ERROR("GpuSpectralReconstructor: Failed to create compute pipeline: {}", kernel.error());
         return GpuReconstructorStatus::PipelineCreateFailed;
     }
 
-    // Create compute pipeline
-    if (!m_impl->CreateComputePipeline()) {
-        m_impl->Cleanup();
+    auto pool = m_impl->device.CreateBindGroupPool(*bindingLayout.value(), 1);
+    if (!pool.has_value()) {
+        LOG_ERROR("GpuSpectralReconstructor: Failed to create descriptor pool: {}", pool.error());
         return GpuReconstructorStatus::PipelineCreateFailed;
     }
+
+    m_impl->bindingLayout = std::move(bindingLayout.value());
+    m_impl->kernelLayout = std::move(kernelLayout.value());
+    m_impl->kernel = std::move(kernel.value());
+    m_impl->pool = std::move(pool.value());
 
     m_impl->initialized = true;
     LOG_INFO("GpuSpectralReconstructor: Initialization complete");
@@ -457,157 +324,139 @@ std::pair<GpuReconstructorStatus, SpectralCube> GpuSpectralReconstructor::Recons
                  width, height, dstBands, srcBands);
     }
 
-    // Calculate buffer sizes. Dimensions convert to VkDeviceSize before
-    // multiplying: as u32 the cube-size product only stays exact below 2^32
-    // elements, and the check belongs here, not at the overflow.
-    const VkDeviceSize srcCubeSize = static_cast<VkDeviceSize>(width) * height * srcBands *
-                                     sizeof(f32);
-    const VkDeviceSize dstCubeSize = static_cast<VkDeviceSize>(width) * height * dstBands *
-                                     sizeof(f32);
-    VkDeviceSize srcWlSize = srcBands * sizeof(f32);
-    VkDeviceSize dstWlSize = dstBands * sizeof(f32);
+    // Calculate buffer sizes. Dimensions convert to u64 before multiplying:
+    // as u32 the cube-size product only stays exact below 2^32 elements, and
+    // the check belongs here, not at the overflow.
+    const u64 srcCubeSize = static_cast<u64>(width) * height * srcBands * sizeof(f32);
+    const u64 dstCubeSize = static_cast<u64>(width) * height * dstBands * sizeof(f32);
+    const u64 srcWlSize = srcBands * sizeof(f32);
+    const u64 dstWlSize = dstBands * sizeof(f32);
     // One mapping entry per target band (uint4 + float2), built once on the
     // CPU: the shader reads indices and weights from it instead of scanning
     // the source grid for every pixel and band.
-    VkDeviceSize mappingSize = dstBands * 6 * sizeof(u32);
+    const u64 mappingSize = dstBands * 6 * sizeof(u32);
 
     m_impl->lastMemoryUsage = srcCubeSize + dstCubeSize + srcWlSize + dstWlSize + mappingSize;
 
     try {
-        // Create GPU buffers
-        GpuBuffer srcCubeBuffer(m_impl->context.GetAllocator(), srcCubeSize,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY);
+        gpu::Device& device = m_impl->device;
 
-        GpuBuffer dstCubeBuffer(m_impl->context.GetAllocator(), dstCubeSize,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY);
-
-        GpuBuffer srcWlBuffer(m_impl->context.GetAllocator(), srcWlSize,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY);
-
-        GpuBuffer dstWlBuffer(m_impl->context.GetAllocator(), dstWlSize,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY);
+        // 5 device-local buffers.
+        auto srcCubeBuffer = CreateBuffer(device, srcCubeSize,
+            gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst, gpu::MemoryClass::DeviceLocal);
+        if (!srcCubeBuffer.has_value()) return {srcCubeBuffer.error(), SpectralCube{}};
+        auto dstCubeBuffer = CreateBuffer(device, dstCubeSize,
+            gpu::BufferUsage::Storage | gpu::BufferUsage::TransferSrc, gpu::MemoryClass::DeviceLocal);
+        if (!dstCubeBuffer.has_value()) return {dstCubeBuffer.error(), SpectralCube{}};
+        auto srcWlBuffer = CreateBuffer(device, srcWlSize,
+            gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst, gpu::MemoryClass::DeviceLocal);
+        if (!srcWlBuffer.has_value()) return {srcWlBuffer.error(), SpectralCube{}};
+        auto dstWlBuffer = CreateBuffer(device, dstWlSize,
+            gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst, gpu::MemoryClass::DeviceLocal);
+        if (!dstWlBuffer.has_value()) return {dstWlBuffer.error(), SpectralCube{}};
 
         // Pre-computed band mapping (binding 4)
-        GpuBuffer mappingBuffer(m_impl->context.GetAllocator(), mappingSize,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY);
+        auto mappingBuffer = CreateBuffer(device, mappingSize,
+            gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst, gpu::MemoryClass::DeviceLocal);
+        if (!mappingBuffer.has_value()) return {mappingBuffer.error(), SpectralCube{}};
 
-        GpuBuffer mappingStaging(m_impl->context.GetAllocator(), mappingSize,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_CPU_ONLY);
+        auto mappingStaging = CreateBuffer(device, mappingSize,
+            gpu::BufferUsage::TransferSrc, gpu::MemoryClass::HostOnly);
+        if (!mappingStaging.has_value()) return {mappingStaging.error(), SpectralCube{}};
 
         // Staging buffers for upload
-        GpuBuffer srcCubeStaging(m_impl->context.GetAllocator(), srcCubeSize,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_CPU_ONLY);
+        auto srcCubeStaging = CreateBuffer(device, srcCubeSize,
+            gpu::BufferUsage::TransferSrc, gpu::MemoryClass::HostOnly);
+        if (!srcCubeStaging.has_value()) return {srcCubeStaging.error(), SpectralCube{}};
 
-        GpuBuffer srcWlStaging(m_impl->context.GetAllocator(), srcWlSize,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_CPU_ONLY);
+        auto srcWlStaging = CreateBuffer(device, srcWlSize,
+            gpu::BufferUsage::TransferSrc, gpu::MemoryClass::HostOnly);
+        if (!srcWlStaging.has_value()) return {srcWlStaging.error(), SpectralCube{}};
 
-        GpuBuffer dstWlStaging(m_impl->context.GetAllocator(), dstWlSize,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_CPU_ONLY);
+        auto dstWlStaging = CreateBuffer(device, dstWlSize,
+            gpu::BufferUsage::TransferSrc, gpu::MemoryClass::HostOnly);
+        if (!dstWlStaging.has_value()) return {dstWlStaging.error(), SpectralCube{}};
+
+        std::unique_ptr<gpu::Buffer> srcCube = std::move(srcCubeBuffer.value());
+        std::unique_ptr<gpu::Buffer> dstCube = std::move(dstCubeBuffer.value());
+        std::unique_ptr<gpu::Buffer> srcWl = std::move(srcWlBuffer.value());
+        std::unique_ptr<gpu::Buffer> dstWl = std::move(dstWlBuffer.value());
+        std::unique_ptr<gpu::Buffer> mapping = std::move(mappingBuffer.value());
 
         // Upload source cube data
         {
-            f32* mapped = static_cast<f32*>(srcCubeStaging.Map());
+            f32* mapped = static_cast<f32*>(srcCubeStaging.value()->Map());
             std::memcpy(mapped, sparseCube.data.data(), srcCubeSize);
-            srcCubeStaging.Unmap();
+            srcCubeStaging.value()->Unmap();
         }
 
         // Upload source wavelengths
         {
-            f32* mapped = static_cast<f32*>(srcWlStaging.Map());
+            f32* mapped = static_cast<f32*>(srcWlStaging.value()->Map());
             std::memcpy(mapped, sparseCube.wavelengths.data(), srcWlSize);
-            srcWlStaging.Unmap();
+            srcWlStaging.value()->Unmap();
         }
 
         // Upload target wavelengths
         {
-            f32* mapped = static_cast<f32*>(dstWlStaging.Map());
+            f32* mapped = static_cast<f32*>(dstWlStaging.value()->Map());
             std::memcpy(mapped, targetWavelengths.data(), dstWlSize);
-            dstWlStaging.Unmap();
+            dstWlStaging.value()->Unmap();
         }
 
         // Build and upload the per-band mapping: the search depends only on
         // the two wavelength grids, so it happens once here, not per pixel.
-        Vector<GpuMappingEntry> mapping(dstBands);
+        Vector<GpuMappingEntry> mappingEntries(dstBands);
         for (u32 b = 0; b < dstBands; ++b)
-            mapping[b] =
+            mappingEntries[b] =
                 BuildMappingEntry(b, targetWavelengths[b], sparseCube.wavelengths);
         {
-            void* mapped = mappingStaging.Map();
-            std::memcpy(mapped, mapping.data(), mappingSize);
-            mappingStaging.Unmap();
+            void* mapped = mappingStaging.value()->Map();
+            std::memcpy(mapped, mappingEntries.data(), mappingSize);
+            mappingStaging.value()->Unmap();
         }
 
-        // Copy staging to GPU buffers
-        CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
-            VkBufferCopy copyRegion{};
+        // Copy staging to GPU buffers, then a barrier before compute. Each
+        // copy is its own CopyBuffer call: one recording call is one native
+        // command (gpu/AGENTS.md), which the command-stream diff depends on.
+        device.ExecuteImmediate([&](gpu::CommandList& cmd) {
+            const gpu::BufferCopyRegion srcCubeCopy{0, 0, srcCubeSize};
+            cmd.CopyBuffer(srcCubeStaging.value()->Ref(), srcCube->Ref(),
+                           std::span<const gpu::BufferCopyRegion>{&srcCubeCopy, 1});
 
-            copyRegion.size = srcCubeSize;
-            vkCmdCopyBuffer(cmd, srcCubeStaging.GetHandle(), srcCubeBuffer.GetHandle(), 1, &copyRegion);
+            const gpu::BufferCopyRegion srcWlCopy{0, 0, srcWlSize};
+            cmd.CopyBuffer(srcWlStaging.value()->Ref(), srcWl->Ref(),
+                           std::span<const gpu::BufferCopyRegion>{&srcWlCopy, 1});
 
-            copyRegion.size = srcWlSize;
-            vkCmdCopyBuffer(cmd, srcWlStaging.GetHandle(), srcWlBuffer.GetHandle(), 1, &copyRegion);
+            const gpu::BufferCopyRegion dstWlCopy{0, 0, dstWlSize};
+            cmd.CopyBuffer(dstWlStaging.value()->Ref(), dstWl->Ref(),
+                           std::span<const gpu::BufferCopyRegion>{&dstWlCopy, 1});
 
-            copyRegion.size = dstWlSize;
-            vkCmdCopyBuffer(cmd, dstWlStaging.GetHandle(), dstWlBuffer.GetHandle(), 1, &copyRegion);
+            const gpu::BufferCopyRegion mappingCopy{0, 0, mappingSize};
+            cmd.CopyBuffer(mappingStaging.value()->Ref(), mapping->Ref(),
+                           std::span<const gpu::BufferCopyRegion>{&mappingCopy, 1});
 
-            copyRegion.size = mappingSize;
-            vkCmdCopyBuffer(cmd, mappingStaging.GetHandle(), mappingBuffer.GetHandle(), 1, &copyRegion);
-
-            // Memory barrier before compute
-            VkMemoryBarrier barrier{};
-            barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                0, 1, &barrier, 0, nullptr, 0, nullptr);
+            cmd.Barrier(gpu::GlobalBarrier{gpu::Access::TransferWrite, gpu::Access::ComputeRead});
         });
 
-        // Allocate descriptor set
-        VkDescriptorSetAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = m_impl->descriptorPool;
-        allocInfo.descriptorSetCount = 1;
-        allocInfo.pSetLayouts = &m_impl->descriptorSetLayout;
-
-        VkDescriptorSet descriptorSet;
-        if (vkAllocateDescriptorSets(m_impl->context.GetDevice(), &allocInfo, &descriptorSet) != VK_SUCCESS) {
+        // Allocate the descriptor set for this call. The pool holds one set
+        // and is reset at the end of the call.
+        auto groups = m_impl->pool->Allocate(1);
+        if (!groups.has_value()) {
             LOG_ERROR("GpuSpectralReconstructor: Failed to allocate descriptor set");
             return {GpuReconstructorStatus::BufferAllocFailed, SpectralCube{}};
         }
+        const gpu::BindGroup group = groups.value()[0];
 
-        // Update descriptor set
-        Vector<VkDescriptorBufferInfo> bufferInfos(5);
-        bufferInfos[0] = {srcCubeBuffer.GetHandle(), 0, srcCubeSize};
-        bufferInfos[1] = {dstCubeBuffer.GetHandle(), 0, dstCubeSize};
-        bufferInfos[2] = {srcWlBuffer.GetHandle(), 0, srcWlSize};
-        bufferInfos[3] = {dstWlBuffer.GetHandle(), 0, dstWlSize};
-        bufferInfos[4] = {mappingBuffer.GetHandle(), 0, mappingSize};
-
-        Vector<VkWriteDescriptorSet> writes(5);
-        for (u32 i = 0; i < 5; ++i) {
-            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i].dstSet = descriptorSet;
-            writes[i].dstBinding = i;
-            writes[i].dstArrayElement = 0;
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i].descriptorCount = 1;
-            writes[i].pBufferInfo = &bufferInfos[i];
-        }
-
-        vkUpdateDescriptorSets(m_impl->context.GetDevice(),
-            static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+        // Write the descriptor set; each range is its buffer's size.
+        const gpu::BindingWrite writes[] = {
+            gpu::BindingWrite::Buffer(0, gpu::BindingKind::ReadOnlyBuffer, srcCube->Ref(), 0, srcCubeSize),
+            gpu::BindingWrite::Buffer(1, gpu::BindingKind::ReadWriteBuffer, dstCube->Ref(), 0, dstCubeSize),
+            gpu::BindingWrite::Buffer(2, gpu::BindingKind::ReadOnlyBuffer, srcWl->Ref(), 0, srcWlSize),
+            gpu::BindingWrite::Buffer(3, gpu::BindingKind::ReadOnlyBuffer, dstWl->Ref(), 0, dstWlSize),
+            gpu::BindingWrite::Buffer(4, gpu::BindingKind::ReadOnlyBuffer, mapping->Ref(), 0, mappingSize),
+        };
+        device.WriteBindGroup(group, std::span<const gpu::BindingWrite>(writes));
 
         // Setup push constants
         ReconstructPushConstants pushConstants{};
@@ -615,43 +464,32 @@ std::pair<GpuReconstructorStatus, SpectralCube> GpuSpectralReconstructor::Recons
         pushConstants.height = height;
         pushConstants.srcBands = srcBands;
         pushConstants.dstBands = dstBands;
-        pushConstants.interpolationMode = m_impl->GetInterpolationMode(config.method);
+        pushConstants.interpolationMode = InterpolationModeValue(config.method);
 
         // Dispatch compute shader
-        CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->pipeline);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                m_impl->pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-            vkCmdPushConstants(cmd, m_impl->pipelineLayout,
-                VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        device.ExecuteImmediate([&](gpu::CommandList& cmd) {
+            cmd.SetKernel(*m_impl->kernel);
+            cmd.SetBindGroup(*m_impl->kernelLayout, 0, group);
+            cmd.PushConstants(*m_impl->kernelLayout, pushConstants);
 
             // Calculate workgroup count
             u32 groupCountX = (width + config.workgroupSizeX - 1) / config.workgroupSizeX;
             u32 groupCountY = (height + config.workgroupSizeY - 1) / config.workgroupSizeY;
 
-            vkCmdDispatch(cmd, groupCountX, groupCountY, 1);
+            cmd.Dispatch(groupCountX, groupCountY, 1);
 
-            // Memory barrier after compute
-            VkMemoryBarrier barrier{};
-            barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-            barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                0, 1, &barrier, 0, nullptr, 0, nullptr);
+            cmd.Barrier(gpu::GlobalBarrier{gpu::Access::ComputeWrite, gpu::Access::TransferRead});
         });
 
         // Read back results
-        GpuBuffer dstCubeStaging(m_impl->context.GetAllocator(), dstCubeSize,
-            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_CPU_ONLY);
+        auto dstCubeStaging = CreateBuffer(device, dstCubeSize,
+            gpu::BufferUsage::TransferDst, gpu::MemoryClass::HostOnly);
+        if (!dstCubeStaging.has_value()) return {dstCubeStaging.error(), SpectralCube{}};
 
-        CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
-            VkBufferCopy copyRegion{};
-            copyRegion.size = dstCubeSize;
-            vkCmdCopyBuffer(cmd, dstCubeBuffer.GetHandle(), dstCubeStaging.GetHandle(), 1, &copyRegion);
+        device.ExecuteImmediate([&](gpu::CommandList& cmd) {
+            const gpu::BufferCopyRegion readbackCopy{0, 0, dstCubeSize};
+            cmd.CopyBuffer(dstCube->Ref(), dstCubeStaging.value()->Ref(),
+                           std::span<const gpu::BufferCopyRegion>{&readbackCopy, 1});
         });
 
         // Create result cube
@@ -659,11 +497,13 @@ std::pair<GpuReconstructorStatus, SpectralCube> GpuSpectralReconstructor::Recons
             targetWavelengths.front(), targetWavelengths.back());
         result.wavelengths = targetWavelengths;
 
-        // Copy data from staging buffer
+        // Copy data from staging buffer. Deliberately Map() and not MapRead():
+        // the copy completed before ExecuteImmediate returned, and this read
+        // must not pay for a cache invalidation.
         {
-            f32* mapped = static_cast<f32*>(dstCubeStaging.Map());
+            f32* mapped = static_cast<f32*>(dstCubeStaging.value()->Map());
             std::memcpy(result.data.data(), mapped, dstCubeSize);
-            dstCubeStaging.Unmap();
+            dstCubeStaging.value()->Unmap();
         }
 
         // Add metadata
@@ -673,7 +513,7 @@ std::pair<GpuReconstructorStatus, SpectralCube> GpuSpectralReconstructor::Recons
             (config.method == InterpolationMethod::CatmullRom) ? "gpu_catmull_rom" : "gpu_akima";
 
         // Reset descriptor pool for next use
-        vkResetDescriptorPool(m_impl->context.GetDevice(), m_impl->descriptorPool, 0);
+        m_impl->pool->Reset();
 
         // Calculate statistics
         auto endTime = Clock::now();
@@ -713,16 +553,13 @@ f64 GpuSpectralReconstructor::GetPixelsPerSecond() const {
 // Utility Functions
 // ============================================================================
 
-bool IsGpuReconstructionSupported(VulkanContext& context) {
-    // Check for compute shader support (always available in Vulkan)
-    // Check for sufficient buffer size limits
-    VkPhysicalDeviceProperties props;
-    vkGetPhysicalDeviceProperties(context.GetPhysicalDevice(), &props);
-
+bool IsGpuReconstructionSupported(gpu::Device& device) {
+    // Check for compute shader support (always available in Vulkan) and for
+    // sufficient buffer size limits.
     // Need at least 256MB for typical hyperspectral cubes
-    const VkDeviceSize minBufferSize = 256 * 1024 * 1024;
+    constexpr u64 kMinBufferSize = 256ull * 1024 * 1024;
 
-    return props.limits.maxStorageBufferRange >= minBufferSize;
+    return device.Info().maxStorageBufferRange >= kMinBufferSize;
 }
 
 u64 EstimateReconstructionMemory(const SpectralCube& sparseCube, u32 targetBands) {

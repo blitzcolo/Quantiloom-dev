@@ -4,6 +4,7 @@
 
 #include "renderer/CommandHelper.hpp"
 #include "renderer/GpuBuffer.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/GpuDisplayRange.hpp"
 #include "renderer/GpuImage.hpp"
 #include "renderer/VulkanContext.hpp"
@@ -140,7 +141,7 @@ void ExpectExactRange(GpuDisplayRange& gpu, VulkanContext& context,
                       f32 low, f32 high) {
     auto image = UploadRgba32f(context, width, height, rgba);
     ASSERT_NE(image, nullptr);
-    const auto actual = gpu.Compute(*image, width, height, low, high);
+    const auto actual = gpu.Compute(gpu::vulkan::Ref(*image), width, height, low, high);
     ASSERT_TRUE(actual.has_value()) << actual.error();
     const DisplayRange expected = CpuReference(rgba, low, high);
     EXPECT_EQ(actual.value().min, expected.min)
@@ -162,7 +163,7 @@ std::vector<f32> Rgba(const std::vector<std::array<f32, 4>>& pixels) {
 class DisplayRangeGpuTest : public VulkanDeviceTest {};
 
 TEST_F(DisplayRangeGpuTest, FiltersInvalidRgbAndFallsBackForEmptyImages) {
-    auto created = GpuDisplayRange::Create(Device());
+    auto created = GpuDisplayRange::Create(GpuDevice());
     ASSERT_TRUE(created.has_value()) << created.error();
     auto gpu = std::move(created.value());
     const f32 nan = std::numeric_limits<f32>::quiet_NaN();
@@ -181,7 +182,7 @@ TEST_F(DisplayRangeGpuTest, FiltersInvalidRgbAndFallsBackForEmptyImages) {
 }
 
 TEST_F(DisplayRangeGpuTest, AConstantImageKeepsItsOwnRange) {
-    auto created = GpuDisplayRange::Create(Device());
+    auto created = GpuDisplayRange::Create(GpuDevice());
     ASSERT_TRUE(created.has_value()) << created.error();
     auto gpu = std::move(created.value());
     const auto constant = Rgba({{-4.0f, -4.0f, -4.0f, 0.0f},
@@ -192,7 +193,7 @@ TEST_F(DisplayRangeGpuTest, AConstantImageKeepsItsOwnRange) {
     // not the {0,1} an empty input reports.
     auto image = UploadRgba32f(Device(), 3, 1, constant);
     ASSERT_NE(image, nullptr);
-    const auto computed = gpu->Compute(*image, 3, 1, 1.0f, 99.0f);
+    const auto computed = gpu->Compute(gpu::vulkan::Ref(*image), 3, 1, 1.0f, 99.0f);
     ASSERT_TRUE(computed.has_value()) << computed.error();
     const f32 epsilon = 4.0f * 1e-6f;
     EXPECT_EQ(computed.value().min, -4.0f - epsilon);
@@ -200,7 +201,7 @@ TEST_F(DisplayRangeGpuTest, AConstantImageKeepsItsOwnRange) {
 }
 
 TEST_F(DisplayRangeGpuTest, AnAllInvalidImageKeepsTheDefaultWindow) {
-    auto created = GpuDisplayRange::Create(Device());
+    auto created = GpuDisplayRange::Create(GpuDevice());
     ASSERT_TRUE(created.has_value()) << created.error();
     auto gpu = std::move(created.value());
     const f32 nan = std::numeric_limits<f32>::quiet_NaN();
@@ -209,14 +210,14 @@ TEST_F(DisplayRangeGpuTest, AnAllInvalidImageKeepsTheDefaultWindow) {
                                {nan, nan, nan, 0.0f}});
     auto image = UploadRgba32f(Device(), 3, 1, invalid);
     ASSERT_NE(image, nullptr);
-    const auto computed = gpu->Compute(*image, 3, 1, 1.0f, 99.0f);
+    const auto computed = gpu->Compute(gpu::vulkan::Ref(*image), 3, 1, 1.0f, 99.0f);
     ASSERT_TRUE(computed.has_value()) << computed.error();
     EXPECT_EQ(computed.value().min, 0.0f);
     EXPECT_EQ(computed.value().max, 1.0f);
 }
 
 TEST_F(DisplayRangeGpuTest, RequestsCpuFallbackForUnsafeSmallRgb) {
-    auto created = GpuDisplayRange::Create(Device());
+    auto created = GpuDisplayRange::Create(GpuDevice());
     ASSERT_TRUE(created.has_value()) << created.error();
     auto gpu = std::move(created.value());
     const f32 subnormal = std::numeric_limits<f32>::denorm_min() * 4096.0f;
@@ -229,14 +230,14 @@ TEST_F(DisplayRangeGpuTest, RequestsCpuFallbackForUnsafeSmallRgb) {
               FP_SUBNORMAL);
     auto image = UploadRgba32f(Device(), 4, 1, rgba);
     ASSERT_NE(image, nullptr);
-    const auto computed = gpu->Compute(*image, 4, 1, 0.0f, 100.0f);
+    const auto computed = gpu->Compute(gpu::vulkan::Ref(*image), 4, 1, 0.0f, 100.0f);
     ASSERT_FALSE(computed.has_value());
     EXPECT_NE(computed.error().find("CPU small-value arithmetic"),
               String::npos);
 }
 
 TEST_F(DisplayRangeGpuTest, RequestsCpuFallbackForExceptionalScale) {
-    auto created = GpuDisplayRange::Create(Device());
+    auto created = GpuDisplayRange::Create(GpuDevice());
     ASSERT_TRUE(created.has_value()) << created.error();
     auto gpu = std::move(created.value());
     const f32 large = std::numeric_limits<f32>::max() * 0.75f;
@@ -244,13 +245,13 @@ TEST_F(DisplayRangeGpuTest, RequestsCpuFallbackForExceptionalScale) {
                             {large, large, large, 0.0f}});
     auto image = UploadRgba32f(Device(), 2, 1, rgba);
     ASSERT_NE(image, nullptr);
-    const auto computed = gpu->Compute(*image, 2, 1, 0.0f, 100.0f);
+    const auto computed = gpu->Compute(gpu::vulkan::Ref(*image), 2, 1, 0.0f, 100.0f);
     ASSERT_FALSE(computed.has_value());
     EXPECT_NE(computed.error().find("CPU scale arithmetic"), String::npos);
 }
 
 TEST_F(DisplayRangeGpuTest, PreservesPercentileEdgesAndCollapsedWindowFallback) {
-    auto created = GpuDisplayRange::Create(Device());
+    auto created = GpuDisplayRange::Create(GpuDevice());
     ASSERT_TRUE(created.has_value()) << created.error();
     auto gpu = std::move(created.value());
     std::vector<std::array<f32, 4>> pixels;
@@ -270,7 +271,7 @@ TEST_F(DisplayRangeGpuTest, PreservesPercentileEdgesAndCollapsedWindowFallback) 
 }
 
 TEST_F(DisplayRangeGpuTest, PreservesCpuRoundingWhenMaximumFallsInsideLastBin) {
-    auto created = GpuDisplayRange::Create(Device());
+    auto created = GpuDisplayRange::Create(GpuDevice());
     ASSERT_TRUE(created.has_value()) << created.error();
     auto gpu = std::move(created.value());
 
@@ -299,7 +300,7 @@ TEST_F(DisplayRangeGpuTest, PreservesCpuRoundingWhenMaximumFallsInsideLastBin) {
 }
 
 TEST_F(DisplayRangeGpuTest, MatchesCpuAtHistogramBoundariesAndFmaSensitiveInputs) {
-    auto created = GpuDisplayRange::Create(Device());
+    auto created = GpuDisplayRange::Create(GpuDevice());
     ASSERT_TRUE(created.has_value()) << created.error();
     auto gpu = std::move(created.value());
     constexpr u32 width = 131;
@@ -333,7 +334,7 @@ TEST_F(DisplayRangeGpuTest, MatchesCpuAtHistogramBoundariesAndFmaSensitiveInputs
 }
 
 TEST_F(DisplayRangeGpuTest, MatchesCpuAcrossNontrivialRandomImages) {
-    auto created = GpuDisplayRange::Create(Device());
+    auto created = GpuDisplayRange::Create(GpuDevice());
     ASSERT_TRUE(created.has_value()) << created.error();
     auto gpu = std::move(created.value());
     constexpr std::array<std::pair<u32, u32>, 6> extents{{
@@ -360,7 +361,7 @@ TEST_F(DisplayRangeGpuTest, MatchesCpuAcrossNontrivialRandomImages) {
 // 126.6 MiB at 4K, so this stays disabled in the normal eight-second suite.
 // Run with --gtest_also_run_disabled_tests and this test's full name.
 TEST_F(DisplayRangeGpuTest, DISABLED_BenchmarkGpuHistogramAgainstFullImageReadback) {
-    auto created = GpuDisplayRange::Create(Device());
+    auto created = GpuDisplayRange::Create(GpuDevice());
     ASSERT_TRUE(created.has_value()) << created.error();
     auto gpu = std::move(created.value());
 
@@ -412,7 +413,7 @@ TEST_F(DisplayRangeGpuTest, DISABLED_BenchmarkGpuHistogramAgainstFullImageReadba
         ASSERT_NE(image, nullptr);
 
         // Warm shader modules, pipelines, allocations and the fixed input.
-        auto warmGpu = gpu->Compute(*image, bench.width, bench.height, 1.0f, 99.0f);
+        auto warmGpu = gpu->Compute(gpu::vulkan::Ref(*image), bench.width, bench.height, 1.0f, 99.0f);
         ASSERT_TRUE(warmGpu.has_value()) << warmGpu.error();
         auto warmPixels = CommandHelper::ReadbackImage(
             Device(), image->GetImage(), VK_FORMAT_R32G32B32A32_SFLOAT,
@@ -433,7 +434,7 @@ TEST_F(DisplayRangeGpuTest, DISABLED_BenchmarkGpuHistogramAgainstFullImageReadba
 
             const auto gpuStart = std::chrono::steady_clock::now();
             const auto computed = gpu->Compute(
-                *image, bench.width, bench.height, 1.0f, 99.0f);
+                gpu::vulkan::Ref(*image), bench.width, bench.height, 1.0f, 99.0f);
             const auto gpuEnd = std::chrono::steady_clock::now();
             ASSERT_TRUE(computed.has_value()) << computed.error();
             EXPECT_EQ(computed.value().min, cpu.min);

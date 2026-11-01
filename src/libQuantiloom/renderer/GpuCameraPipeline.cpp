@@ -2,11 +2,9 @@
 
 #include "core/Log.hpp"
 #include "core/ResultFail.hpp"
-#include "renderer/CommandHelper.hpp"
-#include "renderer/GpuBuffer.hpp"
-#include "renderer/GpuImage.hpp"
-#include "renderer/ShaderBinary.hpp"
-#include "renderer/VulkanContext.hpp"
+#include "gpu/Binding.hpp"
+#include "gpu/Device.hpp"
+#include "gpu/Resources.hpp"
 
 #include <algorithm>
 #include <array>
@@ -82,73 +80,53 @@ enum CameraFlags : u32 {
 
 using ConfigRows = std::array<std::array<f32, 4>, 9>;
 
-void StorageBarrier(VkCommandBuffer cmd) {
-    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                         1, &barrier, 0, nullptr, 0, nullptr);
+void StorageBarrier(gpu::CommandList& cmd) {
+    cmd.Barrier(gpu::GlobalBarrier{gpu::Access::ComputeWrite,
+                                   gpu::Access::ComputeRead |
+                                       gpu::Access::ComputeWrite});
 }
 
-// Copies one thermal ping-pong pair on `cmd`, bracketing the transfers with
+// The access hand-off the destination stage of a checkpoint copy needs:
+// the consumer may be the compute passes again or a later transfer copy.
+constexpr gpu::Access kCheckpointVisible =
+    gpu::Access::ComputeRead | gpu::Access::ComputeWrite |
+    gpu::Access::TransferRead;
+
+// Copies one thermal ping-pong pair, bracketing the transfers with
 // layout-preserving barriers: the sources move their last writer's access to
-// TRANSFER_READ, the destinations hand TRANSFER_WRITE back to the consumer
+// transfer-read, the destinations hand transfer-write back to the consumer
 // stage. All four images live in GENERAL throughout the pipeline's life.
-void CopyThermalPair(VkCommandBuffer cmd,
-                     const GpuImage& src0, const GpuImage& src1,
-                     const GpuImage& dst0, const GpuImage& dst1,
-                     VkAccessFlags sourceAccess,
-                     VkPipelineStageFlags sourceStage) {
-    std::array<VkImageMemoryBarrier, 2> ready{};
-    const GpuImage* sources[2] = {&src0, &src1};
-    for (u32 i = 0; i < 2; ++i) {
-        ready[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        ready[i].srcAccessMask = sourceAccess;
-        ready[i].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        ready[i].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        ready[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        ready[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready[i].image = sources[i]->GetImage();
-        ready[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        ready[i].subresourceRange.levelCount = 1;
-        ready[i].subresourceRange.layerCount = 1;
-    }
-    vkCmdPipelineBarrier(cmd, sourceStage, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr,
-                         static_cast<u32>(ready.size()), ready.data());
-    const VkImageCopy copy{
-        {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-        {0, 0, 0},
-        {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-        {0, 0, 0},
-        {src0.GetExtent().width, src0.GetExtent().height, 1}};
-    vkCmdCopyImage(cmd, src0.GetImage(), VK_IMAGE_LAYOUT_GENERAL,
-                   dst0.GetImage(), VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
-    vkCmdCopyImage(cmd, src1.GetImage(), VK_IMAGE_LAYOUT_GENERAL,
-                   dst1.GetImage(), VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
-    std::array<VkImageMemoryBarrier, 2> visible{};
-    const GpuImage* destinations[2] = {&dst0, &dst1};
-    for (u32 i = 0; i < 2; ++i) {
-        visible[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        visible[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        visible[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                                   VK_ACCESS_SHADER_WRITE_BIT |
-                                   VK_ACCESS_TRANSFER_READ_BIT;
-        visible[i].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        visible[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        visible[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        visible[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        visible[i].image = destinations[i]->GetImage();
-        visible[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        visible[i].subresourceRange.levelCount = 1;
-        visible[i].subresourceRange.layerCount = 1;
-    }
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                         0, nullptr, 0, nullptr,
-                         static_cast<u32>(visible.size()), visible.data());
+void CopyThermalPair(gpu::CommandList& cmd,
+                     gpu::TextureRef src0, gpu::TextureRef src1,
+                     gpu::TextureRef dst0, gpu::TextureRef dst1,
+                     gpu::Access sourceAccess) {
+    const gpu::TextureBarrier ready[2] = {
+        {src0, sourceAccess, gpu::Access::TransferRead},
+        {src1, sourceAccess, gpu::Access::TransferRead}};
+    cmd.Barrier(gpu::BarrierBatch{
+        {}, {}, std::span<const gpu::TextureBarrier>(ready)});
+    const gpu::TextureCopyRegion copy{src0.width, src0.height};
+    cmd.CopyTexture(src0, dst0, copy);
+    cmd.CopyTexture(src1, dst1, copy);
+    const gpu::TextureBarrier visible[2] = {
+        {dst0, gpu::Access::TransferWrite, kCheckpointVisible},
+        {dst1, gpu::Access::TransferWrite, kCheckpointVisible}};
+    cmd.Barrier(gpu::BarrierBatch{
+        {}, {}, std::span<const gpu::TextureBarrier>(visible)});
+}
+
+// Copies the statistics buffer (previous-frame AGC window + histogram) in
+// the direction the checkpoint needs, with the same access hand-off as
+// the image pair above.
+void CopyStatsBuffer(gpu::CommandList& cmd, gpu::BufferRef source,
+                     gpu::BufferRef destination, gpu::Access sourceAccess) {
+    cmd.Barrier(gpu::BufferBarrier{source, sourceAccess,
+                                   gpu::Access::TransferRead});
+    const gpu::BufferCopyRegion copy{0, 0, source.size};
+    cmd.CopyBuffer(source, destination,
+                   std::span<const gpu::BufferCopyRegion>{&copy, 1});
+    cmd.Barrier(gpu::BufferBarrier{destination, gpu::Access::TransferWrite,
+                                   kCheckpointVisible});
 }
 
 // Builds the ISP configuration rows (binding 12) and the shared ISP flag
@@ -207,43 +185,6 @@ void BuildIspRows(const camera::CameraConfig& config,
                 0.0f}};
 }
 
-// Copies the statistics buffer (previous-frame AGC window + histogram) in
-// the direction the checkpoint needs, with the same access hand-off as
-// the image pair above.
-void CopyStatsBuffer(VkCommandBuffer cmd, const GpuBuffer& source,
-                     const GpuBuffer& destination,
-                     VkAccessFlags sourceAccess,
-                     VkPipelineStageFlags sourceStage) {
-    VkBufferMemoryBarrier ready{};
-    ready.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    ready.srcAccessMask = sourceAccess;
-    ready.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    ready.buffer = source.GetHandle();
-    ready.offset = 0;
-    ready.size = VK_WHOLE_SIZE;
-    vkCmdPipelineBarrier(cmd, sourceStage, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 1, &ready, 0, nullptr);
-    VkBufferCopy copy{};
-    copy.size = source.GetSize();
-    vkCmdCopyBuffer(cmd, source.GetHandle(), destination.GetHandle(), 1, &copy);
-    VkBufferMemoryBarrier visible{};
-    visible.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    visible.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    visible.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                            VK_ACCESS_SHADER_WRITE_BIT |
-                            VK_ACCESS_TRANSFER_READ_BIT;
-    visible.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    visible.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    visible.buffer = destination.GetHandle();
-    visible.offset = 0;
-    visible.size = VK_WHOLE_SIZE;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                         0, nullptr, 1, &visible, 0, nullptr);
-}
-
 f64 EffectiveWavelengthNm(const camera::ResponseStack& response,
                           camera::DetectorKind detector) {
     // Preview-effective wavelength assumes flat incident spectral radiance
@@ -296,491 +237,6 @@ f64 EffectiveWavelengthNm(const camera::ResponseStack& response,
            0.5 * (base->MinNm() + base->MaxNm());
 }
 
-VkImageMemoryBarrier TransitionToGeneral(const GpuImage& image) {
-    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    barrier.srcAccessMask = 0;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image.GetImage();
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
-    return barrier;
-}
-
-} // namespace
-
-struct GpuCameraPipeline::Impl {
-    VulkanContext& context;
-    VkDevice device = VK_NULL_HANDLE;
-    u32 width = 0, height = 0;
-    camera::CameraConfig config;
-    bool configured = false;
-    bool imagesInGeneral = false;
-    bool hasCapture = false;
-    bool firstCaptureWasFirst = false;
-    u64 lastAcquisitionIndex = 0;
-    f64 lastFrameTimeSeconds = 0.0;
-    f64 beforeFrameTimeSeconds = 0.0;
-    f64 currentDeltaSeconds = 0.0;
-    u32 stateBefore = 0, stateCurrent = 1;
-    u32 ispFlags = 0;
-    std::array<f32, 3> sigmaX{}, sigmaY{};
-    ConfigRows configRows{};
-    // Effective-config rows staged by ApplyEffectiveConfig and written by
-    // the next record call through vkCmdUpdateBuffer (each buffer is far
-    // under 64 KiB): a host memcpy at record time could overwrite
-    // parameters a previous, still-in-flight submission is reading.
-    bool paramsPending = false;
-    ConfigRows pendingConfigRows{};
-    std::array<std::array<f32, 4>, 9> pendingIspRows{};
-
-    std::unique_ptr<GpuImage> psfTemp, blurred, rawDn, corrected, display;
-    std::unique_ptr<GpuImage> fastRgbRate;
-    std::unique_ptr<GpuImage> compositedRate;  // dynamic compositor output, PSF input
-    std::unique_ptr<GpuImage> expectedElectrons, preAdcElectrons;
-    std::unique_ptr<GpuImage> linearRgb, colorRgb, agcSource;  // ISP stage images
-    std::array<std::unique_ptr<GpuImage>, 2> thermalState;
-    std::array<std::unique_ptr<GpuImage>, 2> thermalCheckpoint; // acquisition-history snapshot
-    std::unique_ptr<GpuImage> randomVectors;
-    std::unique_ptr<GpuBuffer> configBuffer, nucGainBuffer, nucOffsetBuffer;
-    std::unique_ptr<GpuBuffer> layerCameraBuffer;   // binding 10, per-stratum frames
-    std::unique_ptr<GpuBuffer> dynamicCounterBuffer; // binding 11, 4 x u32
-    std::unique_ptr<GpuBuffer> ispConfigBuffer;     // binding 12, 9 x float4
-    std::unique_ptr<GpuBuffer> defectPixelsBuffer;  // binding 13, uint2 array
-    std::unique_ptr<GpuBuffer> ispStatsBuffer;      // binding 14, 272 x u32
-    // Readback staging, allocated once with the pipeline instead of per
-    // call: both readbacks run between frames and reuse the same copy.
-    std::unique_ptr<GpuBuffer> counterStaging;
-    std::unique_ptr<GpuBuffer> ispStatsStaging;
-    std::unique_ptr<GpuBuffer> cdfBuffer;           // binding 15, 256 x f32
-    std::unique_ptr<GpuBuffer> tileStatsBuffer;     // binding 16, per-tile float4
-    std::unique_ptr<GpuBuffer> ispStatsCheckpoint;  // previous-frame AGC window snapshot (acquisition history)
-
-    // Writes the effective-config rows staged by ApplyEffectiveConfig into
-    // the device buffers, inside the recorded command buffer.
-    // vkCmdUpdateBuffer is limited to 64 KiB per call; both buffers are
-    // 144 bytes. Queue order then guarantees the write lands after any
-    // in-flight frame that read the previous values, which a record-time
-    // host memcpy could not.
-    void UploadPendingParams(VkCommandBuffer cmd) {
-        if (!paramsPending) return;
-        vkCmdUpdateBuffer(cmd, configBuffer->GetHandle(), 0,
-                          sizeof(pendingConfigRows), pendingConfigRows.data());
-        vkCmdUpdateBuffer(cmd, ispConfigBuffer->GetHandle(), 0,
-                          sizeof(pendingIspRows), pendingIspRows.data());
-        std::array<VkBufferMemoryBarrier, 2> uploaded{};
-        const VkBuffer buffers[] = {configBuffer->GetHandle(),
-                                    ispConfigBuffer->GetHandle()};
-        for (u32 i = 0; i < uploaded.size(); ++i) {
-            uploaded[i].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-            uploaded[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            uploaded[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            uploaded[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            uploaded[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            uploaded[i].buffer = buffers[i];
-            uploaded[i].offset = 0;
-            uploaded[i].size = VK_WHOLE_SIZE;
-        }
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                             0, nullptr, static_cast<u32>(uploaded.size()),
-                             uploaded.data(), 0, nullptr);
-        paramsPending = false;
-    }
-
-    VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
-    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    VkPipeline psfPipeline = VK_NULL_HANDLE;
-    VkPipeline readoutPipeline = VK_NULL_HANDLE;
-    VkPipeline statsTilesPipeline = VK_NULL_HANDLE;
-    VkPipeline statsReducePipeline = VK_NULL_HANDLE;
-    VkPipeline statsHistPipeline = VK_NULL_HANDLE;
-    VkPipeline cdfPipeline = VK_NULL_HANDLE;
-    VkPipeline demosaicPipeline = VK_NULL_HANDLE;
-    VkPipeline hsvPipeline = VK_NULL_HANDLE;
-    VkPipeline rngPipeline = VK_NULL_HANDLE;
-    VkPipeline fastRgbPipeline = VK_NULL_HANDLE;
-    VkPipeline dynamicPipeline = VK_NULL_HANDLE;
-    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-    // 0/1: PSF H/V reading the caller's measured rate directly (unstratified
-    // path). 2/3: readout ping/pong. 4: display. 5: RNG audit. 6: fast RGB.
-    // 7: dynamic compositor (strata array inputs, composited output).
-    // 8/9: PSF H/V reading the compositor output (stratified path).
-    // 10: acquisition statistics. 11: demosaic. 12: unused. 13: CDF.
-    // 14: HSV (display image bound as both input and in-place output).
-    // Immutable while frames may be in flight; Configure waits idle first.
-    std::array<VkDescriptorSet, 15> sets{};
-    VkImageView measurementView = VK_NULL_HANDLE;
-    VkImageView fastRgbInputView = VK_NULL_HANDLE;
-    VkImageView strataRateView = VK_NULL_HANDLE;
-    VkImageView strataDepthView = VK_NULL_HANDLE;
-
-    Impl(VulkanContext& c, u32 w, u32 h)
-        : context(c), device(c.GetDevice()), width(w), height(h) {}
-
-    ~Impl() {
-        if (device == VK_NULL_HANDLE) return;
-        for (auto pipeline : {psfPipeline, readoutPipeline, statsTilesPipeline,
-                              statsReducePipeline, statsHistPipeline,
-                              cdfPipeline, demosaicPipeline,
-                              hsvPipeline, rngPipeline,
-                              fastRgbPipeline, dynamicPipeline})
-            if (pipeline != VK_NULL_HANDLE)
-                vkDestroyPipeline(device, pipeline, nullptr);
-        if (descriptorPool != VK_NULL_HANDLE)
-            vkDestroyDescriptorPool(device, descriptorPool, nullptr);
-        if (pipelineLayout != VK_NULL_HANDLE)
-            vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-        if (setLayout != VK_NULL_HANDLE)
-            vkDestroyDescriptorSetLayout(device, setLayout, nullptr);
-    }
-
-    bool MakeImage(std::unique_ptr<GpuImage>& target, VkFormat format) {
-        target = std::make_unique<GpuImage>(
-            context.GetAllocator(), device, width, height, format,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY);
-        return target && target->IsValid();
-    }
-
-    Result<void, String> Initialize();
-    Result<void, String> CreatePipeline(StringView spirvName, VkPipeline& output);
-    void TransitionImages(VkCommandBuffer cmd);
-    void UpdateSet(VkDescriptorSet set, const std::array<const GpuImage*, 7>& images);
-    void BindAndDispatch(VkCommandBuffer cmd, VkPipeline pipeline,
-                         VkDescriptorSet set, const CameraPush& push);
-    void BindAndDispatchGrid(VkCommandBuffer cmd, VkPipeline pipeline,
-                             VkDescriptorSet set, const CameraPush& push,
-                             u32 groupsX, u32 groupsY);
-    CameraPush MakePush(u64 acquisitionIndex, f64 frameTimeSeconds) const;
-};
-
-Result<void, String> GpuCameraPipeline::Impl::CreatePipeline(
-    StringView spirvName, VkPipeline& output) {
-    const auto spirv = LoadSpirv(spirvName);
-    if (spirv.empty())
-        return Result<void, String>::Err(
-            "camera shader not found: " + String(spirvName));
-    VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    moduleInfo.codeSize = spirv.size() * sizeof(u32);
-    moduleInfo.pCode = spirv.data();
-    VkShaderModule module = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(device, &moduleInfo, nullptr, &module) != VK_SUCCESS)
-        return Result<void, String>::Err(
-            "cannot create camera shader module: " + String(spirvName));
-    VkPipelineShaderStageCreateInfo stage{
-        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    stage.module = module;
-    stage.pName = "main";
-    VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    info.stage = stage;
-    info.layout = pipelineLayout;
-    const VkResult created = vkCreateComputePipelines(
-        device, VK_NULL_HANDLE, 1, &info, nullptr, &output);
-    vkDestroyShaderModule(device, module, nullptr);
-    if (created != VK_SUCCESS)
-        return Result<void, String>::Err(
-            "cannot create camera compute pipeline: " + String(spirvName));
-    return Result<void, String>::Ok();
-}
-
-Result<void, String> GpuCameraPipeline::Impl::Initialize() {
-    if (width == 0 || height == 0)
-        return Result<void, String>::Err("GPU camera extent must be positive");
-    if (!MakeImage(psfTemp, VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(blurred, VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(rawDn, VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(corrected, VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(display, VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(fastRgbRate, VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(compositedRate, VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(expectedElectrons, VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(preAdcElectrons, VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(linearRgb, VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(colorRgb, VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(agcSource, VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(thermalState[0], VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(thermalState[1], VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(thermalCheckpoint[0], VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(thermalCheckpoint[1], VK_FORMAT_R32G32B32A32_SFLOAT) ||
-        !MakeImage(randomVectors, VK_FORMAT_R32G32B32A32_UINT))
-        return Result<void, String>::Err("cannot allocate GPU camera images");
-
-    // Bindings 0-6 are storage images, 7-16 storage buffers. The camera
-    // config (binding 9), per-stratum frames (10) and the ISP set (12-16)
-    // share one layout; every set binds all of them, used or not.
-    std::array<VkDescriptorSetLayoutBinding, 17> bindings{};
-    for (u32 i = 0; i < bindings.size(); ++i) {
-        bindings[i].binding = i;
-        bindings[i].descriptorType = i < 7
-            ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[i].descriptorCount = 1;
-        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    }
-    // Bindings 0/1 may hold 2D-array views (the dynamic compositor's strata)
-    // that other sets of this shared layout never use; the compositor is the
-    // only consumer and only touches them when a stratified measurement is
-    // actually recorded.
-    std::array<VkDescriptorBindingFlags, 17> bindingFlags{};
-    bindingFlags[0] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
-    bindingFlags[1] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
-    VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
-    bindingFlagsInfo.bindingCount = static_cast<u32>(bindingFlags.size());
-    bindingFlagsInfo.pBindingFlags = bindingFlags.data();
-    VkDescriptorSetLayoutCreateInfo setInfo{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    setInfo.pNext = &bindingFlagsInfo;
-    setInfo.bindingCount = static_cast<u32>(bindings.size());
-    setInfo.pBindings = bindings.data();
-    if (vkCreateDescriptorSetLayout(device, &setInfo, nullptr, &setLayout) != VK_SUCCESS)
-        return Result<void, String>::Err("cannot create GPU camera descriptor layout");
-
-    VkPushConstantRange pushRange{};
-    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushRange.offset = 0;
-    pushRange.size = sizeof(CameraPush);
-    VkPipelineLayoutCreateInfo layoutInfo{
-        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    layoutInfo.setLayoutCount = 1;
-    layoutInfo.pSetLayouts = &setLayout;
-    layoutInfo.pushConstantRangeCount = 1;
-    layoutInfo.pPushConstantRanges = &pushRange;
-    if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
-        return Result<void, String>::Err("cannot create GPU camera pipeline layout");
-
-    const std::array<std::pair<StringView, VkPipeline*>, 11> shaders{{
-        {"camera_psf.comp.spv", &psfPipeline},
-        {"camera_readout.comp.spv", &readoutPipeline},
-        {"camera_stats_tiles.comp.spv", &statsTilesPipeline},
-        {"camera_stats_reduce.comp.spv", &statsReducePipeline},
-        {"camera_stats_hist.comp.spv", &statsHistPipeline},
-        {"camera_cdf.comp.spv", &cdfPipeline},
-        {"camera_demosaic.comp.spv", &demosaicPipeline},
-        {"camera_hsv.comp.spv", &hsvPipeline},
-        {"camera_rng_vectors.comp.spv", &rngPipeline},
-        {"camera_fast_rgb.comp.spv", &fastRgbPipeline},
-        {"camera_dynamic.comp.spv", &dynamicPipeline}
-    }};
-    for (const auto& [name, pipeline] : shaders) {
-        auto created = CreatePipeline(name, *pipeline);
-        if (!created) return created;
-    }
-
-    const std::array<VkDescriptorPoolSize, 2> sizes{{
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 7u * static_cast<u32>(sets.size())},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10u * static_cast<u32>(sets.size())}
-    }};
-    VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    poolInfo.maxSets = static_cast<u32>(sets.size());
-    poolInfo.poolSizeCount = static_cast<u32>(sizes.size());
-    poolInfo.pPoolSizes = sizes.data();
-    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS)
-        return Result<void, String>::Err("cannot create GPU camera descriptor pool");
-    std::array<VkDescriptorSetLayout, 15> layouts{};
-    layouts.fill(setLayout);
-    VkDescriptorSetAllocateInfo allocInfo{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    allocInfo.descriptorPool = descriptorPool;
-    allocInfo.descriptorSetCount = static_cast<u32>(layouts.size());
-    allocInfo.pSetLayouts = layouts.data();
-    if (vkAllocateDescriptorSets(device, &allocInfo, sets.data()) != VK_SUCCESS)
-        return Result<void, String>::Err("cannot allocate GPU camera descriptor sets");
-
-    // Per-stratum camera frames (binding 10) and the compositor's disocclusion
-    // counters (binding 11). Both are bound into every set, used or not. The
-    // frame buffer lives in device memory: each measurement writes it inside
-    // the recorded command buffer (vkCmdUpdateBuffer), so an in-flight frame
-    // from a previous submission can no longer read a half-overwritten copy.
-    layerCameraBuffer = std::make_unique<GpuBuffer>(
-        context.GetAllocator(),
-        8u * sizeof(DynamicLayerCamera),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY);
-    dynamicCounterBuffer = std::make_unique<GpuBuffer>(
-        context.GetAllocator(), 4u * sizeof(u32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY);
-    // ISP statistics (binding 14), Equalize CDF (15) and per-tile partials
-    // (16). The statistics buffer is zeroed so the first acquisition's
-    // previous-frame window is degenerate and the display pass falls back to
-    // the current frame's range.
-    ispStatsBuffer = std::make_unique<GpuBuffer>(
-        context.GetAllocator(), isp::kStatsSlots * sizeof(u32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY);
-    cdfBuffer = std::make_unique<GpuBuffer>(
-        context.GetAllocator(), 256u * sizeof(f32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-    const VkDeviceSize tileCount =
-        static_cast<VkDeviceSize>((width + 15u) / 16u) * ((height + 15u) / 16u);
-    // Four float4 rows per tile (all-element min/max/sum/sat, per-channel
-    // unsaturated sums and counts, unsaturated channel-0 display range --
-    // camera_stats phases 0/1), then the per-tile 256-bin histogram block
-    // the phase-2 flush writes and the CDF pass merges.
-    tileStatsBuffer = std::make_unique<GpuBuffer>(
-        context.GetAllocator(), tileCount * (16u + 256u) * sizeof(u32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-    if (!layerCameraBuffer->IsValid() || !dynamicCounterBuffer->IsValid() ||
-        !ispStatsBuffer->IsValid() || !cdfBuffer->IsValid() ||
-        !tileStatsBuffer->IsValid())
-        return Result<void, String>::Err(
-            "cannot allocate GPU camera dynamic buffers");
-    // Acquisition history: the checkpoint twin of the statistics buffer. The previous
-    // frame's Linear-AGC window rides in the stats slots; without a snapshot
-    // a replayed tick's display tone would read the discarded run's window
-    // and the replay would not be bit-identical.
-    ispStatsCheckpoint = std::make_unique<GpuBuffer>(
-        context.GetAllocator(), isp::kStatsSlots * sizeof(u32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY);
-    if (!ispStatsCheckpoint->IsValid())
-        return Result<void, String>::Err(
-            "cannot allocate GPU camera checkpoint buffer");
-    counterStaging = std::make_unique<GpuBuffer>(
-        context.GetAllocator(), 4u * sizeof(u32),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
-    ispStatsStaging = std::make_unique<GpuBuffer>(
-        context.GetAllocator(), isp::kStatsSlots * sizeof(u32),
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
-    if (!counterStaging->IsValid() || !ispStatsStaging->IsValid())
-        return Result<void, String>::Err(
-            "cannot allocate GPU camera statistics staging");
-    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        vkCmdFillBuffer(cmd, layerCameraBuffer->GetHandle(), 0,
-                        VK_WHOLE_SIZE, 0);
-        vkCmdFillBuffer(cmd, dynamicCounterBuffer->GetHandle(), 0,
-                        VK_WHOLE_SIZE, 0);
-        vkCmdFillBuffer(cmd, ispStatsBuffer->GetHandle(), 0, VK_WHOLE_SIZE, 0);
-    });
-    return Result<void, String>::Ok();
-}
-
-void GpuCameraPipeline::Impl::TransitionImages(VkCommandBuffer cmd) {
-    if (imagesInGeneral) return;
-    const std::array<const GpuImage*, 17> images{
-        psfTemp.get(), blurred.get(), rawDn.get(), corrected.get(),
-        display.get(), fastRgbRate.get(), expectedElectrons.get(), preAdcElectrons.get(),
-        thermalState[0].get(), thermalState[1].get(), randomVectors.get(),
-        compositedRate.get(), linearRgb.get(), colorRgb.get(), agcSource.get(),
-        thermalCheckpoint[0].get(), thermalCheckpoint[1].get()};
-    std::array<VkImageMemoryBarrier, 17> barriers{};
-    for (size_t i = 0; i < images.size(); ++i)
-        barriers[i] = TransitionToGeneral(*images[i]);
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
-                         0, nullptr, static_cast<u32>(barriers.size()),
-                         barriers.data());
-    imagesInGeneral = true;
-}
-
-void GpuCameraPipeline::Impl::UpdateSet(
-    VkDescriptorSet set, const std::array<const GpuImage*, 7>& images) {
-    std::array<VkDescriptorImageInfo, 7> imageInfo{};
-    std::array<VkDescriptorBufferInfo, 10> bufferInfo{};
-    std::array<VkWriteDescriptorSet, 17> writes{};
-    for (u32 i = 0; i < imageInfo.size(); ++i) {
-        imageInfo[i].imageView = images[i]->GetView();
-        imageInfo[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[i].dstSet = set;
-        writes[i].dstBinding = i;
-        writes[i].descriptorCount = 1;
-        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[i].pImageInfo = &imageInfo[i];
-    }
-    const GpuBuffer* buffers[] = {
-        nucGainBuffer.get(), nucOffsetBuffer.get(), configBuffer.get(),
-        layerCameraBuffer.get(), dynamicCounterBuffer.get(),
-        ispConfigBuffer.get(), defectPixelsBuffer.get(),
-        ispStatsBuffer.get(), cdfBuffer.get(), tileStatsBuffer.get()};
-    for (u32 i = 0; i < bufferInfo.size(); ++i) {
-        bufferInfo[i].buffer = buffers[i]->GetHandle();
-        bufferInfo[i].offset = 0;
-        bufferInfo[i].range = buffers[i]->GetSize();
-        writes[7 + i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[7 + i].dstSet = set;
-        writes[7 + i].dstBinding = 7 + i;
-        writes[7 + i].descriptorCount = 1;
-        writes[7 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[7 + i].pBufferInfo = &bufferInfo[i];
-    }
-    vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()),
-                           writes.data(), 0, nullptr);
-}
-
-void GpuCameraPipeline::Impl::BindAndDispatch(
-    VkCommandBuffer cmd, VkPipeline pipeline, VkDescriptorSet set,
-    const CameraPush& push) {
-    BindAndDispatchGrid(cmd, pipeline, set, push,
-                        (width + 15) / 16, (height + 15) / 16);
-}
-
-void GpuCameraPipeline::Impl::BindAndDispatchGrid(
-    VkCommandBuffer cmd, VkPipeline pipeline, VkDescriptorSet set,
-    const CameraPush& push, u32 groupsX, u32 groupsY) {
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            pipelineLayout, 0, 1, &set, 0, nullptr);
-    vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
-                       0, sizeof(push), &push);
-    vkCmdDispatch(cmd, groupsX, groupsY, 1);
-}
-
-CameraPush GpuCameraPipeline::Impl::MakePush(
-    u64 acquisitionIndex, f64 frameTimeSeconds) const {
-    CameraPush push;
-    push.width = width;
-    push.height = height;
-    push.physicalWidth = config.optics.sensorWidthPx;
-    push.physicalHeight = config.optics.sensorHeightPx;
-    push.channelCount = static_cast<u32>(config.device.channels.size());
-    push.cfa = static_cast<u32>(config.device.cfa);
-    push.detector = static_cast<u32>(config.device.detector);
-    push.seed = camera::DeviceRandomSeed(config);
-    push.acquisitionLo = static_cast<u32>(acquisitionIndex);
-    push.acquisitionHi = static_cast<u32>(acquisitionIndex >> 32);
-    push.adcBits = config.readout.adcBits;
-    push.frameTimeSeconds = static_cast<f32>(frameTimeSeconds);
-    push.deltaSeconds = static_cast<f32>(currentDeltaSeconds);
-    push.firstThermal = firstCaptureWasFirst ? 1u : 0u;
-    push.sigmaR = sigmaX[0];
-    push.sigmaG = sigmaX[1];
-    push.sigmaB = sigmaX[2];
-    push.sigmaRy = sigmaY[0];
-    push.sigmaGy = sigmaY[1];
-    push.sigmaBy = sigmaY[2];
-    if (config.optics.cosFourthVignetting) push.flags |= Vignette;
-    if (config.quality.noiseFree) push.flags |= NoiseFree;
-    if (config.device.detector == camera::DetectorKind::Photon) {
-        if (config.photon.enableShotNoise) push.flags |= Shot;
-        if (config.photon.enableDarkCurrent) push.flags |= DarkCurrent;
-        if (config.photon.enableDarkShotNoise) push.flags |= DarkShot;
-        if (config.photon.enableReadNoise) push.flags |= Read;
-        if (config.photon.enableFpn) push.flags |= Fpn;
-        if (config.photon.applyNuc) push.flags |= Nuc;
-        if (!config.photon.nucGainMap.empty()) push.flags |= NucGainMap;
-        if (!config.photon.nucOffsetElectronsMap.empty()) push.flags |= NucOffsetMap;
-    } else {
-        if (!config.thermal.nucGainMap.empty()) push.flags |= NucGainMap;
-        if (!config.thermal.nucOffsetDnMap.empty()) push.flags |= NucOffsetMap;
-    }
-    return push;
-}
-
-namespace {
-
 Result<void, String> UpdateReadoutRows(
     const camera::CameraConfig& config,
     std::array<std::array<f32, 4>, 9>& rows) {
@@ -831,14 +287,473 @@ Result<void, String> UpdateReadoutRows(
 
 } // namespace
 
+struct GpuCameraPipeline::Impl {
+    gpu::Device& device;
+    u32 width = 0, height = 0;
+    camera::CameraConfig config;
+    bool configured = false;
+    bool imagesInGeneral = false;
+    bool hasCapture = false;
+    bool firstCaptureWasFirst = false;
+    u64 lastAcquisitionIndex = 0;
+    f64 lastFrameTimeSeconds = 0.0;
+    f64 beforeFrameTimeSeconds = 0.0;
+    f64 currentDeltaSeconds = 0.0;
+    u32 stateBefore = 0, stateCurrent = 1;
+    u32 ispFlags = 0;
+    std::array<f32, 3> sigmaX{}, sigmaY{};
+    ConfigRows configRows{};
+    // Effective-config rows staged by ApplyEffectiveConfig and written by
+    // the next record call through in-command-buffer constant updates (each
+    // buffer is far under the 64 KiB limit): a host memcpy at record time
+    // could overwrite parameters a previous, still-in-flight submission is
+    // reading.
+    bool paramsPending = false;
+    ConfigRows pendingConfigRows{};
+    std::array<std::array<f32, 4>, 9> pendingIspRows{};
+
+    std::unique_ptr<gpu::Texture> psfTemp, blurred, rawDn, corrected, display;
+    std::unique_ptr<gpu::Texture> fastRgbRate;
+    std::unique_ptr<gpu::Texture> compositedRate;  // dynamic compositor output, PSF input
+    std::unique_ptr<gpu::Texture> expectedElectrons, preAdcElectrons;
+    std::unique_ptr<gpu::Texture> linearRgb, colorRgb, agcSource;  // ISP stage images
+    std::array<std::unique_ptr<gpu::Texture>, 2> thermalState;
+    std::array<std::unique_ptr<gpu::Texture>, 2> thermalCheckpoint; // acquisition-history snapshot
+    std::unique_ptr<gpu::Texture> randomVectors;
+    std::unique_ptr<gpu::Buffer> configBuffer, nucGainBuffer, nucOffsetBuffer;
+    std::unique_ptr<gpu::Buffer> layerCameraBuffer;   // binding 10, per-stratum frames
+    std::unique_ptr<gpu::Buffer> dynamicCounterBuffer; // binding 11, 4 x u32
+    std::unique_ptr<gpu::Buffer> ispConfigBuffer;     // binding 12, 9 x float4
+    std::unique_ptr<gpu::Buffer> defectPixelsBuffer;  // binding 13, uint2 array
+    std::unique_ptr<gpu::Buffer> ispStatsBuffer;      // binding 14, 272 x u32
+    // Readback staging, allocated once with the pipeline instead of per
+    // call: both readbacks run between frames and reuse the same copy.
+    std::unique_ptr<gpu::Buffer> counterStaging;
+    std::unique_ptr<gpu::Buffer> ispStatsStaging;
+    std::unique_ptr<gpu::Buffer> cdfBuffer;           // binding 15, 256 x f32
+    std::unique_ptr<gpu::Buffer> tileStatsBuffer;     // binding 16, per-tile float4
+    std::unique_ptr<gpu::Buffer> ispStatsCheckpoint;  // previous-frame AGC window snapshot (acquisition history)
+
+    // Writes the effective-config rows staged by ApplyEffectiveConfig into
+    // the device buffers, inside the recorded command buffer. Queue order
+    // then guarantees the write lands after any in-flight frame that read
+    // the previous values, which a record-time host memcpy could not.
+    void UploadPendingParams(gpu::CommandList& cmd) {
+        if (!paramsPending) return;
+        cmd.UpdateBuffer(configBuffer->Ref(), 0,
+                         std::span<const std::byte>(
+                             reinterpret_cast<const std::byte*>(pendingConfigRows.data()),
+                             sizeof(pendingConfigRows)));
+        cmd.UpdateBuffer(ispConfigBuffer->Ref(), 0,
+                         std::span<const std::byte>(
+                             reinterpret_cast<const std::byte*>(pendingIspRows.data()),
+                             sizeof(pendingIspRows)));
+        const gpu::BufferBarrier uploaded[2] = {
+            {configBuffer->Ref(), gpu::Access::TransferWrite,
+             gpu::Access::ComputeRead},
+            {ispConfigBuffer->Ref(), gpu::Access::TransferWrite,
+             gpu::Access::ComputeRead}};
+        cmd.Barrier(gpu::BarrierBatch{
+            {}, std::span<const gpu::BufferBarrier>(uploaded), {}});
+        paramsPending = false;
+    }
+
+    std::unique_ptr<gpu::BindingLayout> setLayout;
+    std::unique_ptr<gpu::KernelLayout> pipelineLayout;
+    std::unique_ptr<gpu::ComputeKernel> psfKernel;
+    std::unique_ptr<gpu::ComputeKernel> readoutKernel;
+    std::unique_ptr<gpu::ComputeKernel> statsTilesKernel;
+    std::unique_ptr<gpu::ComputeKernel> statsReduceKernel;
+    std::unique_ptr<gpu::ComputeKernel> statsHistKernel;
+    std::unique_ptr<gpu::ComputeKernel> cdfKernel;
+    std::unique_ptr<gpu::ComputeKernel> demosaicKernel;
+    std::unique_ptr<gpu::ComputeKernel> hsvKernel;
+    std::unique_ptr<gpu::ComputeKernel> rngKernel;
+    std::unique_ptr<gpu::ComputeKernel> fastRgbKernel;
+    std::unique_ptr<gpu::ComputeKernel> dynamicKernel;
+    std::unique_ptr<gpu::BindGroupPool> descriptorPool;
+    // 0/1: PSF H/V reading the caller's measured rate directly (unstratified
+    // path). 2/3: readout ping/pong. 4: display. 5: RNG audit. 6: fast RGB.
+    // 7: dynamic compositor (strata array inputs, composited output).
+    // 8/9: PSF H/V reading the compositor output (stratified path).
+    // 10: acquisition statistics. 11: demosaic. 12: unused. 13: CDF.
+    // 14: HSV (display image bound as both input and in-place output).
+    // Immutable while frames may be in flight; Configure waits idle first.
+    std::array<gpu::BindGroup, 15> groups{};
+    // What the "the caller's image changed" guards compare: the identity a
+    // descriptor names. Zero means the lazy binding has not happened yet.
+    gpu::NativeHandle measurementIdentity = 0;
+    gpu::NativeHandle fastRgbInputIdentity = 0;
+    gpu::NativeHandle strataRateIdentity = 0;
+    gpu::NativeHandle strataDepthIdentity = 0;
+
+    Impl(gpu::Device& dev, u32 w, u32 h) : device(dev), width(w), height(h) {}
+
+    bool MakeImage(std::unique_ptr<gpu::Texture>& target, gpu::Format format) {
+        auto texture = device.CreateTexture(gpu::TextureDesc{
+            width, height, 1, 1, format,
+            gpu::TextureUsage::Storage | gpu::TextureUsage::Sampled |
+                gpu::TextureUsage::TransferSrc | gpu::TextureUsage::TransferDst,
+            gpu::TextureDimension::Tex2D, gpu::MemoryClass::DeviceLocal});
+        if (!texture.has_value()) return false;
+        target = std::move(texture.value());
+        return true;
+    }
+
+    Result<void, String> Initialize();
+    void TransitionImages(gpu::CommandList& cmd);
+    void UpdateSet(gpu::BindGroup set, const std::array<gpu::TextureRef, 7>& images);
+    void BindAndDispatch(gpu::CommandList& cmd, const gpu::ComputeKernel& kernel,
+                         gpu::BindGroup set, const CameraPush& push);
+    void BindAndDispatchGrid(gpu::CommandList& cmd, const gpu::ComputeKernel& kernel,
+                             gpu::BindGroup set, const CameraPush& push,
+                             u32 groupsX, u32 groupsY);
+    CameraPush MakePush(u64 acquisitionIndex, f64 frameTimeSeconds) const;
+};
+
+Result<void, String> GpuCameraPipeline::Impl::Initialize() {
+    if (width == 0 || height == 0)
+        return Result<void, String>::Err("GPU camera extent must be positive");
+    if (!MakeImage(psfTemp, gpu::Format::RGBA32Float) ||
+        !MakeImage(blurred, gpu::Format::RGBA32Float) ||
+        !MakeImage(rawDn, gpu::Format::RGBA32Float) ||
+        !MakeImage(corrected, gpu::Format::RGBA32Float) ||
+        !MakeImage(display, gpu::Format::RGBA32Float) ||
+        !MakeImage(fastRgbRate, gpu::Format::RGBA32Float) ||
+        !MakeImage(compositedRate, gpu::Format::RGBA32Float) ||
+        !MakeImage(expectedElectrons, gpu::Format::RGBA32Float) ||
+        !MakeImage(preAdcElectrons, gpu::Format::RGBA32Float) ||
+        !MakeImage(linearRgb, gpu::Format::RGBA32Float) ||
+        !MakeImage(colorRgb, gpu::Format::RGBA32Float) ||
+        !MakeImage(agcSource, gpu::Format::RGBA32Float) ||
+        !MakeImage(thermalState[0], gpu::Format::RGBA32Float) ||
+        !MakeImage(thermalState[1], gpu::Format::RGBA32Float) ||
+        !MakeImage(thermalCheckpoint[0], gpu::Format::RGBA32Float) ||
+        !MakeImage(thermalCheckpoint[1], gpu::Format::RGBA32Float) ||
+        !MakeImage(randomVectors, gpu::Format::RGBA32Uint))
+        return Result<void, String>::Err("cannot allocate GPU camera images");
+
+    // Bindings 0-6 are storage images, 7-16 storage buffers, mirroring the
+    // register classes in camera_*.comp.hlsl (t7-t10, t12, t13 read-only;
+    // u11, u14-u16 read-write). Bindings 0/1 may hold 2D-array views (the
+    // dynamic compositor's strata) that other sets of this shared layout
+    // never use; the compositor is the only consumer and only touches them
+    // when a stratified measurement is actually recorded.
+    constexpr gpu::BindingSlot kSlots[] = {
+        {0, gpu::BindingKind::StorageTexture, 1, true},
+        {1, gpu::BindingKind::StorageTexture, 1, true},
+        {2, gpu::BindingKind::StorageTexture, 1, false},
+        {3, gpu::BindingKind::StorageTexture, 1, false},
+        {4, gpu::BindingKind::StorageTexture, 1, false},
+        {5, gpu::BindingKind::StorageTexture, 1, false},
+        {6, gpu::BindingKind::StorageTexture, 1, false},
+        {7, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+        {8, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+        {9, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+        {10, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+        {11, gpu::BindingKind::ReadWriteBuffer, 1, false},
+        {12, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+        {13, gpu::BindingKind::ReadOnlyBuffer, 1, false},
+        {14, gpu::BindingKind::ReadWriteBuffer, 1, false},
+        {15, gpu::BindingKind::ReadWriteBuffer, 1, false},
+        {16, gpu::BindingKind::ReadWriteBuffer, 1, false},
+    };
+    auto layoutResult = device.CreateBindingLayout(
+        gpu::BindingLayoutDesc{0, std::span<const gpu::BindingSlot>(kSlots)});
+    if (!layoutResult.has_value())
+        return Result<void, String>::Err("cannot create GPU camera descriptor layout");
+
+    const gpu::BindingLayout* spaces[] = {layoutResult.value().get()};
+    auto kernelLayoutResult = device.CreateKernelLayout(gpu::KernelLayoutDesc{
+        std::span<const gpu::BindingLayout* const>(spaces), sizeof(CameraPush)});
+    if (!kernelLayoutResult.has_value())
+        return Result<void, String>::Err("cannot create GPU camera pipeline layout");
+
+    const StringView kShaderNames[] = {
+        "camera_psf.comp",
+        "camera_readout.comp",
+        "camera_stats_tiles.comp",
+        "camera_stats_reduce.comp",
+        "camera_stats_hist.comp",
+        "camera_cdf.comp",
+        "camera_demosaic.comp",
+        "camera_hsv.comp",
+        "camera_rng_vectors.comp",
+        "camera_fast_rgb.comp",
+        "camera_dynamic.comp",
+    };
+    auto shaders = device.Shaders().Load(kShaderNames);
+    if (!shaders.has_value())
+        return Result<void, String>::Err(
+            "cannot load camera compute kernels: " + shaders.error());
+
+    const gpu::KernelLayout* kernelLayout = kernelLayoutResult.value().get();
+    auto psfResult = device.CreateComputeKernel(
+        gpu::ComputeKernelDesc{&shaders.value()[0], kernelLayout});
+    if (!psfResult.has_value())
+        return Result<void, String>::Err("cannot create camera compute pipeline");
+    auto readoutResult = device.CreateComputeKernel(
+        gpu::ComputeKernelDesc{&shaders.value()[1], kernelLayout});
+    if (!readoutResult.has_value())
+        return Result<void, String>::Err("cannot create camera compute pipeline");
+    auto statsTilesResult = device.CreateComputeKernel(
+        gpu::ComputeKernelDesc{&shaders.value()[2], kernelLayout});
+    if (!statsTilesResult.has_value())
+        return Result<void, String>::Err("cannot create camera compute pipeline");
+    auto statsReduceResult = device.CreateComputeKernel(
+        gpu::ComputeKernelDesc{&shaders.value()[3], kernelLayout});
+    if (!statsReduceResult.has_value())
+        return Result<void, String>::Err("cannot create camera compute pipeline");
+    auto statsHistResult = device.CreateComputeKernel(
+        gpu::ComputeKernelDesc{&shaders.value()[4], kernelLayout});
+    if (!statsHistResult.has_value())
+        return Result<void, String>::Err("cannot create camera compute pipeline");
+    auto cdfResult = device.CreateComputeKernel(
+        gpu::ComputeKernelDesc{&shaders.value()[5], kernelLayout});
+    if (!cdfResult.has_value())
+        return Result<void, String>::Err("cannot create camera compute pipeline");
+    auto demosaicResult = device.CreateComputeKernel(
+        gpu::ComputeKernelDesc{&shaders.value()[6], kernelLayout});
+    if (!demosaicResult.has_value())
+        return Result<void, String>::Err("cannot create camera compute pipeline");
+    auto hsvResult = device.CreateComputeKernel(
+        gpu::ComputeKernelDesc{&shaders.value()[7], kernelLayout});
+    if (!hsvResult.has_value())
+        return Result<void, String>::Err("cannot create camera compute pipeline");
+    auto rngResult = device.CreateComputeKernel(
+        gpu::ComputeKernelDesc{&shaders.value()[8], kernelLayout});
+    if (!rngResult.has_value())
+        return Result<void, String>::Err("cannot create camera compute pipeline");
+    auto fastRgbResult = device.CreateComputeKernel(
+        gpu::ComputeKernelDesc{&shaders.value()[9], kernelLayout});
+    if (!fastRgbResult.has_value())
+        return Result<void, String>::Err("cannot create camera compute pipeline");
+    auto dynamicResult = device.CreateComputeKernel(
+        gpu::ComputeKernelDesc{&shaders.value()[10], kernelLayout});
+    if (!dynamicResult.has_value())
+        return Result<void, String>::Err("cannot create camera compute pipeline");
+
+    auto poolResult = device.CreateBindGroupPool(
+        *layoutResult.value(), static_cast<u32>(groups.size()));
+    if (!poolResult.has_value())
+        return Result<void, String>::Err("cannot create GPU camera descriptor pool");
+    auto allocated = poolResult.value()->Allocate(static_cast<u32>(groups.size()));
+    if (!allocated.has_value())
+        return Result<void, String>::Err("cannot allocate GPU camera descriptor sets");
+
+    // Per-stratum camera frames (binding 10) and the compositor's disocclusion
+    // counters (binding 11). Both are bound into every set, used or not. The
+    // frame buffer lives in device memory: each measurement writes it inside
+    // the recorded command buffer, so an in-flight frame from a previous
+    // submission can no longer read a half-overwritten copy.
+    auto makeDeviceBuffer = [&](u64 size, gpu::BufferUsage usage)
+        -> Result<std::unique_ptr<gpu::Buffer>, String> {
+        auto buffer = device.CreateBuffer(
+            gpu::BufferDesc{size, usage, gpu::MemoryClass::DeviceLocal, 0});
+        if (!buffer.has_value())
+            return Fail<std::unique_ptr<gpu::Buffer>>(buffer.error());
+        return std::move(buffer.value());
+    };
+    auto layerCameraResult = makeDeviceBuffer(
+        8u * sizeof(DynamicLayerCamera),
+        gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst);
+    auto dynamicCounterResult = makeDeviceBuffer(
+        4u * sizeof(u32),
+        gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst |
+            gpu::BufferUsage::TransferSrc);
+    // ISP statistics (binding 14), Equalize CDF (15) and per-tile partials
+    // (16). The statistics buffer is zeroed so the first acquisition's
+    // previous-frame window is degenerate and the display pass falls back to
+    // the current frame's range.
+    auto ispStatsResult = makeDeviceBuffer(
+        isp::kStatsSlots * sizeof(u32),
+        gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst |
+            gpu::BufferUsage::TransferSrc);
+    auto cdfResultBuffer = makeDeviceBuffer(
+        256u * sizeof(f32), gpu::BufferUsage::Storage);
+    const u64 tileCount =
+        static_cast<u64>((width + 15u) / 16u) * ((height + 15u) / 16u);
+    // Four float4 rows per tile (all-element min/max/sum/sat, per-channel
+    // unsaturated sums and counts, unsaturated channel-0 display range --
+    // camera_stats phases 0/1), then the per-tile 256-bin histogram block
+    // the phase-2 flush writes and the CDF pass merges.
+    auto tileStatsResult = makeDeviceBuffer(
+        tileCount * (16u + 256u) * sizeof(u32), gpu::BufferUsage::Storage);
+    if (!layerCameraResult.has_value() || !dynamicCounterResult.has_value() ||
+        !ispStatsResult.has_value() || !cdfResultBuffer.has_value() ||
+        !tileStatsResult.has_value())
+        return Result<void, String>::Err(
+            "cannot allocate GPU camera dynamic buffers");
+    // Acquisition history: the checkpoint twin of the statistics buffer. The previous
+    // frame's Linear-AGC window rides in the stats slots; without a snapshot
+    // a replayed tick's display tone would read the discarded run's window
+    // and the replay would not be bit-identical.
+    auto ispStatsCheckpointResult = makeDeviceBuffer(
+        isp::kStatsSlots * sizeof(u32),
+        gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst |
+            gpu::BufferUsage::TransferSrc);
+    if (!ispStatsCheckpointResult.has_value())
+        return Result<void, String>::Err(
+            "cannot allocate GPU camera checkpoint buffer");
+    auto counterStagingResult = device.CreateBuffer(gpu::BufferDesc{
+        4u * sizeof(u32), gpu::BufferUsage::TransferDst,
+        gpu::MemoryClass::Readback, 0});
+    auto ispStatsStagingResult = device.CreateBuffer(gpu::BufferDesc{
+        isp::kStatsSlots * sizeof(u32), gpu::BufferUsage::TransferDst,
+        gpu::MemoryClass::Readback, 0});
+    if (!counterStagingResult.has_value() || !ispStatsStagingResult.has_value())
+        return Result<void, String>::Err(
+            "cannot allocate GPU camera statistics staging");
+
+    setLayout = std::move(layoutResult.value());
+    pipelineLayout = std::move(kernelLayoutResult.value());
+    psfKernel = std::move(psfResult.value());
+    readoutKernel = std::move(readoutResult.value());
+    statsTilesKernel = std::move(statsTilesResult.value());
+    statsReduceKernel = std::move(statsReduceResult.value());
+    statsHistKernel = std::move(statsHistResult.value());
+    cdfKernel = std::move(cdfResult.value());
+    demosaicKernel = std::move(demosaicResult.value());
+    hsvKernel = std::move(hsvResult.value());
+    rngKernel = std::move(rngResult.value());
+    fastRgbKernel = std::move(fastRgbResult.value());
+    dynamicKernel = std::move(dynamicResult.value());
+    descriptorPool = std::move(poolResult.value());
+    const auto allocatedGroups = allocated.value();
+    for (size_t i = 0; i < groups.size(); ++i)
+        groups[i] = allocatedGroups[i];
+    layerCameraBuffer = std::move(layerCameraResult.value());
+    dynamicCounterBuffer = std::move(dynamicCounterResult.value());
+    ispStatsBuffer = std::move(ispStatsResult.value());
+    cdfBuffer = std::move(cdfResultBuffer.value());
+    tileStatsBuffer = std::move(tileStatsResult.value());
+    ispStatsCheckpoint = std::move(ispStatsCheckpointResult.value());
+    counterStaging = std::move(counterStagingResult.value());
+    ispStatsStaging = std::move(ispStatsStagingResult.value());
+
+    device.ExecuteImmediate([&](gpu::CommandList& cmd) {
+        cmd.FillBuffer(layerCameraBuffer->Ref(), 0, gpu::kWholeSize, 0u);
+        cmd.FillBuffer(dynamicCounterBuffer->Ref(), 0, gpu::kWholeSize, 0u);
+        cmd.FillBuffer(ispStatsBuffer->Ref(), 0, gpu::kWholeSize, 0u);
+    });
+    return Result<void, String>::Ok();
+}
+
+void GpuCameraPipeline::Impl::TransitionImages(gpu::CommandList& cmd) {
+    if (imagesInGeneral) return;
+    const gpu::Texture* images[] = {
+        psfTemp.get(), blurred.get(), rawDn.get(), corrected.get(),
+        display.get(), fastRgbRate.get(), expectedElectrons.get(), preAdcElectrons.get(),
+        thermalState[0].get(), thermalState[1].get(), randomVectors.get(),
+        compositedRate.get(), linearRgb.get(), colorRgb.get(), agcSource.get(),
+        thermalCheckpoint[0].get(), thermalCheckpoint[1].get()};
+    gpu::TextureBarrier barriers[17];
+    for (size_t i = 0; i < std::size(images); ++i) {
+        barriers[i] = gpu::TextureBarrier{
+            images[i]->Ref(), gpu::Access::None,
+            gpu::Access::ComputeRead | gpu::Access::ComputeWrite, true};
+    }
+    cmd.Barrier(gpu::BarrierBatch{
+        {}, {}, std::span<const gpu::TextureBarrier>(barriers)});
+    imagesInGeneral = true;
+}
+
+void GpuCameraPipeline::Impl::UpdateSet(
+    gpu::BindGroup set, const std::array<gpu::TextureRef, 7>& images) {
+    gpu::BindingWrite writes[17];
+    for (u32 i = 0; i < images.size(); ++i)
+        writes[i] = gpu::BindingWrite::StorageTexture(i, images[i]);
+    // The buffer slot's read-only/read-write class follows the HLSL
+    // declaration; the Vulkan backend sees STORAGE_BUFFER either way.
+    constexpr gpu::BindingKind kBufferKinds[10] = {
+        gpu::BindingKind::ReadOnlyBuffer,   // 7 NUC gain
+        gpu::BindingKind::ReadOnlyBuffer,   // 8 NUC offset
+        gpu::BindingKind::ReadOnlyBuffer,   // 9 camera config
+        gpu::BindingKind::ReadOnlyBuffer,   // 10 per-stratum frames
+        gpu::BindingKind::ReadWriteBuffer,  // 11 dynamic counters
+        gpu::BindingKind::ReadOnlyBuffer,   // 12 ISP config
+        gpu::BindingKind::ReadOnlyBuffer,   // 13 defect list
+        gpu::BindingKind::ReadWriteBuffer,  // 14 ISP statistics
+        gpu::BindingKind::ReadWriteBuffer,  // 15 CDF
+        gpu::BindingKind::ReadWriteBuffer,  // 16 tile statistics
+    };
+    const gpu::Buffer* buffers[] = {
+        nucGainBuffer.get(), nucOffsetBuffer.get(), configBuffer.get(),
+        layerCameraBuffer.get(), dynamicCounterBuffer.get(),
+        ispConfigBuffer.get(), defectPixelsBuffer.get(),
+        ispStatsBuffer.get(), cdfBuffer.get(), tileStatsBuffer.get()};
+    for (u32 i = 0; i < 10; ++i) {
+        writes[7 + i] = gpu::BindingWrite::Buffer(
+            7 + i, kBufferKinds[i], buffers[i]->Ref(), 0, buffers[i]->Ref().size);
+    }
+    device.WriteBindGroup(set, std::span<const gpu::BindingWrite>(writes));
+}
+
+void GpuCameraPipeline::Impl::BindAndDispatch(
+    gpu::CommandList& cmd, const gpu::ComputeKernel& kernel, gpu::BindGroup set,
+    const CameraPush& push) {
+    BindAndDispatchGrid(cmd, kernel, set, push,
+                        (width + 15) / 16, (height + 15) / 16);
+}
+
+void GpuCameraPipeline::Impl::BindAndDispatchGrid(
+    gpu::CommandList& cmd, const gpu::ComputeKernel& kernel, gpu::BindGroup set,
+    const CameraPush& push, u32 groupsX, u32 groupsY) {
+    cmd.SetKernel(kernel);
+    cmd.SetBindGroup(*pipelineLayout, 0, set);
+    cmd.PushConstants(*pipelineLayout, push);
+    cmd.Dispatch(groupsX, groupsY, 1);
+}
+
+CameraPush GpuCameraPipeline::Impl::MakePush(
+    u64 acquisitionIndex, f64 frameTimeSeconds) const {
+    CameraPush push;
+    push.width = width;
+    push.height = height;
+    push.physicalWidth = config.optics.sensorWidthPx;
+    push.physicalHeight = config.optics.sensorHeightPx;
+    push.channelCount = static_cast<u32>(config.device.channels.size());
+    push.cfa = static_cast<u32>(config.device.cfa);
+    push.detector = static_cast<u32>(config.device.detector);
+    push.seed = camera::DeviceRandomSeed(config);
+    push.acquisitionLo = static_cast<u32>(acquisitionIndex);
+    push.acquisitionHi = static_cast<u32>(acquisitionIndex >> 32);
+    push.adcBits = config.readout.adcBits;
+    push.frameTimeSeconds = static_cast<f32>(frameTimeSeconds);
+    push.deltaSeconds = static_cast<f32>(currentDeltaSeconds);
+    push.firstThermal = firstCaptureWasFirst ? 1u : 0u;
+    push.sigmaR = sigmaX[0];
+    push.sigmaG = sigmaX[1];
+    push.sigmaB = sigmaX[2];
+    push.sigmaRy = sigmaY[0];
+    push.sigmaGy = sigmaY[1];
+    push.sigmaBy = sigmaY[2];
+    if (config.optics.cosFourthVignetting) push.flags |= Vignette;
+    if (config.quality.noiseFree) push.flags |= NoiseFree;
+    if (config.device.detector == camera::DetectorKind::Photon) {
+        if (config.photon.enableShotNoise) push.flags |= Shot;
+        if (config.photon.enableDarkCurrent) push.flags |= DarkCurrent;
+        if (config.photon.enableDarkShotNoise) push.flags |= DarkShot;
+        if (config.photon.enableReadNoise) push.flags |= Read;
+        if (config.photon.enableFpn) push.flags |= Fpn;
+        if (config.photon.applyNuc) push.flags |= Nuc;
+        if (!config.photon.nucGainMap.empty()) push.flags |= NucGainMap;
+        if (!config.photon.nucOffsetElectronsMap.empty()) push.flags |= NucOffsetMap;
+    } else {
+        if (!config.thermal.nucGainMap.empty()) push.flags |= NucGainMap;
+        if (!config.thermal.nucOffsetDnMap.empty()) push.flags |= NucOffsetMap;
+    }
+    return push;
+}
+
 GpuCameraPipeline::GpuCameraPipeline(std::unique_ptr<Impl> impl)
     : m_impl(std::move(impl)) {}
 
 GpuCameraPipeline::~GpuCameraPipeline() = default;
 
 Result<std::unique_ptr<GpuCameraPipeline>, String>
-GpuCameraPipeline::Create(VulkanContext& context, u32 width, u32 height) {
-    auto impl = std::make_unique<Impl>(context, width, height);
+GpuCameraPipeline::Create(gpu::Device& device, u32 width, u32 height) {
+    auto impl = std::make_unique<Impl>(device, width, height);
     auto initialized = impl->Initialize();
     if (!initialized)
         return Fail<std::unique_ptr<GpuCameraPipeline>>(initialized.error());
@@ -862,7 +777,7 @@ GpuCameraPipeline::Configure(const camera::CameraConfig& config) {
     // Descriptors and static parameter buffers are immutable during a run.
     // A Qt window may have older command buffers in flight when a panel
     // changes the camera; wait before replacing anything they still read.
-    if (vkDeviceWaitIdle(m_impl->device) != VK_SUCCESS)
+    if (!m_impl->device.WaitIdle().has_value())
         return Result<void, String>::Err(
             "device lost while reconfiguring GPU camera");
     m_impl->config = config;
@@ -929,38 +844,40 @@ GpuCameraPipeline::Configure(const camera::CameraConfig& config) {
     }
     m_impl->configRows[8][0] = static_cast<f32>(optics.focalLengthMm * 1e-3);
     m_impl->configRows[8][1] = static_cast<f32>(optics.pixelPitchUm * 1e-6);
-    const auto makeBuffer = [&](const void* data, VkDeviceSize size,
-                                VkBufferUsageFlags usage)
-        -> std::unique_ptr<GpuBuffer> {
-        auto buffer = std::make_unique<GpuBuffer>(
-            m_impl->context.GetAllocator(), size, usage,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
-        if (!buffer->IsValid()) return {};
-        buffer->Upload(data, size);
-        return buffer;
+    const auto makeBuffer = [&](const void* data, u64 size,
+                                gpu::BufferUsage usage)
+        -> Result<std::unique_ptr<gpu::Buffer>, String> {
+        auto buffer = m_impl->device.CreateBuffer(
+            gpu::BufferDesc{size, usage, gpu::MemoryClass::Upload, 0});
+        if (!buffer.has_value())
+            return Fail<std::unique_ptr<gpu::Buffer>>(buffer.error());
+        buffer.value()->Upload(data, size);
+        return std::move(buffer.value());
     };
-    m_impl->configBuffer = makeBuffer(
+    auto configBufferResult = makeBuffer(
         m_impl->configRows.data(), sizeof(m_impl->configRows),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-    if (!m_impl->configBuffer)
-        return Result<void, String>::Err("cannot upload GPU camera parameters");
+        gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst);
+    if (!configBufferResult.has_value())
+        return Result<void, String>::Err(configBufferResult.error());
     const auto& gainMap = config.device.detector == camera::DetectorKind::Photon
         ? config.photon.nucGainMap : config.thermal.nucGainMap;
     const auto& offsetMap = config.device.detector == camera::DetectorKind::Photon
         ? config.photon.nucOffsetElectronsMap : config.thermal.nucOffsetDnMap;
     const auto uploadMap = [&](const std::vector<f64>& values, f32 fallback)
-        -> std::unique_ptr<GpuBuffer> {
+        -> Result<std::unique_ptr<gpu::Buffer>, String> {
         std::vector<f32> upload;
         upload.reserve(std::max<size_t>(values.size(), 1));
         if (values.empty()) upload.push_back(fallback);
         else for (const f64 value : values) upload.push_back(static_cast<f32>(value));
         return makeBuffer(upload.data(), upload.size() * sizeof(f32),
-                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                          gpu::BufferUsage::Storage);
     };
-    m_impl->nucGainBuffer = uploadMap(gainMap, 1.0f);
-    m_impl->nucOffsetBuffer = uploadMap(offsetMap, 0.0f);
-    if (!m_impl->nucGainBuffer || !m_impl->nucOffsetBuffer)
-        return Result<void, String>::Err("cannot upload GPU camera NUC maps");
+    auto nucGainResult = uploadMap(gainMap, 1.0f);
+    if (!nucGainResult.has_value())
+        return Result<void, String>::Err(nucGainResult.error());
+    auto nucOffsetResult = uploadMap(offsetMap, 0.0f);
+    if (!nucOffsetResult.has_value())
+        return Result<void, String>::Err(nucOffsetResult.error());
 
     // The ISP configuration (binding 12) is one row of float4 per parameter
     // group; see BuildIspRows for the layout. The buffer is CPU_TO_GPU so the
@@ -970,91 +887,94 @@ GpuCameraPipeline::Configure(const camera::CameraConfig& config) {
     // placeholder when empty, matching the NUC map convention.
     std::array<std::array<f32, 4>, 9> ispRows{};
     BuildIspRows(config, ispRows, m_impl->ispFlags);
-    m_impl->ispConfigBuffer = makeBuffer(
+    auto ispConfigResult = makeBuffer(
         ispRows.data(), sizeof(ispRows),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst);
     std::vector<std::array<u32, 2>> defects = config.isp.defectPixels;
     if (defects.empty()) defects.push_back({0u, 0u});
-    if (!m_impl->ispConfigBuffer)
-        return Result<void, String>::Err("cannot upload GPU camera ISP parameters");
-    m_impl->defectPixelsBuffer = std::make_unique<GpuBuffer>(
-        m_impl->context.GetAllocator(),
+    if (!ispConfigResult.has_value())
+        return Result<void, String>::Err(ispConfigResult.error());
+    auto defectResult = m_impl->device.CreateBuffer(gpu::BufferDesc{
         std::max<size_t>(defects.size(), 1u) * 2u * sizeof(u32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    if (!m_impl->defectPixelsBuffer)
+        gpu::BufferUsage::Storage, gpu::MemoryClass::Upload, 0});
+    if (!defectResult.has_value())
         return Result<void, String>::Err("cannot allocate GPU camera defect list");
-    m_impl->defectPixelsBuffer->Upload(defects.data(),
-                                       defects.size() * 2u * sizeof(u32));
+    defectResult.value()->Upload(defects.data(), defects.size() * 2u * sizeof(u32));
+    m_impl->configBuffer = std::move(configBufferResult.value());
+    m_impl->nucGainBuffer = std::move(nucGainResult.value());
+    m_impl->nucOffsetBuffer = std::move(nucOffsetResult.value());
+    m_impl->ispConfigBuffer = std::move(ispConfigResult.value());
+    m_impl->defectPixelsBuffer = std::move(defectResult.value());
 
-    const auto dummy = m_impl->psfTemp.get();
-    m_impl->UpdateSet(m_impl->sets[0], {
-        dummy, m_impl->psfTemp.get(),
+    const gpu::TextureRef dummy = m_impl->psfTemp->Ref();
+    m_impl->UpdateSet(m_impl->groups[0], {
+        dummy, m_impl->psfTemp->Ref(),
         dummy, dummy, dummy, dummy, dummy});
-    m_impl->UpdateSet(m_impl->sets[1], {
-        m_impl->psfTemp.get(), m_impl->blurred.get(),
+    m_impl->UpdateSet(m_impl->groups[1], {
+        m_impl->psfTemp->Ref(), m_impl->blurred->Ref(),
         dummy, dummy, dummy, dummy, dummy});
-    m_impl->UpdateSet(m_impl->sets[2], {
-        m_impl->blurred.get(), m_impl->thermalState[0].get(),
-        m_impl->rawDn.get(), m_impl->corrected.get(),
-        m_impl->expectedElectrons.get(), m_impl->preAdcElectrons.get(),
-        m_impl->thermalState[1].get()});
-    m_impl->UpdateSet(m_impl->sets[3], {
-        m_impl->blurred.get(), m_impl->thermalState[1].get(),
-        m_impl->rawDn.get(), m_impl->corrected.get(),
-        m_impl->expectedElectrons.get(), m_impl->preAdcElectrons.get(),
-        m_impl->thermalState[0].get()});
+    m_impl->UpdateSet(m_impl->groups[2], {
+        m_impl->blurred->Ref(), m_impl->thermalState[0]->Ref(),
+        m_impl->rawDn->Ref(), m_impl->corrected->Ref(),
+        m_impl->expectedElectrons->Ref(), m_impl->preAdcElectrons->Ref(),
+        m_impl->thermalState[1]->Ref()});
+    m_impl->UpdateSet(m_impl->groups[3], {
+        m_impl->blurred->Ref(), m_impl->thermalState[1]->Ref(),
+        m_impl->rawDn->Ref(), m_impl->corrected->Ref(),
+        m_impl->expectedElectrons->Ref(), m_impl->preAdcElectrons->Ref(),
+        m_impl->thermalState[0]->Ref()});
     // Display: the color-pass product feeds the visible branch, the corrected
     // scalar feeds the infrared branch; both write the display and agcSource.
-    m_impl->UpdateSet(m_impl->sets[4], {
-        m_impl->corrected.get(), m_impl->linearRgb.get(),
-        m_impl->colorRgb.get(), m_impl->display.get(),
-        m_impl->agcSource.get(), dummy, dummy});
-    m_impl->UpdateSet(m_impl->sets[5], {
-        dummy, dummy, m_impl->randomVectors.get(),
+    m_impl->UpdateSet(m_impl->groups[4], {
+        m_impl->corrected->Ref(), m_impl->linearRgb->Ref(),
+        m_impl->colorRgb->Ref(), m_impl->display->Ref(),
+        m_impl->agcSource->Ref(), dummy, dummy});
+    m_impl->UpdateSet(m_impl->groups[5], {
+        dummy, dummy, m_impl->randomVectors->Ref(),
         dummy, dummy, dummy, dummy});
-    m_impl->UpdateSet(m_impl->sets[6], {
-        dummy, m_impl->fastRgbRate.get(),
+    m_impl->UpdateSet(m_impl->groups[6], {
+        dummy, m_impl->fastRgbRate->Ref(),
         dummy, dummy, dummy, dummy, dummy});
     // Dynamic compositor set: bindings 0/1 re-pointed at the caller's strata
     // array views on the first stratified measurement (their PARTIALLY_BOUND
     // flag covers every other state of this set).
-    m_impl->UpdateSet(m_impl->sets[7], {
-        m_impl->compositedRate.get(), m_impl->compositedRate.get(),
-        m_impl->compositedRate.get(), dummy, dummy, dummy, dummy});
+    m_impl->UpdateSet(m_impl->groups[7], {
+        m_impl->compositedRate->Ref(), m_impl->compositedRate->Ref(),
+        m_impl->compositedRate->Ref(), dummy, dummy, dummy, dummy});
     // PSF pair reading the compositor output (stratified path).
-    m_impl->UpdateSet(m_impl->sets[8], {
-        m_impl->compositedRate.get(), m_impl->psfTemp.get(),
+    m_impl->UpdateSet(m_impl->groups[8], {
+        m_impl->compositedRate->Ref(), m_impl->psfTemp->Ref(),
         dummy, dummy, dummy, dummy, dummy});
-    m_impl->UpdateSet(m_impl->sets[9], {
-        m_impl->psfTemp.get(), m_impl->blurred.get(),
+    m_impl->UpdateSet(m_impl->groups[9], {
+        m_impl->psfTemp->Ref(), m_impl->blurred->Ref(),
         dummy, dummy, dummy, dummy, dummy});
     // Acquisition statistics read the corrected product; demosaic, color and
     // the CDF pass chain the ISP stage images.
-    m_impl->UpdateSet(m_impl->sets[10], {
-        m_impl->corrected.get(), dummy, dummy, dummy, dummy, dummy, dummy});
+    m_impl->UpdateSet(m_impl->groups[10], {
+        m_impl->corrected->Ref(), dummy, dummy, dummy, dummy, dummy, dummy});
     // Fused ISP pass: demosaic reads the corrected product and writes the
     // linearRgb/colorRgb analysis products plus the display and agcSource
     // images in one dispatch.
-    m_impl->UpdateSet(m_impl->sets[11], {
-        m_impl->corrected.get(), m_impl->linearRgb.get(),
-        m_impl->colorRgb.get(), m_impl->display.get(),
-        m_impl->agcSource.get(), dummy, dummy});
-    m_impl->UpdateSet(m_impl->sets[12], {
-        dummy, m_impl->linearRgb.get(), m_impl->colorRgb.get(),
+    m_impl->UpdateSet(m_impl->groups[11], {
+        m_impl->corrected->Ref(), m_impl->linearRgb->Ref(),
+        m_impl->colorRgb->Ref(), m_impl->display->Ref(),
+        m_impl->agcSource->Ref(), dummy, dummy});
+    m_impl->UpdateSet(m_impl->groups[12], {
+        dummy, m_impl->linearRgb->Ref(), m_impl->colorRgb->Ref(),
         dummy, dummy, dummy, dummy});
-    m_impl->UpdateSet(m_impl->sets[13], {
+    m_impl->UpdateSet(m_impl->groups[13], {
         dummy, dummy, dummy, dummy, dummy, dummy, dummy});
     // HSV: the display image is both input (binding 3) and in-place output
     // (binding 4); the pass runs after the display pass has finished and
     // every thread touches only its own texel.
-    m_impl->UpdateSet(m_impl->sets[14], {
+    m_impl->UpdateSet(m_impl->groups[14], {
         dummy, dummy, dummy,
-        m_impl->display.get(), m_impl->display.get(),
+        m_impl->display->Ref(), m_impl->display->Ref(),
         dummy, dummy});
-    m_impl->measurementView = VK_NULL_HANDLE;
-    m_impl->fastRgbInputView = VK_NULL_HANDLE;
-    m_impl->strataRateView = VK_NULL_HANDLE;
-    m_impl->strataDepthView = VK_NULL_HANDLE;
+    m_impl->measurementIdentity = 0;
+    m_impl->fastRgbInputIdentity = 0;
+    m_impl->strataRateIdentity = 0;
+    m_impl->strataDepthIdentity = 0;
     m_impl->configured = true;
     ResetState();
     return Result<void, String>::Ok();
@@ -1087,11 +1007,10 @@ GpuCameraPipeline::ApplyEffectiveConfig(const camera::CameraConfig& config) {
 
 Result<void, String>
 GpuCameraPipeline::RecordDisplayReprocess(
-    VkCommandBuffer cmd, const camera::CameraConfig& config) {
-    if (!m_impl->configured || cmd == VK_NULL_HANDLE)
+    gpu::CommandList& cmd, const camera::CameraConfig& config) {
+    if (!m_impl->configured)
         return Result<void, String>::Err(
-            "GPU camera display reprocess needs a configured pipeline and a "
-            "command buffer");
+            "GPU camera display reprocess needs a configured pipeline");
     auto applied = ApplyEffectiveConfig(config);
     if (!applied) return applied;
     m_impl->TransitionImages(cmd);
@@ -1104,11 +1023,11 @@ GpuCameraPipeline::RecordDisplayReprocess(
     // Linear-AGC window keeps riding in the statistics buffer, which is what
     // makes a reprocess stateless. corrected still holds the last
     // acquisition and serves as the input.
-    m_impl->BindAndDispatch(cmd, m_impl->demosaicPipeline, m_impl->sets[11],
+    m_impl->BindAndDispatch(cmd, *m_impl->demosaicKernel, m_impl->groups[11],
                             push);
     StorageBarrier(cmd);
     if (m_impl->ispFlags & isp::kFlagHsv) {
-        m_impl->BindAndDispatch(cmd, m_impl->hsvPipeline, m_impl->sets[14],
+        m_impl->BindAndDispatch(cmd, *m_impl->hsvKernel, m_impl->groups[14],
                                 push);
         StorageBarrier(cmd);
     }
@@ -1116,8 +1035,8 @@ GpuCameraPipeline::RecordDisplayReprocess(
 }
 
 Result<void, String> GpuCameraPipeline::RecordReadoutReprocess(
-    VkCommandBuffer cmd, const camera::CameraConfig& config) {
-    if (!m_impl->configured || !m_impl->hasCapture || cmd == VK_NULL_HANDLE)
+    gpu::CommandList& cmd, const camera::CameraConfig& config) {
+    if (!m_impl->configured || !m_impl->hasCapture)
         return Result<void, String>::Err(
             "GPU camera readout reprocess needs a completed acquisition");
     if (auto applied = ApplyEffectiveConfig(config); !applied) return applied;
@@ -1125,27 +1044,27 @@ Result<void, String> GpuCameraPipeline::RecordReadoutReprocess(
     m_impl->UploadPendingParams(cmd);
     auto push = m_impl->MakePush(m_impl->lastAcquisitionIndex,
                                  m_impl->lastFrameTimeSeconds);
-    const VkDescriptorSet readoutSet =
-        m_impl->stateBefore == 0 ? m_impl->sets[2] : m_impl->sets[3];
+    const gpu::BindGroup readoutGroup =
+        m_impl->stateBefore == 0 ? m_impl->groups[2] : m_impl->groups[3];
     // The standing blurred rate belongs to the last measurement. Reading
     // stateBefore and overwriting stateCurrent replays that same device tick;
     // it does not step the thermal state to a new acquisition.
-    m_impl->BindAndDispatch(cmd, m_impl->readoutPipeline, readoutSet, push);
+    m_impl->BindAndDispatch(cmd, *m_impl->readoutKernel, readoutGroup, push);
     StorageBarrier(cmd);
-    m_impl->BindAndDispatch(cmd, m_impl->statsTilesPipeline, m_impl->sets[10], push);
+    m_impl->BindAndDispatch(cmd, *m_impl->statsTilesKernel, m_impl->groups[10], push);
     StorageBarrier(cmd);
-    m_impl->BindAndDispatchGrid(cmd, m_impl->statsReducePipeline,
-                                m_impl->sets[10], push, 1, 1);
+    m_impl->BindAndDispatchGrid(cmd, *m_impl->statsReduceKernel,
+                                m_impl->groups[10], push, 1, 1);
     StorageBarrier(cmd);
-    m_impl->BindAndDispatch(cmd, m_impl->statsHistPipeline, m_impl->sets[10], push);
+    m_impl->BindAndDispatch(cmd, *m_impl->statsHistKernel, m_impl->groups[10], push);
     StorageBarrier(cmd);
-    m_impl->BindAndDispatchGrid(cmd, m_impl->cdfPipeline,
-                                m_impl->sets[13], push, 1, 1);
+    m_impl->BindAndDispatchGrid(cmd, *m_impl->cdfKernel,
+                                m_impl->groups[13], push, 1, 1);
     StorageBarrier(cmd);
-    m_impl->BindAndDispatch(cmd, m_impl->demosaicPipeline, m_impl->sets[11], push);
+    m_impl->BindAndDispatch(cmd, *m_impl->demosaicKernel, m_impl->groups[11], push);
     StorageBarrier(cmd);
     if (m_impl->ispFlags & isp::kFlagHsv) {
-        m_impl->BindAndDispatch(cmd, m_impl->hsvPipeline, m_impl->sets[14], push);
+        m_impl->BindAndDispatch(cmd, *m_impl->hsvKernel, m_impl->groups[14], push);
         StorageBarrier(cmd);
     }
     return Result<void, String>::Ok();
@@ -1163,28 +1082,27 @@ void GpuCameraPipeline::ResetState() {
     // The statistics buffer persists the previous frame's window and
     // histogram; resetting history makes the next acquisition the first one
     // again, whose window must fall back to its own range.
-    if (m_impl->ispStatsBuffer && m_impl->ispStatsBuffer->IsValid()) {
-        CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
-            vkCmdFillBuffer(cmd, m_impl->ispStatsBuffer->GetHandle(), 0,
-                            VK_WHOLE_SIZE, 0);
+    if (m_impl->ispStatsBuffer) {
+        m_impl->device.ExecuteImmediate([&](gpu::CommandList& cmd) {
+            cmd.FillBuffer(m_impl->ispStatsBuffer->Ref(), 0, gpu::kWholeSize, 0u);
         });
     }
 }
 
 Result<GpuCameraPipeline::GpuCheckpoint, String>
-GpuCameraPipeline::RecordStateCheckpoint(VkCommandBuffer cmd) {
-    if (!m_impl->configured || cmd == VK_NULL_HANDLE)
+GpuCameraPipeline::RecordStateCheckpoint(gpu::CommandList& cmd) {
+    if (!m_impl->configured)
         return Fail<GpuCheckpoint>(
-            "GPU camera checkpoint needs a configured pipeline and a command "
-            "buffer");
+            "GPU camera checkpoint needs a configured pipeline");
     m_impl->TransitionImages(cmd);
-    CopyThermalPair(cmd, *m_impl->thermalState[0], *m_impl->thermalState[1],
-                    *m_impl->thermalCheckpoint[0], *m_impl->thermalCheckpoint[1],
-                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    CopyStatsBuffer(cmd, *m_impl->ispStatsBuffer, *m_impl->ispStatsCheckpoint,
-                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    CopyThermalPair(cmd, m_impl->thermalState[0]->Ref(),
+                    m_impl->thermalState[1]->Ref(),
+                    m_impl->thermalCheckpoint[0]->Ref(),
+                    m_impl->thermalCheckpoint[1]->Ref(),
+                    gpu::Access::ComputeRead | gpu::Access::ComputeWrite);
+    CopyStatsBuffer(cmd, m_impl->ispStatsBuffer->Ref(),
+                    m_impl->ispStatsCheckpoint->Ref(),
+                    gpu::Access::ComputeRead | gpu::Access::ComputeWrite);
     GpuCheckpoint checkpoint;
     checkpoint.acquisitionIndex = m_impl->lastAcquisitionIndex;
     checkpoint.frameTimeSeconds = m_impl->lastFrameTimeSeconds;
@@ -1199,24 +1117,21 @@ GpuCameraPipeline::RecordStateCheckpoint(VkCommandBuffer cmd) {
 
 Result<void, String>
 GpuCameraPipeline::RestoreStateCheckpoint(const GpuCheckpoint& checkpoint,
-                                          VkCommandBuffer cmd) {
-    if (!m_impl->configured || cmd == VK_NULL_HANDLE)
+                                          gpu::CommandList& cmd) {
+    if (!m_impl->configured)
         return Result<void, String>::Err(
-            "GPU camera checkpoint restore needs a configured pipeline and a "
-            "command buffer");
+            "GPU camera checkpoint restore needs a configured pipeline");
     m_impl->TransitionImages(cmd);
-    CopyThermalPair(cmd, *m_impl->thermalCheckpoint[0],
-                    *m_impl->thermalCheckpoint[1], *m_impl->thermalState[0],
-                    *m_impl->thermalState[1],
-                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                        VK_ACCESS_TRANSFER_WRITE_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                        VK_PIPELINE_STAGE_TRANSFER_BIT);
-    CopyStatsBuffer(cmd, *m_impl->ispStatsCheckpoint, *m_impl->ispStatsBuffer,
-                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                        VK_ACCESS_TRANSFER_WRITE_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                        VK_PIPELINE_STAGE_TRANSFER_BIT);
+    CopyThermalPair(cmd, m_impl->thermalCheckpoint[0]->Ref(),
+                    m_impl->thermalCheckpoint[1]->Ref(),
+                    m_impl->thermalState[0]->Ref(),
+                    m_impl->thermalState[1]->Ref(),
+                    gpu::Access::ComputeRead | gpu::Access::ComputeWrite |
+                        gpu::Access::TransferWrite);
+    CopyStatsBuffer(cmd, m_impl->ispStatsCheckpoint->Ref(),
+                    m_impl->ispStatsBuffer->Ref(),
+                    gpu::Access::ComputeRead | gpu::Access::ComputeWrite |
+                        gpu::Access::TransferWrite);
     m_impl->hasCapture = checkpoint.hasCapture;
     m_impl->firstCaptureWasFirst = checkpoint.firstCaptureWasFirst;
     m_impl->lastAcquisitionIndex = checkpoint.acquisitionIndex;
@@ -1230,46 +1145,39 @@ GpuCameraPipeline::RestoreStateCheckpoint(const GpuCheckpoint& checkpoint,
 
 GpuCameraPipeline::Images GpuCameraPipeline::GetOutputs() const {
     if (!m_impl->configured) return {};
-    return {m_impl->rawDn.get(), m_impl->corrected.get(),
-            m_impl->display.get(), m_impl->expectedElectrons.get(),
-            m_impl->preAdcElectrons.get(),
-            m_impl->strataRateView != VK_NULL_HANDLE
-                ? m_impl->compositedRate.get() : nullptr,
-            m_impl->linearRgb.get(), m_impl->colorRgb.get(),
-            m_impl->agcSource.get()};
+    return {m_impl->rawDn->Ref(),
+            m_impl->corrected->Ref(),
+            m_impl->display->Ref(),
+            m_impl->expectedElectrons->Ref(),
+            m_impl->preAdcElectrons->Ref(),
+            m_impl->strataRateIdentity != 0 ? m_impl->compositedRate->Ref()
+                                            : gpu::TextureRef{},
+            m_impl->linearRgb->Ref(),
+            m_impl->colorRgb->Ref(),
+            m_impl->agcSource->Ref()};
 }
 
-const GpuImage* GpuCameraPipeline::GetRandomVectors() const {
-    return m_impl->randomVectors.get();
+gpu::TextureRef GpuCameraPipeline::GetRandomVectors() const {
+    return m_impl->randomVectors->Ref();
 }
 
 Result<std::array<u32, 4>, String>
 GpuCameraPipeline::ReadDynamicCounters() const {
-    if (!m_impl->dynamicCounterBuffer || !m_impl->dynamicCounterBuffer->IsValid())
+    if (!m_impl->dynamicCounterBuffer)
         return Result<std::array<u32, 4>, String>::Err(
             "GPU camera dynamic counters are not allocated");
-    if (!m_impl->counterStaging || !m_impl->counterStaging->IsValid())
+    if (!m_impl->counterStaging)
         return Result<std::array<u32, 4>, String>::Err(
             "GPU camera counter staging is not allocated");
     std::array<u32, 4> counts{};
-    GpuBuffer& staging = *m_impl->counterStaging;
-    CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
-        VkBufferMemoryBarrier ready{};
-        ready.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        ready.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        ready.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.buffer = m_impl->dynamicCounterBuffer->GetHandle();
-        ready.offset = 0;
-        ready.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                             0, nullptr, 1, &ready, 0, nullptr);
-        VkBufferCopy copy{};
-        copy.size = sizeof(counts);
-        vkCmdCopyBuffer(cmd, m_impl->dynamicCounterBuffer->GetHandle(),
-                        staging.GetHandle(), 1, &copy);
+    gpu::Buffer& staging = *m_impl->counterStaging;
+    m_impl->device.ExecuteImmediate([&](gpu::CommandList& cmd) {
+        cmd.Barrier(gpu::BufferBarrier{m_impl->dynamicCounterBuffer->Ref(),
+                                       gpu::Access::ComputeWrite,
+                                       gpu::Access::TransferRead});
+        const gpu::BufferCopyRegion copy{0, 0, sizeof(counts)};
+        cmd.CopyBuffer(m_impl->dynamicCounterBuffer->Ref(), staging.Ref(),
+                       std::span<const gpu::BufferCopyRegion>{&copy, 1});
     });
     const void* data = staging.MapRead();
     if (!data)
@@ -1280,56 +1188,35 @@ GpuCameraPipeline::ReadDynamicCounters() const {
     return counts;
 }
 
-void GpuCameraPipeline::RecordDynamicCounterCopy(VkCommandBuffer cmd,
-                                                 VkBuffer dst,
-                                                 VkDeviceSize dstOffset) const {
+void GpuCameraPipeline::RecordDynamicCounterCopy(gpu::CommandList& cmd,
+                                                 gpu::BufferRef dst,
+                                                 u64 dstOffset) const {
     if (!m_impl->dynamicCounterBuffer) return;
-    VkBufferMemoryBarrier ready{};
-    ready.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    ready.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    ready.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    ready.buffer = m_impl->dynamicCounterBuffer->GetHandle();
-    ready.offset = 0;
-    ready.size = VK_WHOLE_SIZE;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 1, &ready, 0, nullptr);
-    VkBufferCopy copy{};
-    copy.dstOffset = dstOffset;
-    copy.size = 4u * sizeof(u32);
-    vkCmdCopyBuffer(cmd, m_impl->dynamicCounterBuffer->GetHandle(), dst,
-                    1, &copy);
+    cmd.Barrier(gpu::BufferBarrier{m_impl->dynamicCounterBuffer->Ref(),
+                                   gpu::Access::ComputeWrite,
+                                   gpu::Access::TransferRead});
+    const gpu::BufferCopyRegion copy{0, dstOffset, 4u * sizeof(u32)};
+    cmd.CopyBuffer(m_impl->dynamicCounterBuffer->Ref(), dst,
+                   std::span<const gpu::BufferCopyRegion>{&copy, 1});
 }
 
 Result<GpuCameraPipeline::IspStats, String>
 GpuCameraPipeline::ReadIspStats() const {
-    if (!m_impl->ispStatsBuffer || !m_impl->ispStatsBuffer->IsValid())
+    if (!m_impl->ispStatsBuffer)
         return Result<IspStats, String>::Err(
             "GPU camera statistics are not allocated");
-    if (!m_impl->ispStatsStaging || !m_impl->ispStatsStaging->IsValid())
+    if (!m_impl->ispStatsStaging)
         return Result<IspStats, String>::Err(
             "GPU camera statistics staging is not allocated");
     std::array<u32, isp::kStatsSlots> slots{};
-    GpuBuffer& staging = *m_impl->ispStatsStaging;
-    CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
-        VkBufferMemoryBarrier ready{};
-        ready.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        ready.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        ready.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.buffer = m_impl->ispStatsBuffer->GetHandle();
-        ready.offset = 0;
-        ready.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                             0, nullptr, 1, &ready, 0, nullptr);
-        VkBufferCopy copy{};
-        copy.size = sizeof(slots);
-        vkCmdCopyBuffer(cmd, m_impl->ispStatsBuffer->GetHandle(),
-                        staging.GetHandle(), 1, &copy);
+    gpu::Buffer& staging = *m_impl->ispStatsStaging;
+    m_impl->device.ExecuteImmediate([&](gpu::CommandList& cmd) {
+        cmd.Barrier(gpu::BufferBarrier{m_impl->ispStatsBuffer->Ref(),
+                                       gpu::Access::ComputeWrite,
+                                       gpu::Access::TransferRead});
+        const gpu::BufferCopyRegion copy{0, 0, sizeof(slots)};
+        cmd.CopyBuffer(m_impl->ispStatsBuffer->Ref(), staging.Ref(),
+                       std::span<const gpu::BufferCopyRegion>{&copy, 1});
     });
     const void* data = staging.MapRead();
     if (!data)
@@ -1356,15 +1243,15 @@ GpuCameraPipeline::ReadIspStats() const {
 }
 
 Result<void, String> GpuCameraPipeline::RecordMeasurement(
-    VkCommandBuffer cmd, const GpuImage& measuredRate, u64 acquisitionIndex,
+    gpu::CommandList& cmd, gpu::TextureRef measuredRate, u64 acquisitionIndex,
     f64 frameTimeSeconds, TimingQueries timing,
     const DynamicExposureInput& dynamic) {
     if (!m_impl->configured)
         return Result<void, String>::Err("GPU camera must be configured first");
-    if (cmd == VK_NULL_HANDLE || !measuredRate.IsValid() ||
-        measuredRate.GetFormat() != VK_FORMAT_R32G32B32A32_SFLOAT ||
-        measuredRate.GetExtent().width != m_impl->width ||
-        measuredRate.GetExtent().height != m_impl->height)
+    if (!measuredRate.IsValid() ||
+        measuredRate.format != gpu::Format::RGBA32Float ||
+        measuredRate.width != m_impl->width ||
+        measuredRate.height != m_impl->height)
         return Result<void, String>::Err(
             "GPU camera needs a same-extent RGBA32F measured-rate image");
     if (!std::isfinite(frameTimeSeconds))
@@ -1375,30 +1262,30 @@ Result<void, String> GpuCameraPipeline::RecordMeasurement(
     // output image, and the caller's strata may be array views a 2D-typed PSF
     // set cannot bind. Without strata the unstratified path reads the caller's
     // measured rate directly, exactly as before temporal stratification.
-    const bool stratified = dynamic.strataRate != nullptr &&
-                            dynamic.strataDepth != nullptr &&
+    const bool stratified = dynamic.strataRate.IsValid() &&
+                            dynamic.strataDepth.IsValid() &&
                             dynamic.layerCameras != nullptr;
     if (stratified &&
-        (dynamic.strataRate->GetFormat() != VK_FORMAT_R32G32B32A32_SFLOAT ||
-         dynamic.strataDepth->GetFormat() != VK_FORMAT_R32_SFLOAT ||
-         dynamic.strataRate->GetExtent().width != m_impl->width ||
-         dynamic.strataRate->GetExtent().height != m_impl->height ||
-         dynamic.strataDepth->GetExtent().width != m_impl->width ||
-         dynamic.strataDepth->GetExtent().height != m_impl->height))
+        (dynamic.strataRate.format != gpu::Format::RGBA32Float ||
+         dynamic.strataDepth.format != gpu::Format::R32Float ||
+         dynamic.strataRate.width != m_impl->width ||
+         dynamic.strataRate.height != m_impl->height ||
+         dynamic.strataDepth.width != m_impl->width ||
+         dynamic.strataDepth.height != m_impl->height))
         return Result<void, String>::Err(
             "GPU camera dynamic inputs must match the sensor extent "
             "(strata rate RGBA32F array, strata depth R32F array)");
     if (stratified &&
-        ((m_impl->strataRateView != VK_NULL_HANDLE &&
-          m_impl->strataRateView != dynamic.strataRate->GetView()) ||
-         (m_impl->strataDepthView != VK_NULL_HANDLE &&
-          m_impl->strataDepthView != dynamic.strataDepth->GetView())))
+        ((m_impl->strataRateIdentity != 0 &&
+          m_impl->strataRateIdentity != dynamic.strataRate.Identity()) ||
+         (m_impl->strataDepthIdentity != 0 &&
+          m_impl->strataDepthIdentity != dynamic.strataDepth.Identity())))
         return Result<void, String>::Err(
             "GPU camera strata images changed; reconfigure after "
             "synchronizing in-flight frames");
 
-    if (m_impl->measurementView != VK_NULL_HANDLE &&
-        m_impl->measurementView != measuredRate.GetView() && !stratified)
+    if (m_impl->measurementIdentity != 0 &&
+        m_impl->measurementIdentity != measuredRate.Identity() && !stratified)
         return Result<void, String>::Err(
             "GPU camera measured-rate image changed; reconfigure after "
             "synchronizing in-flight frames");
@@ -1435,12 +1322,12 @@ Result<void, String> GpuCameraPipeline::RecordMeasurement(
     auto push = m_impl->MakePush(acquisitionIndex, frameTimeSeconds);
     m_impl->TransitionImages(cmd);
     m_impl->UploadPendingParams(cmd);
-    if (!stratified && m_impl->measurementView == VK_NULL_HANDLE) {
-        const auto dummy = m_impl->psfTemp.get();
-        m_impl->UpdateSet(m_impl->sets[0], {
-            &measuredRate, m_impl->psfTemp.get(),
+    if (!stratified && m_impl->measurementIdentity == 0) {
+        const gpu::TextureRef dummy = m_impl->psfTemp->Ref();
+        m_impl->UpdateSet(m_impl->groups[0], {
+            measuredRate, m_impl->psfTemp->Ref(),
             dummy, dummy, dummy, dummy, dummy});
-        m_impl->measurementView = measuredRate.GetView();
+        m_impl->measurementIdentity = measuredRate.Identity();
     }
 
     if (stratified) {
@@ -1451,86 +1338,67 @@ Result<void, String> GpuCameraPipeline::RecordMeasurement(
             return Result<void, String>::Err(
                 "GPU camera strata count exceeds the strata images' layer count");
         // The per-stratum frames change per acquisition. Write them inside
-        // the command buffer (vkCmdUpdateBuffer, 640 bytes of the 64 KiB
-        // limit) so the update is ordered with the compositor's read and
-        // cannot overwrite frames a previous, still-in-flight submission is
-        // reading.
+        // the command buffer (a 640-byte constant update) so the update is
+        // ordered with the compositor's read and cannot overwrite frames a
+        // previous, still-in-flight submission is reading.
         std::array<DynamicLayerCamera, 8> frames{};
         const u32 count = std::min<u32>(dynamic.strataCount, 8u);
         std::copy_n(dynamic.layerCameras, count, frames.data());
-        vkCmdUpdateBuffer(cmd, m_impl->layerCameraBuffer->GetHandle(), 0,
-                          sizeof(frames), frames.data());
-        VkBufferMemoryBarrier framesUploaded{};
-        framesUploaded.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        framesUploaded.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        framesUploaded.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        framesUploaded.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        framesUploaded.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        framesUploaded.buffer = m_impl->layerCameraBuffer->GetHandle();
-        framesUploaded.offset = 0;
-        framesUploaded.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                             0, nullptr, 1, &framesUploaded, 0, nullptr);
-        if (m_impl->strataRateView == VK_NULL_HANDLE) {
-            const auto dummy = m_impl->psfTemp.get();
-            m_impl->UpdateSet(m_impl->sets[7], {
+        cmd.UpdateBuffer(m_impl->layerCameraBuffer->Ref(), 0,
+                         std::span<const std::byte>(
+                             reinterpret_cast<const std::byte*>(frames.data()),
+                             sizeof(frames)));
+        cmd.Barrier(gpu::BufferBarrier{m_impl->layerCameraBuffer->Ref(),
+                                       gpu::Access::TransferWrite,
+                                       gpu::Access::ComputeRead});
+        if (m_impl->strataRateIdentity == 0) {
+            const gpu::TextureRef dummy = m_impl->psfTemp->Ref();
+            m_impl->UpdateSet(m_impl->groups[7], {
                 dynamic.strataRate, dynamic.strataDepth,
-                m_impl->compositedRate.get(), dummy, dummy, dummy, dummy});
-            m_impl->strataRateView = dynamic.strataRate->GetView();
-            m_impl->strataDepthView = dynamic.strataDepth->GetView();
+                m_impl->compositedRate->Ref(), dummy, dummy, dummy, dummy});
+            m_impl->strataRateIdentity = dynamic.strataRate.Identity();
+            m_impl->strataDepthIdentity = dynamic.strataDepth.Identity();
         }
         push.timeStratumCount = count;
         push.rollingShutter = dynamic.rowDelaySeconds > 0.0 ? 1u : 0u;
         push.exposureSeconds = static_cast<f32>(dynamic.exposureSeconds);
         push.rowDelaySeconds = static_cast<f32>(dynamic.rowDelaySeconds);
         push.firstRowMidSeconds = static_cast<f32>(dynamic.firstRowMidSeconds);
-        vkCmdFillBuffer(cmd, m_impl->dynamicCounterBuffer->GetHandle(), 0,
-                        VK_WHOLE_SIZE, 0);
-        VkBufferMemoryBarrier zeroed{};
-        zeroed.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        zeroed.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        zeroed.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                               VK_ACCESS_SHADER_WRITE_BIT;
-        zeroed.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        zeroed.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        zeroed.buffer = m_impl->dynamicCounterBuffer->GetHandle();
-        zeroed.offset = 0;
-        zeroed.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                             0, nullptr, 1, &zeroed, 0, nullptr);
+        cmd.FillBuffer(m_impl->dynamicCounterBuffer->Ref(), 0, gpu::kWholeSize, 0u);
+        cmd.Barrier(gpu::BufferBarrier{m_impl->dynamicCounterBuffer->Ref(),
+                                       gpu::Access::TransferWrite,
+                                       gpu::Access::ComputeRead |
+                                           gpu::Access::ComputeWrite});
     }
 
     const auto stamp = [&](u32 offset) {
-        if (timing.pool != VK_NULL_HANDLE)
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                timing.pool, timing.firstQuery + offset);
+        if (timing.pool.handle != 0)
+            cmd.WriteTimestamp(timing.pool, timing.firstQuery + offset,
+                               gpu::Stage::Compute);
     };
-    if (timing.pool != VK_NULL_HANDLE)
-        vkCmdResetQueryPool(cmd, timing.pool, timing.firstQuery,
-                            kTimingQueryCount);
+    if (timing.pool.handle != 0)
+        cmd.ResetTimestamps(timing.pool, timing.firstQuery, kTimingQueryCount);
     stamp(0);
     if (stratified) {
-        m_impl->BindAndDispatch(cmd, m_impl->dynamicPipeline,
-                                m_impl->sets[7], push);
+        m_impl->BindAndDispatch(cmd, *m_impl->dynamicKernel,
+                                m_impl->groups[7], push);
         StorageBarrier(cmd);
     }
     stamp(1);
     push.direction = 0;
-    const VkDescriptorSet psfHorizontal = stratified ? m_impl->sets[8]
-                                                     : m_impl->sets[0];
-    const VkDescriptorSet psfVertical = stratified ? m_impl->sets[9]
-                                                   : m_impl->sets[1];
-    m_impl->BindAndDispatch(cmd, m_impl->psfPipeline, psfHorizontal, push);
+    const gpu::BindGroup psfHorizontal =
+        stratified ? m_impl->groups[8] : m_impl->groups[0];
+    const gpu::BindGroup psfVertical =
+        stratified ? m_impl->groups[9] : m_impl->groups[1];
+    m_impl->BindAndDispatch(cmd, *m_impl->psfKernel, psfHorizontal, push);
     StorageBarrier(cmd);
     push.direction = 1;
-    m_impl->BindAndDispatch(cmd, m_impl->psfPipeline, psfVertical, push);
+    m_impl->BindAndDispatch(cmd, *m_impl->psfKernel, psfVertical, push);
     StorageBarrier(cmd);
     stamp(2);
-    const VkDescriptorSet readoutSet =
-        m_impl->stateBefore == 0 ? m_impl->sets[2] : m_impl->sets[3];
-    m_impl->BindAndDispatch(cmd, m_impl->readoutPipeline, readoutSet, push);
+    const gpu::BindGroup readoutGroup =
+        m_impl->stateBefore == 0 ? m_impl->groups[2] : m_impl->groups[3];
+    m_impl->BindAndDispatch(cmd, *m_impl->readoutKernel, readoutGroup, push);
     StorageBarrier(cmd);
     stamp(3);
     // M5: the classic ISP, restructured. Statistics first: per-tile
@@ -1542,19 +1410,19 @@ Result<void, String> GpuCameraPipeline::RecordMeasurement(
     // prefix-sums it in the same single workgroup. The demosaic pass then
     // runs the fused demosaic + color + display product chain (former
     // camera_demosaic) in one dispatch.
-    m_impl->BindAndDispatch(cmd, m_impl->statsTilesPipeline, m_impl->sets[10],
+    m_impl->BindAndDispatch(cmd, *m_impl->statsTilesKernel, m_impl->groups[10],
                             push);
     StorageBarrier(cmd);
-    m_impl->BindAndDispatchGrid(cmd, m_impl->statsReducePipeline,
-                                m_impl->sets[10], push, 1, 1);
+    m_impl->BindAndDispatchGrid(cmd, *m_impl->statsReduceKernel,
+                                m_impl->groups[10], push, 1, 1);
     StorageBarrier(cmd);
-    m_impl->BindAndDispatch(cmd, m_impl->statsHistPipeline, m_impl->sets[10],
+    m_impl->BindAndDispatch(cmd, *m_impl->statsHistKernel, m_impl->groups[10],
                             push);
     StorageBarrier(cmd);
-    m_impl->BindAndDispatchGrid(cmd, m_impl->cdfPipeline, m_impl->sets[13],
+    m_impl->BindAndDispatchGrid(cmd, *m_impl->cdfKernel, m_impl->groups[13],
                                 push, 1, 1);
     StorageBarrier(cmd);
-    m_impl->BindAndDispatch(cmd, m_impl->demosaicPipeline, m_impl->sets[11],
+    m_impl->BindAndDispatch(cmd, *m_impl->demosaicKernel, m_impl->groups[11],
                             push);
     StorageBarrier(cmd);
     stamp(4);
@@ -1563,7 +1431,7 @@ Result<void, String> GpuCameraPipeline::RecordMeasurement(
     // its default (the kFlagHsv bit), so an untouched chain is bit-identical
     // to the pre-HSV pipeline.
     if (m_impl->ispFlags & isp::kFlagHsv) {
-        m_impl->BindAndDispatch(cmd, m_impl->hsvPipeline, m_impl->sets[14],
+        m_impl->BindAndDispatch(cmd, *m_impl->hsvKernel, m_impl->groups[14],
                                 push);
         StorageBarrier(cmd);
     }
@@ -1573,51 +1441,51 @@ Result<void, String> GpuCameraPipeline::RecordMeasurement(
 }
 
 Result<void, String> GpuCameraPipeline::RecordFastRgbMeasurement(
-    VkCommandBuffer cmd, const GpuImage& linearRgb, u64 acquisitionIndex,
+    gpu::CommandList& cmd, gpu::TextureRef linearRgb, u64 acquisitionIndex,
     f64 frameTimeSeconds, TimingQueries timing) {
     if (!m_impl->configured)
         return Result<void, String>::Err("GPU camera must be configured first");
     if (m_impl->config.inputKind != camera::CameraInputKind::FastRgbApproximation)
         return Result<void, String>::Err(
             "fast RGB measurement requires input_kind=fast_rgb");
-    if (cmd == VK_NULL_HANDLE || !linearRgb.IsValid() ||
-        linearRgb.GetFormat() != VK_FORMAT_R32G32B32A32_SFLOAT)
+    if (!linearRgb.IsValid() || linearRgb.format != gpu::Format::RGBA32Float)
         return Result<void, String>::Err(
             "GPU fast RGB camera needs an RGBA32F linear-RGB image");
-    if (m_impl->fastRgbInputView != VK_NULL_HANDLE &&
-        m_impl->fastRgbInputView != linearRgb.GetView())
+    if (m_impl->fastRgbInputIdentity != 0 &&
+        m_impl->fastRgbInputIdentity != linearRgb.Identity())
         return Result<void, String>::Err(
             "GPU fast RGB input image changed; reconfigure after synchronizing "
             "in-flight frames");
 
     m_impl->TransitionImages(cmd);
-    if (m_impl->fastRgbInputView == VK_NULL_HANDLE) {
-        const auto dummy = m_impl->psfTemp.get();
-        m_impl->UpdateSet(m_impl->sets[6], {
-            &linearRgb, m_impl->fastRgbRate.get(),
+    if (m_impl->fastRgbInputIdentity == 0) {
+        const gpu::TextureRef dummy = m_impl->psfTemp->Ref();
+        m_impl->UpdateSet(m_impl->groups[6], {
+            linearRgb, m_impl->fastRgbRate->Ref(),
             dummy, dummy, dummy, dummy, dummy});
-        m_impl->fastRgbInputView = linearRgb.GetView();
+        m_impl->fastRgbInputIdentity = linearRgb.Identity();
     }
     auto push = m_impl->MakePush(acquisitionIndex, frameTimeSeconds);
     m_impl->BindAndDispatch(
-        cmd, m_impl->fastRgbPipeline, m_impl->sets[6], push);
+        cmd, *m_impl->fastRgbKernel, m_impl->groups[6], push);
     StorageBarrier(cmd);
     return RecordMeasurement(
-        cmd, *m_impl->fastRgbRate, acquisitionIndex, frameTimeSeconds, timing);
+        cmd, m_impl->fastRgbRate->Ref(), acquisitionIndex, frameTimeSeconds,
+        timing);
 }
 
 Result<void, String> GpuCameraPipeline::RecordRandomVectors(
-    VkCommandBuffer cmd, u32 seed, u64 acquisitionIndex,
+    gpu::CommandList& cmd, u32 seed, u64 acquisitionIndex,
     camera::NoiseClass noiseClass, u32 counter) {
-    if (!m_impl->configured || cmd == VK_NULL_HANDLE)
+    if (!m_impl->configured)
         return Result<void, String>::Err(
-            "GPU camera RNG vectors need a configured pipeline and command buffer");
+            "GPU camera RNG vectors need a configured pipeline");
     m_impl->TransitionImages(cmd);
     auto push = m_impl->MakePush(acquisitionIndex, 0.0);
     push.seed = seed;
     push.rngNoiseClass = static_cast<u32>(noiseClass);
     push.rngCounter = counter;
-    m_impl->BindAndDispatch(cmd, m_impl->rngPipeline, m_impl->sets[5], push);
+    m_impl->BindAndDispatch(cmd, *m_impl->rngKernel, m_impl->groups[5], push);
     return Result<void, String>::Ok();
 }
 

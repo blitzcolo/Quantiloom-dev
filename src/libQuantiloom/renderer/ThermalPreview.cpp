@@ -6,6 +6,7 @@
 #include "renderer/ThermalPreview.hpp"
 
 #include "core/Log.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/GpuThermalStepper.hpp"
 #include "renderer/ThermalEpochBuilder.hpp"
 #include "renderer/ThermalExchangePrecompute.hpp"
@@ -76,6 +77,7 @@ struct ThermalPreview::Impl {
     thermal::ThermalForcing constantForcing;
 
     // Steppers
+    std::unique_ptr<gpu::Device> gpuDevice;
     std::unique_ptr<GpuThermalStepper> gpuStepper;
     thermal::CpuCrankNicolsonStepper cpuStepper;
 
@@ -89,7 +91,10 @@ struct ThermalPreview::Impl {
     String lastError;
 
     explicit Impl(VulkanContext& ctx) : context(ctx) {
-        gpuStepper = std::make_unique<GpuThermalStepper>(ctx);
+        // gpuDevice is declared above gpuStepper so it outlives every gpu::
+        // object the stepper holds.
+        gpuDevice = gpu::vulkan::AdoptContext(ctx);
+        gpuStepper = std::make_unique<GpuThermalStepper>(*gpuDevice);
         schedule = thermal::ThermalGeometrySchedule::Single({}, {});
     }
 

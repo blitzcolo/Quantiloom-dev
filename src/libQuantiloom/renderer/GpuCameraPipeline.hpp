@@ -1,24 +1,23 @@
 #pragma once
 
 #include "core/Types.hpp"
+#include "gpu/CommandList.hpp"
+#include "gpu/GpuTypes.hpp"
 #include "postprocess/CameraPipeline.hpp"
 #include "postprocess/CameraPhysics.hpp"
-
-#include <vulkan/vulkan.h>
 
 #include <array>
 #include <memory>
 
-namespace quantiloom {
-class GpuImage;
-class VulkanContext;
+namespace quantiloom::gpu {
+class Device;
 }
 
 namespace quantiloom::rendercore {
 
 /// Maximum time strata the measurement image is allocated for. The
-/// runtime stratum count is min(gpu_time_positions, spp) and travels in the
-/// push constants; the layers exist regardless so the image view is stable.
+/// runtime stratum count is min(gpu_time_positions, spp) and travels in
+/// the push constants; the layers exist regardless so the image view is stable.
 inline constexpr u32 kCameraTimeStrataMax = 8;
 
 /// Per-time-stratum camera frame, uploaded each measurement for the dynamic
@@ -37,8 +36,8 @@ struct DynamicLayerCamera {
 /// layers plus the camera frame and timing of each stratum. With
 /// `strataCount <= 1` the pass degenerates to a copy of layer 0.
 struct DynamicExposureInput {
-    const GpuImage* strataRate = nullptr;    // 2D array RGBA32F, >= strataCount layers
-    const GpuImage* strataDepth = nullptr;   // 2D array R32F, same layering
+    gpu::TextureRef strataRate;    // 2D array RGBA32F, >= strataCount layers
+    gpu::TextureRef strataDepth;   // 2D array R32F, same layering
     const DynamicLayerCamera* layerCameras = nullptr;  // strataCount entries
     u32 strataCount = 1;
     // Array layer count the two strata images actually carry. RecordMeasurement
@@ -61,35 +60,26 @@ struct DynamicExposureInput {
 class GpuCameraPipeline {
 public:
     struct Images {
-        const GpuImage* rawDn = nullptr;
-        const GpuImage* corrected = nullptr;
-        const GpuImage* display = nullptr;
-        const GpuImage* expectedElectrons = nullptr;
-        const GpuImage* preAdcElectrons = nullptr;
+        gpu::TextureRef rawDn;
+        gpu::TextureRef corrected;
+        gpu::TextureRef display;
+        gpu::TextureRef expectedElectrons;
+        gpu::TextureRef preAdcElectrons;
         /// Dynamic compositor output (the image PSF reads). For unstratified
         /// measurements it holds a copy of layer 0; for legacy callers that
-        /// never supplied strata it is never written -- null there.
-        const GpuImage* compositedRate = nullptr;
+        /// never supplied strata it is never written -- invalid there.
+        gpu::TextureRef compositedRate;
         /// Linear RGB out of the demosaic pass (debug/analysis product).
-        const GpuImage* linearRgb = nullptr;
+        gpu::TextureRef linearRgb;
         /// Encoded-sRGB color-pass output feeding the visible display branch
         /// (debug/analysis product).
-        const GpuImage* colorRgb = nullptr;
+        gpu::TextureRef colorRgb;
         /// The pre-AGC scalar image the host's CLAHE path consumes: the
         /// infrared branch writes the corrected scalar here, the visible
         /// branch the display luminance.
-        const GpuImage* agcSource = nullptr;
+        gpu::TextureRef agcSource;
     };
 
-    /// Synchronously read back acquisition statistics (camera_stats). The
-    /// histogram bins unsaturated pixels over [min,max]; mean/min/max are over
-    /// the same unsaturated set. The per-channel sums and counts describe the
-    /// unsaturated display-domain scalar per CFA/device channel, before white
-    /// balance -- the AWB measurement. Blocks on the device: call between
-    /// frames. The statistics buffer also carries the Linear-AGC window and
-    /// the histogram the display pass consumes; both describe the PREVIOUS
-    /// acquisition (the window must exist before this frame's display pass
-    /// runs), while the fields above describe the acquisition just recorded.
     struct IspStats {
         f32 minValue = 0.0f;
         f32 maxValue = 0.0f;
@@ -102,7 +92,7 @@ public:
     };
 
     struct TimingQueries {
-        VkQueryPool pool = VK_NULL_HANDLE;
+        gpu::TimestampPoolRef pool;  // handle 0 = no timestamp pool
         u32 firstQuery = 0;
     };
     // start, after dynamic compositor, after effective PSF, after
@@ -111,7 +101,7 @@ public:
     static constexpr u32 kTimingQueryCount = 7;
 
     [[nodiscard]] static Result<std::unique_ptr<GpuCameraPipeline>, String>
-    Create(VulkanContext& context, u32 width, u32 height);
+    Create(gpu::Device& device, u32 width, u32 height);
     ~GpuCameraPipeline();
 
     GpuCameraPipeline(const GpuCameraPipeline&) = delete;
@@ -138,23 +128,23 @@ public:
     /// unchanged parameters. `config` carries the display parameters to apply
     /// (white balance, tone, palette, HSV).
     [[nodiscard]] Result<void, String> RecordDisplayReprocess(
-        VkCommandBuffer cmd, const camera::CameraConfig& config);
+        gpu::CommandList& cmd, const camera::CameraConfig& config);
     /// Re-run detector/ADC/ISP from the standing PSF-blurred measurement.
     /// Does not trace, resample wavelengths, blur again or advance the
     /// detector's acquisition index or thermal history.
     [[nodiscard]] Result<void, String> RecordReadoutReprocess(
-        VkCommandBuffer cmd, const camera::CameraConfig& config);
+        gpu::CommandList& cmd, const camera::CameraConfig& config);
     /// `measuredRate` feeds the dynamic compositor (layer 0 when unstratified);
-    /// `dynamic` may be null-equivalent (strataCount <= 1 or null strata
+    /// `dynamic` may be null-equivalent (strataCount <= 1 or invalid strata
     /// images) for the plain single-layer path existing callers use.
     [[nodiscard]] Result<void, String> RecordMeasurement(
-        VkCommandBuffer cmd, const GpuImage& measuredRate, u64 acquisitionIndex,
+        gpu::CommandList& cmd, gpu::TextureRef measuredRate, u64 acquisitionIndex,
         f64 frameTimeSeconds, TimingQueries timing = {},
         const DynamicExposureInput& dynamic = {});
     /// Explicit approximate linear-RGB input. Maps RGB to latent device
     /// channels, then uses the same PSF, detector, ADC and product path.
     [[nodiscard]] Result<void, String> RecordFastRgbMeasurement(
-        VkCommandBuffer cmd, const GpuImage& linearRgb, u64 acquisitionIndex,
+        gpu::CommandList& cmd, gpu::TextureRef linearRgb, u64 acquisitionIndex,
         f64 frameTimeSeconds, TimingQueries timing = {});
     [[nodiscard]] Images GetOutputs() const;
 
@@ -166,8 +156,8 @@ public:
     /// preceded by the compute-write -> transfer-read barrier the copy needs.
     /// Used by the non-blocking DynamicExposureReport path; the caller orders
     /// the transfer write for whatever consumes `dst` afterwards.
-    void RecordDynamicCounterCopy(VkCommandBuffer cmd, VkBuffer dst,
-                                  VkDeviceSize dstOffset) const;
+    void RecordDynamicCounterCopy(gpu::CommandList& cmd, gpu::BufferRef dst,
+                                  u64 dstOffset) const;
 
     /// Full-resolution ISP statistics (min/max/mean of the unsaturated
     /// display scalar, saturated count, 256-bin histogram). Synchronized
@@ -199,14 +189,14 @@ public:
     /// submits. `stateBefore` is captured as well: it feeds the next tick's
     /// delta semantics, so a restore must hand it back unchanged.
     [[nodiscard]] Result<GpuCheckpoint, String> RecordStateCheckpoint(
-        VkCommandBuffer cmd);
+        gpu::CommandList& cmd);
 
     /// Copy the checkpoint images back into the thermal ping-pong states and
     /// restore the advance scalars exactly as RecordStateCheckpoint captured
     /// them. Configuration and resources are untouched; clearing the
     /// detector history after a scrub is ResetState's job, not this.
     [[nodiscard]] Result<void, String> RestoreStateCheckpoint(
-        const GpuCheckpoint& checkpoint, VkCommandBuffer cmd);
+        const GpuCheckpoint& checkpoint, gpu::CommandList& cmd);
 
     /// Clear thermal detector history after a timeline scrub/reconfiguration.
     void ResetState();
@@ -214,9 +204,9 @@ public:
     /// Test/debug path: each RGBA32_UINT texel contains four consecutive
     /// CounterRandomU32 outputs for that pixel, without float conversion.
     [[nodiscard]] Result<void, String> RecordRandomVectors(
-        VkCommandBuffer cmd, u32 seed, u64 acquisitionIndex,
+        gpu::CommandList& cmd, u32 seed, u64 acquisitionIndex,
         camera::NoiseClass noiseClass, u32 counter = 0);
-    [[nodiscard]] const GpuImage* GetRandomVectors() const;
+    [[nodiscard]] gpu::TextureRef GetRandomVectors() const;
 
 private:
     struct Impl;

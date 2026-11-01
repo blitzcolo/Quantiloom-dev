@@ -1,10 +1,8 @@
 #include "renderer/GpuDisplayRange.hpp"
 
-#include "renderer/CommandHelper.hpp"
-#include "renderer/GpuBuffer.hpp"
-#include "renderer/GpuImage.hpp"
-#include "renderer/ShaderBinary.hpp"
-#include "renderer/VulkanContext.hpp"
+#include "gpu/Binding.hpp"
+#include "gpu/CommandList.hpp"
+#include "gpu/Device.hpp"
 
 #include <algorithm>
 #include <array>
@@ -29,170 +27,127 @@ f32 OrderedToFloat(u32 ordered) {
     return std::bit_cast<f32>(bits);
 }
 
-VkShaderModule CreateShaderModule(VkDevice device, const Vector<u32>& code) {
-    if (code.empty()) return VK_NULL_HANDLE;
-    VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    info.codeSize = code.size() * sizeof(u32);
-    info.pCode = code.data();
-    VkShaderModule module = VK_NULL_HANDLE;
-    return vkCreateShaderModule(device, &info, nullptr, &module) == VK_SUCCESS
-        ? module : VK_NULL_HANDLE;
-}
+/// Must match the push block in display_range.comp.hlsl (:44).
+struct DisplayRangePush {
+    u32 width;
+    u32 height;
+    f32 absMin;
+    f32 scale;
+    u32 targetLow;
+    u32 targetHigh;
+};
+static_assert(sizeof(DisplayRangePush) == 24);
 
 }  // namespace
 
 struct GpuDisplayRange::Impl {
-    VulkanContext& context;
-    VkDevice device = VK_NULL_HANDLE;
+    gpu::Device& device;
 
-    VkShaderModule extentsShader = VK_NULL_HANDLE;
-    VkShaderModule histogramShader = VK_NULL_HANDLE;
-    VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
-    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    VkPipeline extentsPipeline = VK_NULL_HANDLE;
-    VkPipeline histogramPipeline = VK_NULL_HANDLE;
-    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    // Owned gpu:: resources, committed together by Initialize(). Destruction
+    // order is pool, kernels, layouts, so a later destruction never names an
+    // object an earlier one still needs.
+    std::unique_ptr<gpu::BindingLayout> bindingLayout;
+    std::unique_ptr<gpu::KernelLayout> kernelLayout;
+    std::unique_ptr<gpu::ComputeKernel> extentsKernel;
+    std::unique_ptr<gpu::ComputeKernel> histogramKernel;
+    std::unique_ptr<gpu::BindGroupPool> pool;
+    gpu::BindGroup group;
 
-    std::unique_ptr<GpuBuffer> scratch;
-    std::unique_ptr<GpuBuffer> histogram;
-    std::unique_ptr<GpuBuffer> scratchReadback;
+    std::unique_ptr<gpu::Buffer> scratch;
+    std::unique_ptr<gpu::Buffer> histogram;
+    std::unique_ptr<gpu::Buffer> scratchReadback;
 
-    explicit Impl(VulkanContext& ctx) : context(ctx), device(ctx.GetDevice()) {}
-
-    ~Impl() {
-        if (extentsPipeline) vkDestroyPipeline(device, extentsPipeline, nullptr);
-        if (histogramPipeline) vkDestroyPipeline(device, histogramPipeline, nullptr);
-        if (pipelineLayout) vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-        if (descriptorPool) vkDestroyDescriptorPool(device, descriptorPool, nullptr);
-        if (descriptorSetLayout)
-            vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
-        if (extentsShader) vkDestroyShaderModule(device, extentsShader, nullptr);
-        if (histogramShader) vkDestroyShaderModule(device, histogramShader, nullptr);
-    }
+    explicit Impl(gpu::Device& dev) : device(dev) {}
 
     Result<void, String> Initialize() {
-        extentsShader = CreateShaderModule(
-            device, LoadSpirv("display_range_extents.comp.spv"));
-        histogramShader = CreateShaderModule(
-            device, LoadSpirv("display_range_histogram.comp.spv"));
-        if (!extentsShader || !histogramShader)
+        const StringView kShaderNames[] = {
+            "display_range_extents.comp",
+            "display_range_histogram.comp",
+        };
+        auto shaders = device.Shaders().Load(kShaderNames);
+        if (!shaders.has_value())
             return Result<void, String>::Err(
                 "display-range compute shaders are missing or invalid");
 
-        std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
-        bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
-                       VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        bindings[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-                       VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        bindings[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-                       VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        VkDescriptorSetLayoutCreateInfo setInfo{
-            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        setInfo.bindingCount = static_cast<u32>(bindings.size());
-        setInfo.pBindings = bindings.data();
-        if (vkCreateDescriptorSetLayout(device, &setInfo, nullptr,
-                                        &descriptorSetLayout) != VK_SUCCESS)
+        // One slot per binding display_range.comp.hlsl declares (:29-34):
+        // u0 inputImage, u1 rangeScratch, u2 histogram.
+        constexpr gpu::BindingSlot kSlots[] = {
+            {0, gpu::BindingKind::StorageTexture, 1, false},
+            {1, gpu::BindingKind::ReadWriteBuffer, 1, false},
+            {2, gpu::BindingKind::ReadWriteBuffer, 1, false},
+        };
+        auto layoutResult = device.CreateBindingLayout(
+            gpu::BindingLayoutDesc{0, std::span<const gpu::BindingSlot>(kSlots)});
+        if (!layoutResult.has_value())
             return Result<void, String>::Err(
                 "cannot create display-range descriptor layout");
 
-        struct Push {
-            u32 width;
-            u32 height;
-            f32 absMin;
-            f32 scale;
-            u32 targetLow;
-            u32 targetHigh;
-        };
-        VkPushConstantRange push{};
-        push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        push.size = sizeof(Push);
-        VkPipelineLayoutCreateInfo layoutInfo{
-            VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        layoutInfo.setLayoutCount = 1;
-        layoutInfo.pSetLayouts = &descriptorSetLayout;
-        layoutInfo.pushConstantRangeCount = 1;
-        layoutInfo.pPushConstantRanges = &push;
-        if (vkCreatePipelineLayout(device, &layoutInfo, nullptr,
-                                   &pipelineLayout) != VK_SUCCESS)
+        const gpu::BindingLayout* spaces[] = {layoutResult.value().get()};
+        auto kernelLayoutResult = device.CreateKernelLayout(gpu::KernelLayoutDesc{
+            std::span<const gpu::BindingLayout* const>(spaces), sizeof(DisplayRangePush)});
+        if (!kernelLayoutResult.has_value())
             return Result<void, String>::Err(
                 "cannot create display-range pipeline layout");
 
-        const auto createPipeline = [&](VkShaderModule shader,
-                                        VkPipeline& pipeline) {
-            VkPipelineShaderStageCreateInfo stage{
-                VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-            stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-            stage.module = shader;
-            stage.pName = "main";
-            VkComputePipelineCreateInfo info{
-                VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-            info.stage = stage;
-            info.layout = pipelineLayout;
-            return vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info,
-                                            nullptr, &pipeline) == VK_SUCCESS;
-        };
-        if (!createPipeline(extentsShader, extentsPipeline) ||
-            !createPipeline(histogramShader, histogramPipeline))
+        auto extentsResult = device.CreateComputeKernel(gpu::ComputeKernelDesc{
+            &shaders.value()[0], kernelLayoutResult.value().get()});
+        if (!extentsResult.has_value())
+            return Result<void, String>::Err(
+                "cannot create display-range compute pipelines");
+        auto histogramResult = device.CreateComputeKernel(gpu::ComputeKernelDesc{
+            &shaders.value()[1], kernelLayoutResult.value().get()});
+        if (!histogramResult.has_value())
             return Result<void, String>::Err(
                 "cannot create display-range compute pipelines");
 
-        const std::array<VkDescriptorPoolSize, 2> poolSizes{{
-            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1},
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2},
-        }};
-        VkDescriptorPoolCreateInfo poolInfo{
-            VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        poolInfo.maxSets = 1;
-        poolInfo.poolSizeCount = static_cast<u32>(poolSizes.size());
-        poolInfo.pPoolSizes = poolSizes.data();
-        if (vkCreateDescriptorPool(device, &poolInfo, nullptr,
-                                   &descriptorPool) != VK_SUCCESS)
+        auto poolResult = device.CreateBindGroupPool(*layoutResult.value(), 1);
+        if (!poolResult.has_value())
             return Result<void, String>::Err(
                 "cannot create display-range descriptor pool");
-        VkDescriptorSetAllocateInfo allocInfo{
-            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        allocInfo.descriptorPool = descriptorPool;
-        allocInfo.descriptorSetCount = 1;
-        allocInfo.pSetLayouts = &descriptorSetLayout;
-        if (vkAllocateDescriptorSets(device, &allocInfo,
-                                     &descriptorSet) != VK_SUCCESS)
+        auto groups = poolResult.value()->Allocate(1);
+        if (!groups.has_value())
             return Result<void, String>::Err(
                 "cannot allocate display-range descriptor set");
 
-        const VkDeviceSize scratchBytes = kScratchWords * sizeof(u32);
-        const VkDeviceSize histogramBytes =
-            static_cast<VkDeviceSize>(GpuDisplayRange::kHistogramBins) * sizeof(u32);
-        scratch = std::make_unique<GpuBuffer>(
-            context.GetAllocator(), scratchBytes,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY);
-        histogram = std::make_unique<GpuBuffer>(
-            context.GetAllocator(), histogramBytes,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY);
-        scratchReadback = std::make_unique<GpuBuffer>(
-            context.GetAllocator(), scratchBytes,
-            VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
+        const u64 scratchBytes = kScratchWords * sizeof(u32);
+        const u64 histogramBytes =
+            static_cast<u64>(GpuDisplayRange::kHistogramBins) * sizeof(u32);
+        auto scratchResult = device.CreateBuffer(gpu::BufferDesc{
+            scratchBytes,
+            gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst |
+                gpu::BufferUsage::TransferSrc,
+            gpu::MemoryClass::DeviceLocal, 0});
+        auto histogramBufferResult = device.CreateBuffer(gpu::BufferDesc{
+            histogramBytes,
+            gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst |
+                gpu::BufferUsage::TransferSrc,
+            gpu::MemoryClass::DeviceLocal, 0});
+        auto readbackResult = device.CreateBuffer(gpu::BufferDesc{
+            scratchBytes, gpu::BufferUsage::TransferDst, gpu::MemoryClass::Readback, 0});
+        if (!scratchResult.has_value() || !histogramBufferResult.has_value() ||
+            !readbackResult.has_value())
+            return Result<void, String>::Err("cannot allocate display-range buffers");
 
-        const VkDescriptorBufferInfo scratchInfo{
-            scratch->GetHandle(), 0, VK_WHOLE_SIZE};
-        const VkDescriptorBufferInfo histogramInfo{
-            histogram->GetHandle(), 0, VK_WHOLE_SIZE};
-        std::array<VkWriteDescriptorSet, 2> writes{};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = descriptorSet;
-        writes[0].dstBinding = 1;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[0].pBufferInfo = &scratchInfo;
-        writes[1] = writes[0];
-        writes[1].dstBinding = 2;
-        writes[1].pBufferInfo = &histogramInfo;
-        vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()),
-                               writes.data(), 0, nullptr);
+        const gpu::BindingWrite staticWrites[] = {
+            gpu::BindingWrite::Buffer(1, gpu::BindingKind::ReadWriteBuffer,
+                                      scratchResult.value()->Ref()),
+            gpu::BindingWrite::Buffer(2, gpu::BindingKind::ReadWriteBuffer,
+                                      histogramBufferResult.value()->Ref()),
+        };
+
+        this->bindingLayout = std::move(layoutResult.value());
+        this->kernelLayout = std::move(kernelLayoutResult.value());
+        this->extentsKernel = std::move(extentsResult.value());
+        this->histogramKernel = std::move(histogramResult.value());
+        this->pool = std::move(poolResult.value());
+        group = groups.value()[0];
+        this->scratch = std::move(scratchResult.value());
+        this->histogram = std::move(histogramBufferResult.value());
+        this->scratchReadback = std::move(readbackResult.value());
+
+        // Bindings 1 and 2 are written once here; binding 0 (the input view)
+        // is rewritten on every Compute.
+        device.WriteBindGroup(group, std::span<const gpu::BindingWrite>(staticWrites));
         return Result<void, String>::Ok();
     }
 };
@@ -203,8 +158,8 @@ GpuDisplayRange::GpuDisplayRange(std::unique_ptr<Impl> impl)
 GpuDisplayRange::~GpuDisplayRange() = default;
 
 Result<std::unique_ptr<GpuDisplayRange>, String>
-GpuDisplayRange::Create(VulkanContext& context) {
-    auto impl = std::make_unique<Impl>(context);
+GpuDisplayRange::Create(gpu::Device& device) {
+    auto impl = std::make_unique<Impl>(device);
     auto initialized = impl->Initialize();
     if (!initialized)
         return Result<std::unique_ptr<GpuDisplayRange>, String>::Err(
@@ -214,101 +169,55 @@ GpuDisplayRange::Create(VulkanContext& context) {
 }
 
 Result<DisplayRange, String> GpuDisplayRange::Compute(
-    const GpuImage& image, u32 width, u32 height,
+    gpu::TextureRef image, u32 width, u32 height,
     f32 percentileLow, f32 percentileHigh) {
-    if (!image.IsValid() || image.GetFormat() != VK_FORMAT_R32G32B32A32_SFLOAT)
+    if (!image.IsValid() || image.format != gpu::Format::RGBA32Float)
         return Result<DisplayRange, String>::Err(
             "display range requires an RGBA32F image");
-    const VkExtent2D extent = image.GetExtent();
-    if (width == 0 || height == 0 || width > extent.width || height > extent.height)
+    if (width == 0 || height == 0 || width > image.width || height > image.height)
         return Result<DisplayRange, String>::Err(
             "display-range extent is empty or exceeds its image");
 
-    const VkDescriptorImageInfo inputInfo{
-        VK_NULL_HANDLE, image.GetView(), VK_IMAGE_LAYOUT_GENERAL};
-    VkWriteDescriptorSet inputWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    inputWrite.dstSet = m_impl->descriptorSet;
-    inputWrite.dstBinding = 0;
-    inputWrite.descriptorCount = 1;
-    inputWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    inputWrite.pImageInfo = &inputInfo;
-    vkUpdateDescriptorSets(m_impl->device, 1, &inputWrite, 0, nullptr);
+    gpu::Device& device = m_impl->device;
+    const gpu::BindingWrite inputWrite =
+        gpu::BindingWrite::StorageTexture(0, image);
+    device.WriteBindGroup(m_impl->group,
+                          std::span<const gpu::BindingWrite>{&inputWrite, 1});
 
     const std::array<u32, kScratchWords> initialScratch{
         FloatToOrdered(std::numeric_limits<f32>::max()),
         FloatToOrdered(std::numeric_limits<f32>::lowest()),
         0u, 0u, 0u, 0u, 0u, 0u};
-    struct Push {
-        u32 width;
-        u32 height;
-        f32 absMin;
-        f32 scale;
-        u32 targetLow;
-        u32 targetHigh;
-    };
-    const Push extentsPush{width, height, 0.0f, 0.0f, 0u, 0u};
+    const DisplayRangePush extentsPush{width, height, 0.0f, 0.0f, 0u, 0u};
     const u32 groupsX = (width + 15u) / 16u;
     const u32 groupsY = (height + 15u) / 16u;
 
-    CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
-        VkImageMemoryBarrier inputReady{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-        inputReady.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-        inputReady.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        inputReady.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        inputReady.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        inputReady.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        inputReady.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        inputReady.image = image.GetImage();
-        inputReady.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        inputReady.subresourceRange.levelCount = 1;
-        inputReady.subresourceRange.layerCount = 1;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                             0, nullptr, 0, nullptr, 1, &inputReady);
+    device.ExecuteImmediate([&](gpu::CommandList& cmd) {
+        cmd.Barrier(gpu::TextureBarrier{image, gpu::Access::AnyWrite,
+                                        gpu::Access::ComputeRead});
 
-        vkCmdUpdateBuffer(cmd, m_impl->scratch->GetHandle(), 0,
-                          sizeof(initialScratch), initialScratch.data());
-        VkBufferMemoryBarrier initialized{
-            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-        initialized.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        initialized.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                                    VK_ACCESS_SHADER_WRITE_BIT;
-        initialized.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        initialized.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        initialized.buffer = m_impl->scratch->GetHandle();
-        initialized.offset = 0;
-        initialized.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                             0, nullptr, 1, &initialized, 0, nullptr);
+        cmd.UpdateBuffer(m_impl->scratch->Ref(), 0,
+                         std::span<const std::byte>(
+                             reinterpret_cast<const std::byte*>(initialScratch.data()),
+                             sizeof(initialScratch)));
+        cmd.Barrier(gpu::BufferBarrier{m_impl->scratch->Ref(),
+                                       gpu::Access::TransferWrite,
+                                       gpu::Access::ComputeRead |
+                                           gpu::Access::ComputeWrite});
 
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                m_impl->pipelineLayout, 0, 1,
-                                &m_impl->descriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, m_impl->pipelineLayout,
-                           VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                           sizeof(extentsPush), &extentsPush);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                          m_impl->extentsPipeline);
-        vkCmdDispatch(cmd, groupsX, groupsY, 1);
+        // SetBindGroup and PushConstants precede SetKernel here; the
+        // interface takes the layout explicitly so that order is legal.
+        cmd.SetBindGroup(*m_impl->kernelLayout, 0, m_impl->group);
+        cmd.PushConstants(*m_impl->kernelLayout, extentsPush);
+        cmd.SetKernel(*m_impl->extentsKernel);
+        cmd.Dispatch(groupsX, groupsY, 1);
 
-        VkBufferMemoryBarrier rangeReady{
-            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-        rangeReady.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        rangeReady.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        rangeReady.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        rangeReady.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        rangeReady.buffer = m_impl->scratch->GetHandle();
-        rangeReady.offset = 0;
-        rangeReady.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                             0, nullptr, 1, &rangeReady, 0, nullptr);
-
-        VkBufferCopy scratchCopy{};
-        scratchCopy.size = m_impl->scratch->GetSize();
-        vkCmdCopyBuffer(cmd, m_impl->scratch->GetHandle(),
-                        m_impl->scratchReadback->GetHandle(), 1, &scratchCopy);
+        cmd.Barrier(gpu::BufferBarrier{m_impl->scratch->Ref(),
+                                       gpu::Access::ComputeWrite,
+                                       gpu::Access::TransferRead});
+        const gpu::BufferCopyRegion scratchCopy{0, 0, m_impl->scratch->Ref().size};
+        cmd.CopyBuffer(m_impl->scratch->Ref(), m_impl->scratchReadback->Ref(),
+                       std::span<const gpu::BufferCopyRegion>{&scratchCopy, 1});
     });
 
     std::array<u32, kScratchWords> scratch{};
@@ -356,55 +265,29 @@ Result<DisplayRange, String> GpuDisplayRange::Compute(
         static_cast<usize>(static_cast<f64>(validCount) * lowFraction);
     const usize targetHigh =
         static_cast<usize>(static_cast<f64>(validCount) * highFraction);
-    const Push histogramPush{width, height, absMin, scale,
-                             static_cast<u32>(targetLow),
-                             static_cast<u32>(targetHigh)};
-    CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
-        vkCmdFillBuffer(cmd, m_impl->histogram->GetHandle(), 0,
-                        VK_WHOLE_SIZE, 0u);
-        VkBufferMemoryBarrier initialized{
-            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-        initialized.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        initialized.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                                    VK_ACCESS_SHADER_WRITE_BIT;
-        initialized.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        initialized.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        initialized.buffer = m_impl->histogram->GetHandle();
-        initialized.offset = 0;
-        initialized.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                             0, nullptr, 1, &initialized, 0, nullptr);
+    const DisplayRangePush histogramPush{width, height, absMin, scale,
+                                         static_cast<u32>(targetLow),
+                                         static_cast<u32>(targetHigh)};
+    device.ExecuteImmediate([&](gpu::CommandList& cmd) {
+        cmd.FillBuffer(m_impl->histogram->Ref(), 0, gpu::kWholeSize, 0u);
+        cmd.Barrier(gpu::BufferBarrier{m_impl->histogram->Ref(),
+                                       gpu::Access::TransferWrite,
+                                       gpu::Access::ComputeRead |
+                                           gpu::Access::ComputeWrite});
 
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                m_impl->pipelineLayout, 0, 1,
-                                &m_impl->descriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, m_impl->pipelineLayout,
-                           VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                           sizeof(histogramPush), &histogramPush);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                          m_impl->histogramPipeline);
-        vkCmdDispatch(cmd, groupsX, groupsY, 1);
+        cmd.SetBindGroup(*m_impl->kernelLayout, 0, m_impl->group);
+        cmd.PushConstants(*m_impl->kernelLayout, histogramPush);
+        cmd.SetKernel(*m_impl->histogramKernel);
+        cmd.Dispatch(groupsX, groupsY, 1);
 
         // The last workgroup wrote the crossing bins into the scratch words;
         // those words are all the host needs.
-        VkBufferMemoryBarrier binsReady{
-            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-        binsReady.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        binsReady.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        binsReady.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        binsReady.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        binsReady.buffer = m_impl->scratch->GetHandle();
-        binsReady.offset = 0;
-        binsReady.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                             0, nullptr, 1, &binsReady, 0, nullptr);
-        VkBufferCopy scratchCopyOut{};
-        scratchCopyOut.size = m_impl->scratch->GetSize();
-        vkCmdCopyBuffer(cmd, m_impl->scratch->GetHandle(),
-                        m_impl->scratchReadback->GetHandle(), 1,
-                        &scratchCopyOut);
+        cmd.Barrier(gpu::BufferBarrier{m_impl->scratch->Ref(),
+                                       gpu::Access::ComputeWrite,
+                                       gpu::Access::TransferRead});
+        const gpu::BufferCopyRegion scratchCopyOut{0, 0, m_impl->scratch->Ref().size};
+        cmd.CopyBuffer(m_impl->scratch->Ref(), m_impl->scratchReadback->Ref(),
+                       std::span<const gpu::BufferCopyRegion>{&scratchCopyOut, 1});
     });
 
     std::array<u32, kScratchWords> resultWords{};

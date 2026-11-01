@@ -48,6 +48,7 @@
 #include "renderer/TimelineState.hpp"
 #include "thermal/ThermalEpochs.hpp"
 #include "core/LibVersion.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/GpuThermalStepper.hpp"
 #include "thermal/CpuCrankNicolsonStepper.hpp"
 #include "thermal/ThermalMesh.hpp"
@@ -284,6 +285,9 @@ struct OfflineRenderer::Impl {
     // plain pointers rather than one pointer to that Impl.
     // ------------------------------------------------------------------
     VulkanContext* contextRef = nullptr;
+    /// Adopted compute RHI view of whichever context contextRef names, created
+    /// lazily with the GPU stepper and destroyed before it (declaration order).
+    std::unique_ptr<gpu::Device> thermalGpuDevice;
     const rendercore::BrdfLut* brdfLutRef = nullptr;
     const rendercore::EnvironmentCubemap* fallbackEnvMapRef = nullptr;
     /// Either the shared fallback or `envMap` above, decided in BuildPipeline.
@@ -606,7 +610,10 @@ void OfflineRenderer::Impl::BuildThermalSession() {
             QL_LOG_INFO("  Thermal stepper: CPU ({} layers is past the GPU stepper's {})",
                         thermalConfig.nodeCount, rendercore::GpuThermalStepper::kMaxNodes);
         } else {
-            thermalGpuStepper = std::make_unique<rendercore::GpuThermalStepper>(context);
+            // The adopted device is re-created with the stepper so it can
+            // never name a context the stepper was not created against.
+            thermalGpuDevice = gpu::vulkan::AdoptContext(context);
+            thermalGpuStepper = std::make_unique<rendercore::GpuThermalStepper>(*thermalGpuDevice);
             if (thermalGpuStepper->IsValid()) {
                 // Shell pairing is the one question the materials alone cannot
                 // answer; the mesh Build will make is asked only when some
