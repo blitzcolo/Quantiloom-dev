@@ -56,6 +56,7 @@ optional, so neither is left to a scene file to decide.
 Exit code 0 = pass, 1 = fail, 2 = no CLI, 3 = no usable GPU.
 """
 
+import os
 import argparse
 import pathlib
 import re
@@ -66,7 +67,7 @@ import numpy as np
 import OpenEXR
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_CLI = REPO / "build" / "src" / "app" / "Release" / "Quantiloom.exe"
+DEFAULT_CLI = pathlib.Path(os.environ.get("CLI", str(REPO / "build" / "src" / "app" / "Release" / "Quantiloom.exe")))
 CONFIG = REPO / "assets" / "configs" / "cornell_box_vis.toml"
 
 GPU_ABSENT = re.compile(

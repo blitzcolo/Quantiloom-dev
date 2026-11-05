@@ -41,6 +41,7 @@ The two n(lambda) sources and the RGB path are check_dispersion.py's job.
 
 Exit code 0 = pass, 1 = fail, 2 = no CLI, 3 = no usable GPU.
 """
+import os
 import json
 import pathlib
 import re
@@ -55,7 +56,7 @@ import OpenEXR
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 GLTF = ROOT / "assets/models/prism_dispersion.gltf"
 PRISM_CFG = ROOT / "assets/configs/prism_dispersion.toml"
-CLI = ROOT / "build/src/app/Release/Quantiloom.exe"
+CLI = pathlib.Path(os.environ.get("CLI", str(ROOT / "build/src/app/Release/Quantiloom.exe")))
 WORK = ROOT / "renders/hero"
 TMP_CFG = ROOT / "assets/configs/_hero_tmp.toml"
 UNIT = "assets/data/refractiveindex/unit_ior.yml"
@@ -97,12 +98,12 @@ output = "_hero_{name}.exr"
 
 [spectral]
 mode = "{mode}"
-basis_file = "H:/Quantiloom-dev/assets/spectral/quantiloom_basis_v3_usgs.qlbin"
-materials_json = "H:/Quantiloom-dev/assets/spectral/quantiloom_materials_usgs.json"
+basis_file = "assets/spectral/quantiloom_basis_v3_usgs.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_usgs.json"
 band = "VIS"
 
 [scene]
-gltf = "H:/Quantiloom-dev/assets/models/cornell_box/cornell_box.gltf"
+gltf = "assets/models/cornell_box/cornell_box.gltf"
 world_units_to_meters = 0.001
 
 [camera]

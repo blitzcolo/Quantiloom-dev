@@ -51,7 +51,7 @@ band = "VIS"
 #   }
 #
 # ============================================================================
-usd = "H:/Quantiloom-Qt/assets/models/cube.usdc"
+usd = "../Quantiloom-Qt/assets/models/cube.usdc"
 world_units_to_meters = 1.0
 
 [camera]

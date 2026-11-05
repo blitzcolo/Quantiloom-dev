@@ -32,7 +32,7 @@ wavelength_nm = 2000.0
 band = "SWIR"
 
 [scene]
-gltf = "H:/Quantiloom-dev/assets/models/shadow_scene/shadow_scene_open.gltf"
+gltf = "assets/models/shadow_scene/shadow_scene_open.gltf"
 world_units_to_meters = 1.0
 default_temperature_k = 300.0
 
@@ -68,7 +68,7 @@ enabled = false
 # is what the cross-renderer protocol requires anyway -- both renderers are
 # given the same reflectance rather than each deriving one.
 [spectral_curves]
-"shadow_scene_open" = "H:/Quantiloom-dev/assets/luts/flat_reflectance_070.csv"
+"shadow_scene_open" = "assets/luts/flat_reflectance_070.csv"
 
 # Pure Lambert. A glTF material with no KHR_materials_specular still gets the
 # dielectric default F0 = 0.04, so the surface carries a GGX lobe alongside the

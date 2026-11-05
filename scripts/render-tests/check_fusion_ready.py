@@ -14,6 +14,7 @@ measured:
 
 Exit 0 pass, 1 failure, 2 missing binaries, 3 no usable GPU.
 """
+import os
 import json
 import pathlib
 import re
@@ -27,7 +28,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import fusion_verify
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-CLI = REPO / 'build/src/app/Release/Quantiloom.exe'
+CLI = pathlib.Path(os.environ.get('CLI', str(REPO / 'build/src/app/Release/Quantiloom.exe')))
 UNIT = REPO / 'scripts/test_fusion_verify.py'
 FIXTURES = REPO / 'docs/dataset/fusion'
 

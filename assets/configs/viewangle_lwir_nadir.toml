@@ -32,12 +32,12 @@ mode = "lwir_fused"
 band = "LWIR"
 
 [scene]
-gltf = "H:/Quantiloom-dev/assets/models/shadow_scene/shadow_scene_open.gltf"
+gltf = "assets/models/shadow_scene/shadow_scene_open.gltf"
 world_units_to_meters = 1.0
 default_temperature_k = 300.0
 
 [spectral_curves]
-shadow_scene_open = "H:/Quantiloom-dev/assets/models/shadow_scene/shadow_scene_open_reflectance.csv"
+shadow_scene_open = "assets/models/shadow_scene/shadow_scene_open_reflectance.csv"
 
 [camera]
 position   = [0.0, 20.0, 0.0]
