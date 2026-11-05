@@ -50,6 +50,14 @@ struct DynamicExposureInput {
     f64 rowDelaySeconds = 0.0;               // rolling-shutter per-row offset (0 = global)
 };
 
+/// GpuCameraPipeline::TimingQueries, at namespace scope for the reason
+/// EnvironmentCubemapParams gives: Clang needs its default member initializer
+/// before GpuCameraPipeline is complete, for the `timing = {}` arguments.
+struct GpuCameraTimingQueries {
+    gpu::TimestampPoolRef pool;  // handle 0 = no timestamp pool
+    u32 firstQuery = 0;
+};
+
 /// GPU approximation of the shared detector/ADC chain. The caller supplies
 /// a device-weighted rate image in GENERAL layout: photon e-/s or thermal W.
 /// Mono uses R; Bayer and MultiChannel carry latent R/G/B rates across every
@@ -91,10 +99,7 @@ public:
         std::array<u32, 3> channelCounts{};
     };
 
-    struct TimingQueries {
-        gpu::TimestampPoolRef pool;  // handle 0 = no timestamp pool
-        u32 firstQuery = 0;
-    };
+    using TimingQueries = GpuCameraTimingQueries;
     // start, after dynamic compositor, after effective PSF, after
     // detector/ADC, after the full ISP (stats through display), after the HSV
     // pass (equal to stamp 4 when HSV is off), end after the final pass.

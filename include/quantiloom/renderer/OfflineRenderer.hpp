@@ -222,7 +222,16 @@ public:
      * @return The renderer, or why the scene cannot be rendered
      */
     static Result<std::unique_ptr<OfflineRenderer>, String> Create(
-        const Config& config, const InitParams& params = {});
+        const Config& config, const InitParams& params);
+
+    /// Create(config, InitParams{}). Not a `= {}` default argument: InitParams has
+    /// default member initializers, which Clang will not use before this class is
+    /// complete. A template, so a dllexport class does not export it and the
+    /// export table keeps the one Create above.
+    template <class = void>
+    static Result<std::unique_ptr<OfflineRenderer>, String> Create(const Config& config) {
+        return Create(config, InitParams{});
+    }
 
     ~OfflineRenderer();
     /// Deterministic native-grid surface geometry, independent of path SPP.

@@ -244,7 +244,12 @@ def verify(record_path, inspect_exr=False):
             raise ValueError('duplicate artifact path')
         names.add(name.casefold())
         path = record_path.parent / name
-        if not all((not p.is_symlink() for p in [path, *path.parents])):
+        # Links inside the export tree -- the record's directory and below -- are
+        # refused. Above it is the system's: macOS keeps /var and /tmp behind
+        # links into /private, so every temporary export would fail here.
+        export_root = record_path.parent
+        inside = [p for p in [path, *path.parents] if p == export_root or export_root in p.parents]
+        if not all((not p.is_symlink() for p in inside)):
             raise ValueError('symlink artifact path')
         if not (not path.is_symlink() and path.is_file()):
             raise ValueError(f'missing artifact: {name}')

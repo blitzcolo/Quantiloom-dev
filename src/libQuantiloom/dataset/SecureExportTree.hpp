@@ -247,6 +247,17 @@ public:
         [[maybe_unused]] auto& parent = Open(path.parent_path(), false, false);
 #ifdef _WIN32
         return fs::path(Win32Path(path));
+#elif defined(__APPLE__)
+        // No /proc on macOS. Its volfs names a directory by device and inode
+        // instead, so this path, like /proc/self/fd/N, reaches the pinned
+        // directory whatever is renamed or linked into its ancestry later.
+        // (/dev/fd/N will not do: it dups the descriptor -- no traversal into a
+        // directory, no truncation, one shared offset.)
+        struct stat pinned{};
+        if (::fstat(parent.handle, &pinned) != 0)
+            throw std::runtime_error("cannot name export directory: " + path.parent_path().string());
+        return fs::path("/.vol") / std::to_string(pinned.st_dev) / std::to_string(pinned.st_ino) /
+               path.filename();
 #else
         // Streaming writers receive a capability path, not a replaceable ancestry.
         return fs::path("/proc/self/fd") / std::to_string(parent.handle) / path.filename();

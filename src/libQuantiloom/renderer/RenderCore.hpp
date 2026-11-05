@@ -224,13 +224,18 @@ private:
  * maxLod is 0 -- right for a single-level LUT, and enough to pin every environment
  * lookup to mip 0, so the chain above was built and never read.
  */
+/// EnvironmentCubemap::Params. At namespace scope because the class's own `= {}`
+/// default arguments use its default member initializers, which Clang will not
+/// read before the enclosing class is complete.
+struct EnvironmentCubemapParams {
+    u32 faceSize = 512;
+    /// Clamped to what faceSize supports -- see MipLevels() for what was used.
+    u32 mipLevels = 8;
+};
+
 class EnvironmentCubemap {
 public:
-    struct Params {
-        u32 faceSize = 512;
-        /// Clamped to what faceSize supports -- see MipLevels() for what was used.
-        u32 mipLevels = 8;
-    };
+    using Params = EnvironmentCubemapParams;
 
     /// A placeholder, not an environment. The ray tracing pipeline declares
     /// binding 10 with descriptorCount 1 and no partially-bound flag, so a

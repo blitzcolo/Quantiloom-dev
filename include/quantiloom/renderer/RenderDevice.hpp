@@ -65,7 +65,14 @@ public:
      * @return The device, or why one could not be made
      */
     static Result<std::unique_ptr<RenderDevice>, String> Create(
-        const InitParams& params = {});
+        const InitParams& params);
+
+    /// Create(InitParams{}); a template rather than `= {}` for the reason
+    /// OfflineRenderer::Create(config) gives.
+    template <class = void>
+    static Result<std::unique_ptr<RenderDevice>, String> Create() {
+        return Create(InitParams{});
+    }
 
     ~RenderDevice();
 
