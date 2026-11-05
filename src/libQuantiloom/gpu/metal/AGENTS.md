@@ -18,7 +18,9 @@ How each Vulkan concept lands here:
   raygen and the ray-query kernels -- table 0 is t0..t37 then u0..u36, table 1 the
   samplers, tables 2 and 3 the bindless arrays (a slot whose count is above 1). Every
   resource named is declared with `useResources`, which is what makes it resident and
-  hazard-tracked.
+  hazard-tracked -- the arena chunks holding the tables and push constants included: a
+  trace reads its root signature by address (`IRDispatchRaysArgument::GRS`), and an
+  undeclared chunk reads as zeros, so the dispatch silently writes nothing.
 - **Barriers** end the open encoder. Resources are tracked, so encoder order is
   execution order for everything an argument buffer names. Layouts mean nothing here.
 - **Ray tracing.** Instances are `MTLIndirectAccelerationStructureInstanceDescriptor`s

@@ -191,12 +191,19 @@ u64 MetalCommandList::EncodeArguments(const ShaderReflection& reflection, Pipeli
     const auto& groups = groups_[KindIndex(kind)];
     const UploadArena::Slice top = arena_.Allocate(std::max<u64>(reflection.topLevelBytes, 16));
     std::memset(top.cpu, 0, std::max<u64>(reflection.topLevelBytes, 16));
+    // The arena memory itself is read by address: a trace reaches its root signature only
+    // through IRDispatchRaysArgument::GRS, and every root reaches its tables and push
+    // constants the same way. Binding the top level at kIRArgumentBufferBindPoint does not
+    // make it resident for a converted raygen, so each slice is declared like any resource;
+    // undeclared, a dispatch reads zeros whenever its chunk is not still mapped.
     Residency residency;
+    residency.Add(top.buffer, false);
 
     auto pushAddress = [&]() -> u64 {
         if (push_.empty()) return 0;
         const UploadArena::Slice slice = arena_.Allocate(AlignUp(push_.size(), 16));
         std::memcpy(slice.cpu, push_.data(), push_.size());
+        residency.Add(slice.buffer, false);
         return slice.gpuAddress;
     };
 
@@ -272,6 +279,7 @@ u64 MetalCommandList::EncodeArguments(const ShaderReflection& reflection, Pipeli
         auto table = [&](u32 entries) -> UploadArena::Slice {
             const UploadArena::Slice slice = arena_.Allocate(std::max<u64>(entries, 1) * sizeof(IRDescriptorTableEntry));
             std::memset(slice.cpu, 0, std::max<u64>(entries, 1) * sizeof(IRDescriptorTableEntry));
+            residency.Add(slice.buffer, false);
             return slice;
         };
         const UploadArena::Slice t0 = table(srvUav);
