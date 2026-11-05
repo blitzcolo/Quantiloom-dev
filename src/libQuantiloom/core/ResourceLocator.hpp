@@ -3,7 +3,8 @@
  * @brief One resolution of the SDK's runtime resources (internal)
  *
  * Behind the public core/Resources.hpp. The installed layout is
- * `<root>/shaders/spirv/*.spv` plus a SHADERSET stamp and `<root>/assets/...`;
+ * `<root>/shaders/spirv/*.spv` (a Metal build: `shaders/metallib/*.metallib` with
+ * their reflection) plus a SHADERSET stamp and `<root>/assets/...`;
  * a build tree has neither, so the working-directory development fallback
  * (src/shaders, shaders, ../shaders, assets/) is what serves it.
  */
@@ -55,6 +56,12 @@ ResolvedResources ResolveResourceCandidates(const ResourceCandidates& candidates
 /// equal. Internal (no QL_API); the generated header that holds it is private
 /// to quantiloom_core, so tests read it through here.
 String CompiledShaderSetDigest();
+
+/// The directory under <root>/shaders this build's set lives in ("spirv" on
+/// Vulkan, "metallib" on Metal), and the file whose presence marks a
+/// development shader directory ("raygen.spv" / "raygen.metallib").
+String CompiledShaderSubdir();
+String CompiledShaderProbe();
 
 /// Process-wide resolution, cached. SetResourceRoot() invalidates the cache.
 const ResolvedResources& GetResolvedResources();

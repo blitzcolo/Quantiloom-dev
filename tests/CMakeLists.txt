@@ -277,7 +277,6 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_render_core.cpp
     test_renderer/test_config_resolve.cpp
     test_renderer/test_apply_config.cpp
-    test_renderer/test_vulkan_device.cpp
     test_renderer/test_deferred_buffer_uploads.cpp
     test_renderer/test_brdf_lut_gpu.cpp
     test_renderer/test_environment_cubemap.cpp
@@ -309,15 +308,40 @@ set(TEST_RENDERER_SOURCES
 set(TEST_SUPPORT_SOURCES
     support/GpuTestDevice.cpp
     support/GpuTestHelpers.cpp
-    support/VulkanTestDevice.cpp
-    support/vulkan/QueueBlocker.cpp
 )
 
 # Internal compute RHI (gpu/): CPU mapping tables and a GPU smoke suite
 set(TEST_GPU_SOURCES
-    test_gpu/test_gpu_mapping.cpp
-    test_gpu/test_gpu_vulkan.cpp
+    test_gpu/test_gpu_shader_library.cpp
 )
+
+# Each backend's side of the support files, and the tests about that backend
+# itself. A backend the build leaves out gets the stub side instead, whose
+# functions are never reached: the suites are instantiated over
+# gpu::CompiledBackends(), so no case asks a missing backend for anything.
+if(QUANTILOOM_BACKEND_VULKAN)
+    list(APPEND TEST_SUPPORT_SOURCES
+        support/VulkanTestDevice.cpp
+        support/vulkan/QueueBlocker.cpp
+    )
+    list(APPEND TEST_GPU_SOURCES
+        test_gpu/test_gpu_mapping.cpp
+        test_gpu/test_gpu_vulkan.cpp
+    )
+    list(APPEND TEST_RENDERER_SOURCES test_renderer/test_vulkan_device.cpp)
+else()
+    list(APPEND TEST_SUPPORT_SOURCES support/NoVulkanTestDevice.cpp)
+endif()
+if(QUANTILOOM_BACKEND_METAL)
+    list(APPEND TEST_SUPPORT_SOURCES
+        support/metal/MetalTestDevice.mm
+        support/metal/QueueBlocker.mm
+    )
+    set_source_files_properties(support/metal/MetalTestDevice.mm support/metal/QueueBlocker.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc" SKIP_PRECOMPILE_HEADERS ON)
+else()
+    list(APPEND TEST_SUPPORT_SOURCES support/NoMetalTestDevice.cpp)
+endif()
 
 # Postprocess tests (sensor simulation, multiband fusion)
 set(TEST_POSTPROCESS_SOURCES
@@ -440,10 +464,10 @@ target_precompile_headers(libquantiloom_tests PRIVATE
 # Standalone mode links GTest alone, so Vulkan and GLM are not on its include
 # path -- they come with quantiloom_core.
 if(NOT QUANTILOOM_STANDALONE_TESTS)
-    target_precompile_headers(libquantiloom_tests PRIVATE
-        <vulkan/vulkan.h>
-        <glm/glm.hpp>
-    )
+    target_precompile_headers(libquantiloom_tests PRIVATE <glm/glm.hpp>)
+    if(QUANTILOOM_BACKEND_VULKAN)
+        target_precompile_headers(libquantiloom_tests PRIVATE <vulkan/vulkan.h>)
+    endif()
 endif()
 
 # Shaders come from the resource locator (the development fallback reads

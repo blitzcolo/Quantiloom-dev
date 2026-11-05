@@ -181,43 +181,10 @@ add_library(quantiloom_core OBJECT
     gpu/Trace.hpp
     gpu/DeviceFactory.hpp
     gpu/DeviceFactory.cpp
-    # The Metal entry points until gpu/metal/ exists: every build answers Metal with an Err
-    gpu/NoMetalBackend.cpp
     gpu/ShaderLibrary.hpp
     gpu/ShaderLibrary.cpp
     gpu/NeutralHeaders.cpp
     gpu/SharedLayoutChecks.cpp
-    gpu/vulkan/VulkanMapping.hpp
-    gpu/vulkan/VulkanMapping.cpp
-    gpu/vulkan/VulkanResources.hpp
-    gpu/vulkan/VulkanResources.cpp
-    gpu/vulkan/VulkanCommandList.hpp
-    gpu/vulkan/VulkanCommandList.cpp
-    gpu/vulkan/VulkanDevice.hpp
-    gpu/vulkan/VulkanDevice.cpp
-    gpu/vulkan/VulkanDeviceFactory.cpp
-    gpu/vulkan/VulkanSync.hpp
-    gpu/vulkan/VulkanSync.cpp
-    gpu/vulkan/VulkanRt.hpp
-    gpu/vulkan/VulkanRt.cpp
-    gpu/vulkan/VulkanTrace.hpp
-    gpu/vulkan/VulkanTrace.cpp
-    # The context the backend runs on, its VMA allocator and buffer/image wrappers, the
-    # immediate submissions, and the exported vk::CreateDevice
-    gpu/vulkan/VmaImpl.cpp
-    gpu/vulkan/VulkanContext.cpp
-    gpu/vulkan/VulkanContext.hpp
-    gpu/vulkan/VulkanContextAdapter.cpp
-    gpu/vulkan/VulkanContextAdapter.hpp
-    gpu/vulkan/VulkanDeviceRequirements.cpp
-    gpu/vulkan/VulkanDeviceRequirements.hpp
-    gpu/vulkan/GpuBuffer.cpp
-    gpu/vulkan/GpuBuffer.hpp
-    gpu/vulkan/GpuImage.cpp
-    gpu/vulkan/GpuImage.hpp
-    gpu/vulkan/CommandHelper.cpp
-    gpu/vulkan/CommandHelper.hpp
-    gpu/vulkan/VulkanInterop.cpp
     ${QL_PUBLIC_INC}/renderer/GpuInterop.hpp
     ${QL_PUBLIC_INC}/renderer/interop/VulkanInterop.hpp
     ${QL_PUBLIC_INC}/renderer/interop/MetalInterop.hpp
@@ -342,6 +309,54 @@ add_library(quantiloom_core OBJECT
     ${QL_SHADER_SET_DIGEST_HEADER}
 )
 
+# ---- GPU backends (root CMakeLists: QUANTILOOM_BACKEND_VULKAN / _METAL) ----------
+# Each backend's entry points are gpu/DeviceFactory.hpp's namespace functions; a
+# backend this build leaves out is a stub that answers every request with an Err
+# (gpu/NoVulkanBackend.cpp, gpu/NoMetalBackend.cpp). CMake picks the files, so no
+# #ifdef selects a backend in C++.
+if(QUANTILOOM_BACKEND_VULKAN)
+    target_sources(quantiloom_core PRIVATE
+        gpu/vulkan/VulkanMapping.hpp
+        gpu/vulkan/VulkanMapping.cpp
+        gpu/vulkan/VulkanResources.hpp
+        gpu/vulkan/VulkanResources.cpp
+        gpu/vulkan/VulkanCommandList.hpp
+        gpu/vulkan/VulkanCommandList.cpp
+        gpu/vulkan/VulkanDevice.hpp
+        gpu/vulkan/VulkanDevice.cpp
+        gpu/vulkan/VulkanDeviceFactory.cpp
+        gpu/vulkan/VulkanSync.hpp
+        gpu/vulkan/VulkanSync.cpp
+        gpu/vulkan/VulkanRt.hpp
+        gpu/vulkan/VulkanRt.cpp
+        gpu/vulkan/VulkanTrace.hpp
+        gpu/vulkan/VulkanTrace.cpp
+        # The context the backend runs on, its VMA allocator and buffer/image wrappers, the
+        # immediate submissions, and the exported vk::CreateDevice
+        gpu/vulkan/VmaImpl.cpp
+        gpu/vulkan/VulkanContext.cpp
+        gpu/vulkan/VulkanContext.hpp
+        gpu/vulkan/VulkanContextAdapter.cpp
+        gpu/vulkan/VulkanContextAdapter.hpp
+        gpu/vulkan/VulkanDeviceRequirements.cpp
+        gpu/vulkan/VulkanDeviceRequirements.hpp
+        gpu/vulkan/GpuBuffer.cpp
+        gpu/vulkan/GpuBuffer.hpp
+        gpu/vulkan/GpuImage.cpp
+        gpu/vulkan/GpuImage.hpp
+        gpu/vulkan/CommandHelper.cpp
+        gpu/vulkan/CommandHelper.hpp
+        gpu/vulkan/VulkanInterop.cpp
+    )
+else()
+    target_sources(quantiloom_core PRIVATE gpu/NoVulkanBackend.cpp)
+endif()
+if(QUANTILOOM_BACKEND_METAL)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/gpu/metal/MetalSources.cmake)
+else()
+    target_sources(quantiloom_core PRIVATE gpu/NoMetalBackend.cpp)
+endif()
+
 # The shader-set digest is generated after the .spv are compiled, and the
 # library compiles it in so it can reject a stale resource copy at runtime.
 add_dependencies(quantiloom_core ShaderSetStamp)
@@ -400,20 +415,21 @@ target_include_directories(quantiloom_core
 # in INTERFACE_LINK_LIBRARIES wrapped in $<LINK_ONLY:>, so the tests link spdlog
 # and friends without inheriting their include directories.
 target_link_libraries(quantiloom_core
-    PUBLIC
-        Vulkan::Vulkan
     PRIVATE
         spdlog::spdlog
         tomlplusplus::tomlplusplus
         nlohmann_json
         cpp_httplib
-        VMA
         OpenEXR::OpenEXR
         Imath::Imath
         tinygltf
         exprtk
         glm::glm  # Link privately for build, consumers use find_package(glm)
 )
+
+if(QUANTILOOM_BACKEND_VULKAN)
+    target_link_libraries(quantiloom_core PUBLIC Vulkan::Vulkan PRIVATE VMA)
+endif()
 
 if(WIN32)
     target_link_libraries(quantiloom_core PRIVATE advapi32)
@@ -499,9 +515,11 @@ target_precompile_headers(quantiloom_core PRIVATE
     <filesystem> <format> <fstream> <functional> <limits> <memory> <mutex>
     <optional> <sstream> <stdexcept> <string> <string_view> <unordered_map>
     <utility> <vector>
-    <vulkan/vulkan.h>
     <glm/glm.hpp>
 )
+if(QUANTILOOM_BACKEND_VULKAN)
+    target_precompile_headers(quantiloom_core PRIVATE <vulkan/vulkan.h>)
+endif()
 # The neutrality check must see only what gpu/ headers include themselves.
 set_source_files_properties(gpu/NeutralHeaders.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
@@ -555,7 +573,22 @@ target_include_directories(libQuantiloom
 # Vulkan is PRIVATE: nothing in the public headers mentions a Vulkan type
 # outside renderer/interop/, so a consumer of the base package needs no Vulkan
 # SDK. The Vulkan-typed interop header is its own component below.
-target_link_libraries(libQuantiloom PRIVATE Vulkan::Vulkan)
+if(QUANTILOOM_BACKEND_VULKAN)
+    target_link_libraries(libQuantiloom PRIVATE Vulkan::Vulkan)
+endif()
+
+# On a Mac the dylib exports Quantiloom's symbols and nothing else. OpenEXR's
+# libraries mark their own API visible however they are built, and Metal Shader
+# Converter's runtime companion defines plain C functions, so hidden-by-default
+# compilation alone would still publish ~3700 foreign symbols as part of the
+# SDK's contract. MSVC exports only QL_API; this filter is the Mac's equivalent,
+# and docs/abi/exports.macos.golden is what it leaves.
+if(APPLE)
+    set(_ql_export_list "${CMAKE_CURRENT_BINARY_DIR}/libQuantiloom.exports")
+    file(WRITE "${_ql_export_list}" "*10quantiloom*\n")
+    target_link_options(libQuantiloom PRIVATE "LINKER:-exported_symbols_list,${_ql_export_list}")
+    unset(_ql_export_list)
+endif()
 
 # Set library output name (remove "lib" prefix for cleaner names)
 set_target_properties(libQuantiloom PROPERTIES
@@ -577,9 +610,20 @@ message(STATUS "libQuantiloom configured successfully")
 # export set, so the base package never references Vulkan. A consumer that
 # wants vk::CreateDevice asks for COMPONENTS VulkanInterop; one that only uses
 # the neutral API links Quantiloom::libQuantiloom and needs no Vulkan SDK.
-add_library(QuantiloomVulkanInterop INTERFACE)
-set_target_properties(QuantiloomVulkanInterop PROPERTIES EXPORT_NAME VulkanInterop)
-target_link_libraries(QuantiloomVulkanInterop INTERFACE libQuantiloom Vulkan::Headers)
+# A component exists only in a build that compiled its backend: a Mac SDK has
+# no VulkanInterop, and asking for one fails find_package with the component
+# named, rather than linking a vk::CreateDevice that is not there.
+if(QUANTILOOM_BACKEND_VULKAN)
+    add_library(QuantiloomVulkanInterop INTERFACE)
+    set_target_properties(QuantiloomVulkanInterop PROPERTIES EXPORT_NAME VulkanInterop)
+    target_link_libraries(QuantiloomVulkanInterop INTERFACE libQuantiloom Vulkan::Headers)
+    install(TARGETS QuantiloomVulkanInterop EXPORT QuantiloomVulkanInteropTargets)
+    install(EXPORT QuantiloomVulkanInteropTargets
+        FILE QuantiloomVulkanInteropTargets.cmake
+        NAMESPACE Quantiloom::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Quantiloom
+    )
+endif()
 
 add_library(QuantiloomMetalInterop INTERFACE)
 set_target_properties(QuantiloomMetalInterop PROPERTIES EXPORT_NAME MetalInterop)
@@ -588,12 +632,6 @@ if(APPLE)
     target_link_libraries(QuantiloomMetalInterop INTERFACE "-framework Metal")
 endif()
 
-install(TARGETS QuantiloomVulkanInterop EXPORT QuantiloomVulkanInteropTargets)
-install(EXPORT QuantiloomVulkanInteropTargets
-    FILE QuantiloomVulkanInteropTargets.cmake
-    NAMESPACE Quantiloom::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Quantiloom
-)
 install(TARGETS QuantiloomMetalInterop EXPORT QuantiloomMetalInteropTargets)
 install(EXPORT QuantiloomMetalInteropTargets
     FILE QuantiloomMetalInteropTargets.cmake
@@ -686,12 +724,21 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/glmConfig.cmake"
 # Under share/quantiloom, beside the rest of the runtime data: the locator
 # resolves <library>/../share/quantiloom and <library>/share/quantiloom, so
 # the resources move with the library rather than with the executables.
-install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/shaders/
-    DESTINATION share/quantiloom/shaders/spirv
-    FILES_MATCHING PATTERN "*.spv"
-)
+# shaders/spirv on Vulkan; shaders/metallib (each metallib with its MSC
+# reflection) on Metal -- QL_SHADER_FORMAT, src/shaders/CMakeLists.txt.
+if(QL_SHADER_FORMAT STREQUAL "metallib")
+    install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/shaders/
+        DESTINATION share/quantiloom/shaders/metallib
+        FILES_MATCHING PATTERN "*.metallib" PATTERN "*.reflection.json"
+    )
+else()
+    install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/shaders/
+        DESTINATION share/quantiloom/shaders/spirv
+        FILES_MATCHING PATTERN "*.spv"
+    )
+endif()
 install(FILES ${QL_SHADER_SET_STAMP}
-    DESTINATION share/quantiloom/shaders/spirv
+    DESTINATION share/quantiloom/shaders/${QL_SHADER_FORMAT}
 )
 
 # ============================================================================

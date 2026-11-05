@@ -88,6 +88,8 @@ conan/
 
 src/shaders/*.exr
 src/shaders/*.spv
+src/shaders/*.metallib
+src/shaders/*.reflection.json
 .agent/
 assets/usgs/
 reference-only/
@@ -149,3 +151,6 @@ assets/models/desert/desert_kv2.*
 /docs/doxygen-awesome-css/
 /reference-only/vk_gltf_renderer/
 /reference-only/vk_raytracing_tutorial_KHR/
+
+# macOS build tree (build_macos.sh)
+build-mac/

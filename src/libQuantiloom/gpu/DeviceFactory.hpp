@@ -38,8 +38,13 @@ struct SystemDeviceOptions {};
 [[nodiscard]] Result<std::unique_ptr<Device>, String> CreateDeviceFromHandles(
     const GpuDeviceHandles& handles);
 
-/// The backends this build can create a device on: {Vulkan} today.
+/// The backends this build can create a device on: {Vulkan} on Windows and Linux,
+/// {Metal} on a Mac.
 [[nodiscard]] std::span<const Backend> CompiledBackends();
+
+/// The backend a device the SDK creates for itself uses (RenderDevice, OfflineRenderer):
+/// the first compiled one. Vulkan when no backend is compiled, so the error names one.
+[[nodiscard]] Backend DefaultBackend();
 
 /// "Vulkan" or "Metal".
 [[nodiscard]] StringView BackendName(Backend backend);

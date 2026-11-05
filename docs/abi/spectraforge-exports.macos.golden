@@ -1,0 +1,8 @@
+spectraforge::ClusterTextureColors(unsigned char const*, unsigned int, unsigned int, unsigned int, bool, unsigned int, unsigned int)
+spectraforge::GenerateIRCurves(spectraforge::IRMaterialEntry const&, std::__1::vector<std::__1::pair<float, float>, std::__1::allocator<std::__1::pair<float, float>>>&, std::__1::vector<std::__1::pair<float, float>, std::__1::allocator<std::__1::pair<float, float>>>&, std::__1::vector<std::__1::pair<float, float>, std::__1::allocator<std::__1::pair<float, float>>>&)
+spectraforge::GetBuiltinDatabase()
+spectraforge::MatchMaterial(spectraforge::LABColor const&, float)
+spectraforge::RGBToLAB(float, float, float)
+spectraforge::SpectraForge::GetDatabase()
+spectraforge::SpectraForge::Process(quantiloom::Scene const&, std::__1::vector<quantiloom::Material, std::__1::allocator<quantiloom::Material>>&, spectraforge::ForgeConfig const&)
+spectraforge::SpectraForge::ProcessSingle(quantiloom::Material&, quantiloom::Texture const*, float, unsigned int)

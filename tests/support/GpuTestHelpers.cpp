@@ -4,6 +4,7 @@
 #include "renderer/GpuAlloc.hpp"
 #include "renderer/TextureTransitions.hpp"
 #include "support/GpuInteropTestUtils.hpp"
+#include "support/MetalTestDevice.hpp"
 #include "support/VulkanTestDevice.hpp"
 
 #include <gtest/gtest.h>
@@ -121,7 +122,7 @@ std::vector<u32> ReadTextureWords(gpu::Device& device, gpu::TextureRef texture, 
 u32 TextureMipLevels(gpu::Backend backend, const gpu::Texture& texture) {
     switch (backend) {
         case gpu::Backend::Vulkan: return VulkanTextureMipLevels(texture);
-        case gpu::Backend::Metal: break;
+        case gpu::Backend::Metal: return MetalTextureMipLevels(texture);
     }
     ADD_FAILURE() << "no mip inspection for the " << gpu::BackendName(backend) << " backend";
     return 0;
@@ -130,7 +131,7 @@ u32 TextureMipLevels(gpu::Backend backend, const gpu::Texture& texture) {
 f32 PackedInstanceTranslationX(gpu::Backend backend, const void* packed, u32 index) {
     switch (backend) {
         case gpu::Backend::Vulkan: return VulkanPackedInstanceTranslationX(packed, index);
-        case gpu::Backend::Metal: break;
+        case gpu::Backend::Metal: return MetalPackedInstanceTranslationX(packed, index);
     }
     ADD_FAILURE() << "no instance inspection for the " << gpu::BackendName(backend) << " backend";
     return 0.0f;

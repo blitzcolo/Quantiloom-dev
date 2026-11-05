@@ -455,8 +455,9 @@ private:
     // Helpers
     // ========================================================================
 
-    // Load SPIR-V shader from file
-    static std::vector<u32> LoadSPIRV(const std::string& path);
+    /// The named stages through the device's shader library, in order. Throws
+    /// std::runtime_error naming what could not be read.
+    static Vector<gpu::ShaderCode> LoadShaderSet(gpu::Device& device, std::initializer_list<std::string> paths);
 
     /// Record the armed record-buffer init -- header update plus zero fill --
     /// into `list` ahead of a trace. Invoked from TraceRays so the barriers

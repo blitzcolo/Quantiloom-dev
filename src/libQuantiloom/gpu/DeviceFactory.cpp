@@ -39,6 +39,11 @@ std::span<const Backend> CompiledBackends() {
     return compiled;
 }
 
+Backend DefaultBackend() {
+    const auto compiled = CompiledBackends();
+    return compiled.empty() ? Backend::Vulkan : compiled.front();
+}
+
 StringView BackendName(Backend backend) {
     switch (backend) {
         case Backend::Vulkan: return "Vulkan";

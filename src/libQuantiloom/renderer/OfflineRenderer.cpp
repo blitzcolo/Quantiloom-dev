@@ -1271,9 +1271,9 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
         impl.rgbToSpectrumRef = shared.rgbToSpectrumBuffer.get();
         impl.pipelineCache = shared.pipelineCache.get();
     } else {
-        QL_LOG_INFO("Initializing Vulkan context...");
+        QL_LOG_INFO("Initializing {} device...", gpu::BackendName(gpu::DefaultBackend()));
         // What the context's constructor threw is now the Err; the callers test the Result.
-        auto created = gpu::CreateSystemDevice(gpu::Backend::Vulkan);
+        auto created = gpu::CreateSystemDevice(gpu::DefaultBackend());
         if (!created) {
             return CreateResult::Err(std::move(created).error());
         }

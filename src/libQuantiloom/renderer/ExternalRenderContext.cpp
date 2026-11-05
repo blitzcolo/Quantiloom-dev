@@ -89,8 +89,15 @@ using core::GetDefaultCacheDirectory;
 
 namespace {
 
+/// Empty when this build compiled `backend`'s implementation.
 String BackendError(GpuBackend backend) {
-    if (backend == GpuBackend::Metal) return "this SDK build has no Metal backend";
+    const auto wanted = static_cast<gpu::Backend>(static_cast<u32>(backend));
+    for (const gpu::Backend compiled : gpu::CompiledBackends()) {
+        if (compiled == wanted) return {};
+    }
+    if (backend == GpuBackend::Vulkan || backend == GpuBackend::Metal) {
+        return "this SDK build has no " + String(gpu::BackendName(wanted)) + " backend";
+    }
     return "unsupported GPU backend " + std::to_string(static_cast<u32>(backend));
 }
 
@@ -102,7 +109,7 @@ String ValidateRecording(const GpuCommandRecording& recording) {
                std::to_string(kGpuInteropVersion) +
                "; rebuild the host against the installed headers";
     }
-    if (recording.backend != GpuBackend::Vulkan) return BackendError(recording.backend);
+    if (String error = BackendError(recording.backend); !error.empty()) return error;
     if (recording.commandBuffer == 0) return "GpuCommandRecording.commandBuffer is null";
     return {};
 }
@@ -114,10 +121,11 @@ String ValidateTarget(const GpuImageTarget& target, bool depthTarget) {
                std::to_string(kGpuInteropVersion) +
                "; rebuild the host against the installed headers";
     }
-    if (target.backend != GpuBackend::Vulkan) return BackendError(target.backend);
+    if (String error = BackendError(target.backend); !error.empty()) return error;
     if (target.image == 0) return "GpuImageTarget.image is null";
     if (target.width == 0 || target.height == 0) return "GpuImageTarget extent is zero";
-    if (target.finalLayout == 0 && !depthTarget) {
+    // Layouts are Vulkan's: a Metal texture has none to name (MetalInterop.hpp).
+    if (target.backend == GpuBackend::Vulkan && target.finalLayout == 0 && !depthTarget) {
         return "GpuImageTarget.finalLayout is 0 (UNDEFINED): the target must name the "
                "layout the SDK should leave it in";
     }
@@ -1098,13 +1106,18 @@ Result<std::unique_ptr<ExternalRenderContext>, String> ExternalRenderContext::Cr
                                  std::to_string(kGpuInteropVersion) +
                                  "; rebuild the host against the installed headers");
     }
-    if (handles.backend != GpuBackend::Vulkan) {
-        return CreateResult::Err(BackendError(handles.backend));
+    if (String error = BackendError(handles.backend); !error.empty()) {
+        return CreateResult::Err(std::move(error));
     }
-    if (handles.instance == 0) return CreateResult::Err("GpuDeviceHandles.instance (the Vulkan instance) is null");
-    if (handles.physicalDevice == 0) return CreateResult::Err("GpuDeviceHandles.physicalDevice (the Vulkan physical device) is null");
-    if (handles.device == 0) return CreateResult::Err("GpuDeviceHandles.device (the Vulkan device) is null");
-    if (handles.queue == 0) return CreateResult::Err("GpuDeviceHandles.queue (the Vulkan queue) is null");
+    if (handles.backend == GpuBackend::Vulkan) {
+        if (handles.instance == 0) return CreateResult::Err("GpuDeviceHandles.instance (the Vulkan instance) is null");
+        if (handles.physicalDevice == 0) return CreateResult::Err("GpuDeviceHandles.physicalDevice (the Vulkan physical device) is null");
+        if (handles.device == 0) return CreateResult::Err("GpuDeviceHandles.device (the Vulkan device) is null");
+        if (handles.queue == 0) return CreateResult::Err("GpuDeviceHandles.queue (the Vulkan queue) is null");
+    } else {
+        if (handles.device == 0) return CreateResult::Err("GpuDeviceHandles.device (the MTLDevice) is null");
+        if (handles.queue == 0) return CreateResult::Err("GpuDeviceHandles.queue (the MTLCommandQueue) is null");
+    }
     if (params.width == 0 || params.height == 0) {
         return CreateResult::Err("Invalid dimensions");
     }
@@ -1161,7 +1174,7 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     gpuDevice.reset();
     auto createdDevice = gpu::CreateDeviceFromHandles(params.device);
     if (!createdDevice) {
-        return Result<void, String>::Err(String("Failed to create VulkanContextAdapter: ") +
+        return Result<void, String>::Err(String("Failed to create the GPU device over the host's handles: ") +
                                          createdDevice.error());
     }
     gpuDevice = std::move(createdDevice).value();

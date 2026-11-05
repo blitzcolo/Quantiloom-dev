@@ -52,9 +52,9 @@ Result<std::unique_ptr<RenderDevice>, String> RenderDevice::Create(
     Impl& impl = *self->m_impl;
     impl.init = params;
 
-    QL_LOG_INFO("Initializing shared Vulkan context...");
+    QL_LOG_INFO("Initializing shared {} device...", gpu::BackendName(gpu::DefaultBackend()));
     // What the context's constructor threw is now the Err; the callers test the Result.
-    auto created = gpu::CreateSystemDevice(gpu::Backend::Vulkan);
+    auto created = gpu::CreateSystemDevice(gpu::DefaultBackend());
     if (!created) {
         return CreateResult::Err(std::move(created).error());
     }

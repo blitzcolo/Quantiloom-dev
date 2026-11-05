@@ -36,17 +36,6 @@ namespace quantiloom {
 
 static constexpr u32 kMaxPipelineRayRecursionDepth = 1;
 
-// A shader as the gpu:: kernel factories take it: the words LoadSPIRV read, as
-// bytes, named after the file.
-static gpu::ShaderCode ToShaderCode(const std::string& path, const std::vector<u32>& words) {
-    gpu::ShaderCode code;
-    code.name = std::filesystem::path(path).filename().string();
-    code.path = path;
-    code.bytes.resize(words.size() * sizeof(u32));
-    std::memcpy(code.bytes.data(), words.data(), code.bytes.size());
-    return code;
-}
-
 // A whole-buffer write of a storage buffer binding, with the kind its row in
 // RtBindings.hpp declares (read-only or read-write; both are storage buffers).
 static gpu::BindingWrite RtBufferWrite(u32 binding, gpu::BufferRef buffer) {
@@ -347,49 +336,37 @@ void RayTracingPipeline::CreatePipelineLayout() {
 // ============================================================================
 
 void RayTracingPipeline::LoadShaders() {
-    QL_LOG_INFO("  [LoadShaders] Loading SPIR-V shaders...");
+    QL_LOG_INFO("  [LoadShaders] Loading ray tracing shaders...");
 
-    m_spirvData.resize(5);
-    m_spirvData[0] = ToShaderCode(m_raygenPath, LoadSPIRV(m_raygenPath));
-    QL_LOG_INFO("  [LoadShaders] Raygen loaded: {} words", m_spirvData[0].bytes.size() / sizeof(u32));
-
-    m_spirvData[1] = ToShaderCode(m_closestHitPath, LoadSPIRV(m_closestHitPath));
-    QL_LOG_INFO("  [LoadShaders] ClosestHit loaded: {} words", m_spirvData[1].bytes.size() / sizeof(u32));
-
-    m_spirvData[2] = ToShaderCode(m_missPath, LoadSPIRV(m_missPath));
-    QL_LOG_INFO("  [LoadShaders] Miss loaded: {} words", m_spirvData[2].bytes.size() / sizeof(u32));
-
-    m_spirvData[3] = ToShaderCode(m_shadowMissPath, LoadSPIRV(m_shadowMissPath));
-    QL_LOG_INFO("  [LoadShaders] ShadowMiss loaded: {} words", m_spirvData[3].bytes.size() / sizeof(u32));
-
-    m_spirvData[4] = ToShaderCode(m_anyHitPath, LoadSPIRV(m_anyHitPath));
-    QL_LOG_INFO("  [LoadShaders] AnyHit loaded: {} words", m_spirvData[4].bytes.size() / sizeof(u32));
-
-    QL_LOG_INFO("  Shaders loaded: {} / {} / {} / {}", m_raygenPath, m_closestHitPath, m_missPath, m_shadowMissPath);
+    m_spirvData = LoadShaderSet(m_device, {m_raygenPath, m_closestHitPath, m_missPath, m_shadowMissPath, m_anyHitPath});
+    QL_LOG_INFO("  [LoadShaders] Raygen loaded: {} bytes", m_spirvData[0].bytes.size());
+    QL_LOG_INFO("  Shaders loaded: {} / {} / {} / {}", m_spirvData[0].path.string(), m_spirvData[1].path.string(),
+                m_spirvData[2].path.string(), m_spirvData[3].path.string());
     Log::Flush();
 }
 
-std::vector<u32> RayTracingPipeline::LoadSPIRV(const std::string& path) {
-    // One search list for every shader the SDK loads (core/ResourceLocator.hpp):
-    // an explicitly named file is honoured as given, anything else is resolved
-    // by name against the accepted resource root.
-    const std::filesystem::path given(path);
-    if (given.is_absolute() || given.has_parent_path()) {
-        std::vector<u32> direct = rendercore::ReadSpirvFile(given);
-        if (!direct.empty()) {
-            QL_LOG_DEBUG("  Loaded shader from: {}", given.string());
-            return direct;
-        }
+Vector<gpu::ShaderCode> RayTracingPipeline::LoadShaderSet(gpu::Device& device,
+                                                          std::initializer_list<std::string> paths) {
+    // One search list for every shader the SDK loads (core/ResourceLocator.hpp),
+    // through the device's library, which knows its format: a ".spv" a caller
+    // names stands for the stage, and the file read is the device's (.spv on
+    // Vulkan, .metallib on Metal). A path with a directory is read from there;
+    // a bare name is resolved against the accepted resource root.
+    Vector<String> names;
+    std::filesystem::path directory;
+    for (const std::string& path : paths) {
+        const std::filesystem::path given(path);
+        names.push_back(given.stem().string());
+        if (directory.empty() && (given.is_absolute() || given.has_parent_path())) directory = given.parent_path();
     }
-
-    std::vector<u32> buffer = rendercore::LoadSpirv(given.filename().string());
-    if (buffer.empty()) {
+    const Vector<StringView> views(names.begin(), names.end());
+    auto loaded = directory.empty() ? device.Shaders().Load(views) : device.Shaders().LoadFrom(directory, views);
+    if (!loaded.has_value()) {
         const String why = core::ResourceNotFoundMessage();
-        throw std::runtime_error("Failed to open shader file: " + path +
-                                 (why.empty() ? " (not in the resolved resource root)" : " (" + why + ")"));
+        throw std::runtime_error("Failed to open shader file: " + loaded.error() +
+                                 (why.empty() ? String() : " (" + why + ")"));
     }
-    QL_LOG_DEBUG("  Loaded shader from: {}", path);
-    return buffer;
+    return std::move(loaded).value();
 }
 
 // ============================================================================
@@ -653,7 +630,7 @@ RayTracingPipeline::CapturePrimaryGeometry(u32 width, u32 height,
         // A compute pipeline on the ray tracing layout: same set, same push range.
         const std::string path =
             (std::filesystem::path(m_raygenPath).parent_path() / "fusion_geometry.spv").string();
-        const gpu::ShaderCode code = ToShaderCode(path, LoadSPIRV(path));
+        const gpu::ShaderCode code = LoadShaderSet(m_device, {path}).front();
         gpu::ComputeKernelDesc desc;
         desc.code = &code;
         desc.layout = m_kernelLayout.get();

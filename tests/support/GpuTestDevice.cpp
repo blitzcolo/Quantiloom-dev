@@ -3,6 +3,7 @@
 #include "gpu/Device.hpp"
 #include "renderer/GpuInterop.hpp"
 #include "support/GpuInteropTestUtils.hpp"
+#include "support/MetalTestDevice.hpp"
 #include "support/VulkanTestDevice.hpp"
 
 #include <array>
@@ -90,7 +91,7 @@ QL_INSTANTIATE_GPU_SUITE(GpuDeviceTest);
 GpuDeviceHandles GpuHandles(gpu::Device& device) {
     switch (device.Info().backend) {
         case gpu::Backend::Vulkan: return VulkanHostHandles(device);
-        case gpu::Backend::Metal: break;
+        case gpu::Backend::Metal: return MetalHostHandles(device);
     }
     ADD_FAILURE() << "no host handles for the " << gpu::BackendName(device.Info().backend) << " test device";
     return {};
@@ -99,7 +100,7 @@ GpuDeviceHandles GpuHandles(gpu::Device& device) {
 GpuCommandRecording GpuRecording(gpu::CommandList& list) {
     switch (list.GetBackend()) {
         case gpu::Backend::Vulkan: return VulkanHostRecording(list);
-        case gpu::Backend::Metal: break;
+        case gpu::Backend::Metal: return MetalHostRecording(list);
     }
     ADD_FAILURE() << "no host recording for a " << gpu::BackendName(list.GetBackend()) << " command list";
     return {};
