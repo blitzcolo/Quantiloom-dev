@@ -119,7 +119,10 @@ echo "    --no-docs         (skip documentation)"
 echo ""
 
 # Create install directory
-sudo mkdir -p "$INSTALL_DIR" 2>/dev/null || mkdir -p "$INSTALL_DIR"
+# sudo only when the directory cannot be made as this user (/opt/openusd is
+# root-owned on a Mac; ~/openusd is not, and asking for a password there would
+# stop an unattended build).
+mkdir -p "$INSTALL_DIR" 2>/dev/null || sudo mkdir -p "$INSTALL_DIR"
 
 # Determine number of parallel jobs
 NPROC=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)

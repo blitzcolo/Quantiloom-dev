@@ -12,8 +12,9 @@
 #   - Xcode and its Metal toolchain; CMake and Ninja (Homebrew)
 #   - DXC: the LunarG Vulkan SDK's macOS dxc (VULKAN_SDK, or tools/dxc/bin)
 #   - Metal Shader Converter (/usr/local/bin/metal-shaderconverter)
-#   - Python with numpy and OpenEXR for the render gates: PYTHON=...
-#   - OpenUSD (optional): USD_ROOT=... (scripts/build_openusd.sh)
+#   - Python for the render gates: found or provisioned automatically (uv)
+#   - OpenUSD (optional): ~/openusd or /opt/openusd is picked up, or USD_ROOT=...
+#     (scripts/build_openusd.sh --install-dir ~/openusd needs no sudo)
 #
 # set -e guarantees the install step is never reached if any build step fails.
 set -euo pipefail
@@ -27,6 +28,13 @@ if [ -z "${VULKAN_SDK:-}" ] && [ -d "$HOME/VulkanSDK" ]; then
     [ -n "$latest" ] && export VULKAN_SDK="$latest"
 fi
 
+# OpenUSD: USD_ROOT when set, else the first install scripts/build_openusd.sh
+# would have made. Without one the build goes on with USD loading disabled.
+if [ -z "${USD_ROOT:-}" ]; then
+    for candidate in "$HOME/openusd" /opt/openusd; do
+        if [ -f "$candidate/pxrConfig.cmake" ]; then USD_ROOT="$candidate"; break; fi
+    done
+fi
 usd_args=(-DQUANTILOOM_USE_OPENUSD=OFF)
 if [ -n "${USD_ROOT:-}" ]; then
     usd_args=(-DQUANTILOOM_USE_OPENUSD=ON "-DUSD_ROOT=${USD_ROOT}")
@@ -68,7 +76,28 @@ BUILD_DIR="$BUILD_DIR" bash ./scripts/check_exports.sh
 
 export CLI="./$BUILD_DIR/src/app/Quantiloom"
 export TESTS="./$BUILD_DIR/tests/libquantiloom_tests"
-export PYTHON="${PYTHON:-python3}"
+# The render gates measure with numpy and OpenEXR. Use PYTHON when it has them,
+# else python3 when it does, else a venv of our own made with uv (created once,
+# kept in the build tree), so a fresh machine needs no setup step for this.
+gate_python_ok() { "$1" -c 'import numpy, OpenEXR' >/dev/null 2>&1; }
+if [ -n "${PYTHON:-}" ] && gate_python_ok "$PYTHON"; then
+    :
+elif gate_python_ok python3; then
+    PYTHON=python3
+else
+    venv="$BUILD_DIR/gates-venv"
+    if ! gate_python_ok "$venv/bin/python"; then
+        command -v uv >/dev/null 2>&1 || {
+            echo "The render gates need Python with numpy and OpenEXR: install uv" \
+                 "(brew install uv) or set PYTHON to such an interpreter." >&2
+            exit 1
+        }
+        uv venv --quiet "$venv"
+        uv pip install --quiet --python "$venv/bin/python" numpy OpenEXR
+    fi
+    PYTHON="$venv/bin/python"
+fi
+export PYTHON
 
 run_gate() {
     local name="$1"; shift

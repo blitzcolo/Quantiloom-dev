@@ -91,6 +91,9 @@ if(APPLE)
     set(CMAKE_CXX_VISIBILITY_PRESET hidden)
     set(CMAKE_OBJCXX_VISIBILITY_PRESET hidden)
     set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+    # Installed binaries find the SDK's dylibs, OpenUSD's among them, beside
+    # themselves (lib/) or in ../lib (bin/).
+    set(CMAKE_INSTALL_RPATH "@loader_path;@loader_path/../lib")
     if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
         set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum macOS" FORCE)
     endif()
@@ -469,7 +472,7 @@ if(USD_ROOT)
                 )
             else()
                 set_target_properties(TBB::tbb PROPERTIES
-                    IMPORTED_LOCATION "${USD_ROOT}/lib/libtbb.so"
+                    IMPORTED_LOCATION "${USD_ROOT}/lib/libtbb${CMAKE_SHARED_LIBRARY_SUFFIX}"
                 )
             endif()
             set(TBB_FOUND TRUE)

@@ -791,6 +791,19 @@ if(QUANTILOOM_USE_OPENUSD AND WIN32)
     endif()
 endif()
 
+# The same on a Mac: OpenUSD's dylibs (install names @rpath/...) and its plugin
+# tree go beside libQuantiloom in lib/, where CMAKE_INSTALL_RPATH and
+# UsdLoader's <library dir>/usd plugin search both look.
+if(QUANTILOOM_USE_OPENUSD AND APPLE)
+    file(GLOB USD_DYLIBS "${USD_ROOT}/lib/libusd_*.dylib" "${USD_ROOT}/lib/libMaterialX*.dylib")
+    file(GLOB TBB_DYLIBS "${USD_ROOT}/lib/libtbb*.dylib")
+    list(FILTER TBB_DYLIBS EXCLUDE REGEX "_debug")
+    install(FILES ${USD_DYLIBS} ${TBB_DYLIBS} DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    if(EXISTS "${USD_ROOT}/lib/usd")
+        install(DIRECTORY "${USD_ROOT}/lib/usd" DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    endif()
+endif()
+
 # Export targets for find_package
 install(EXPORT QuantiloomTargets
     FILE QuantiloomTargets.cmake
