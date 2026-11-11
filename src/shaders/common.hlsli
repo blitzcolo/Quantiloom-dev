@@ -475,25 +475,75 @@ void InheritFusionMedium(inout PathVertex child, PathVertex parent) {
 // Returns: float2(n, k) - refractive index and extinction coefficient
 // ============================================================================
 
+// One material's n,k is QL_NK_BAND_SLOTS consecutive tables, one per spectral
+// window, and a material's complexRefractiveIndexIndex names the first. The
+// windows partition the spectrum so that every band the renderer integrates
+// lies inside exactly one of them:
+//
+//   slot 0  <= 780 nm          VIS   (fused band 400-780)
+//   slot 1  780 - 1400 nm      NIR   (930-1200)
+//   slot 2  1400 - 3000 nm     SWIR  (1400-2400)
+//   slot 3  3000 - 6500 nm     MWIR  (3000-5000)
+//   slot 4  >= 6500 nm         LWIR  (8000-12000)
+//
+// Two reasons for per-window tables rather than one. 64 uniform nodes across a
+// table that runs from the visible to 12 um leave a band two or three nodes,
+// and one table resampled onto the band named in the config is wrong the
+// moment a host renders a different band from the same load (Studio switches
+// mode at run time; the env scenes load as VIS). And a source that does not
+// reach a band -- soda-lime glass measured to 1.5 um, asked at 10 um -- gets
+// an EMPTY table there (numSamples == 0) instead of its last value clamped
+// across the gap: the band then falls through to the material's next source
+// (ComplexRefractiveIndexCovers is false), which is what the host diagnoses.
+//
+// The host side of this layout is ComplexRefractiveIndexBandSlot in
+// include/quantiloom/core/SpectralData.hpp; the two must agree.
+static const uint QL_NK_BAND_SLOTS = 5;
+
+uint ComplexRefractiveIndexSlot(float lambda_nm) {
+    return lambda_nm <= 780.0 ? 0u
+         : lambda_nm < 1400.0 ? 1u
+         : lambda_nm < 3000.0 ? 2u
+         : lambda_nm < 6500.0 ? 3u
+         : 4u;
+}
+
+// Whether the material has measured n,k at this wavelength. False for a
+// material with none, and for one whose source does not reach this window.
+bool ComplexRefractiveIndexCovers(StructuredBuffer<ComplexRefractiveIndexGPU> buf,
+                                  int index, float lambda_nm) {
+    if (index < 0 || !isfinite(lambda_nm)) {
+        return false;
+    }
+    uint count, stride;
+    buf.GetDimensions(count, stride);
+    const uint entry = uint(index) + ComplexRefractiveIndexSlot(lambda_nm);
+    if (entry >= count) {
+        return false;
+    }
+    const uint numSamples = buf[entry].numSamples;
+    return numSamples >= 2 && numSamples <= 64;
+}
+
 // Buffer plus index, never the struct by value: it is 528 bytes with two
 // fixed-size arrays, and a by-value parameter makes the compiler materialise
 // the whole thing in scratch memory before reading two floats out of it. The
 // wavelength loops call this once or twice per iteration.
+//
+// Returns air for a window the source does not cover; a caller that must not
+// see air asks ComplexRefractiveIndexCovers first. Inside a window the table
+// is clamped at its ends, which only a query in a band gap can reach.
 float2 SampleComplexRefractiveIndex(StructuredBuffer<ComplexRefractiveIndexGPU> buf,
-                                    int index, float query_wavelength_nm) {
-    uint count, stride;
-    buf.GetDimensions(count, stride);
-    if (index < 0 || uint(index) >= count) {
+                                    int base, float query_wavelength_nm) {
+    if (!ComplexRefractiveIndexCovers(buf, base, query_wavelength_nm)) {
         return float2(1.0, 0.0);  // Default: air
     }
+    const uint index = uint(base) + ComplexRefractiveIndexSlot(query_wavelength_nm);
     const uint numSamples = buf[index].numSamples;
-    if (numSamples == 0 || numSamples > 64) {
-        return float2(1.0, 0.0);
-    }
 
     const float start = buf[index].startWavelength_nm;
     const float step  = buf[index].stepSize_nm;
-    if (!isfinite(query_wavelength_nm) || !isfinite(start) || !isfinite(step) || step <= 0.0)
+    if (!isfinite(start) || !isfinite(step) || step <= 0.0)
         return float2(1.0, 0.0);
     const float index_f = (query_wavelength_nm - start) / step;
 

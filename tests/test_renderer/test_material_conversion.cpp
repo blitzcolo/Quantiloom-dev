@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include "core/SpectralData.hpp"
 #include "renderer/RenderCore.hpp"
 
 #include <glm/gtc/constants.hpp>
@@ -559,12 +560,19 @@ TEST(RenderCoreConvertMaterial, PreservesLiveResourceIndicesAndRejectsNegativeGa
     rendercore::MaterialGpuIndices slots;
     slots.spectralReflectanceCurve = 0;
     slots.complexRefractiveIndex = 0;
-    const rendercore::MaterialResourceCounts counts{1, 1, 1};
+    // An n,k index names a run of quantiloom::kComplexRefractiveIndexBandSlots tables.
+    const rendercore::MaterialResourceCounts counts{1, 1, quantiloom::kComplexRefractiveIndexBandSlots};
     const auto gpu = rendercore::ConvertMaterial(material, 550.0f, slots, &counts);
     EXPECT_EQ(gpu.baseColorTextureIndex, 0);
     EXPECT_EQ(gpu.normalTextureIndex, -1);
     EXPECT_EQ(gpu.spectralReflectanceCurveIndex, 0);
     EXPECT_EQ(gpu.complexRefractiveIndexIndex, 0);
+
+    // A run that does not fit in the live table would read past its end.
+    const rendercore::MaterialResourceCounts shortRun{1, 1, quantiloom::kComplexRefractiveIndexBandSlots - 1};
+    EXPECT_EQ(rendercore::ConvertMaterial(material, 550.0f, slots, &shortRun)
+                  .complexRefractiveIndexIndex,
+              -1);
 }
 
 TEST(RenderCoreEnvironment, GrayscaleAndNamedGrayAlphaReplicateLuminance) {

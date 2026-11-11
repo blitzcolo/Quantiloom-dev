@@ -735,9 +735,14 @@ struct ExternalRenderContext::Impl {
 
     /// Round a lookup-table entry count up to the allocation granularity:
     /// powers of two with an eight-entry floor, so appends amortise instead
-    /// of reallocating on every add.
+    /// of reallocating on every add. The floor is eight MATERIALS: an n,k
+    /// material is kComplexRefractiveIndexBandSlots tables, so its table's
+    /// floor is eight runs of them.
+    template<class Entry>
     static usize LookupCapacity(usize entries) {
-        usize capacity = 8;
+        usize capacity = std::is_same_v<Entry, ComplexRefractiveIndexGPU>
+                             ? 8 * kComplexRefractiveIndexBandSlots
+                             : 8;
         while (capacity < entries) capacity *= 2;
         return capacity;
     }
@@ -748,7 +753,7 @@ struct ExternalRenderContext::Impl {
             return nullptr;
         // Spare capacity and TRANSFER_DST: after this upload the table can be
         // appended in place -- see AppendLookupEntry.
-        const auto bytes = LookupCapacity(entries.size()) * sizeof(Entry);
+        const auto bytes = LookupCapacity<Entry>(entries.size()) * sizeof(Entry);
         auto buffer = CreateBufferOrThrow(
             *gpuDevice,
             gpu::BufferDesc{bytes, gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst,
@@ -791,7 +796,7 @@ struct ExternalRenderContext::Impl {
         grown.push_back(entry);
         // Prepare before waiting; failed synchronization leaves all published
         // state intact.
-        const usize newCapacity = std::max(LookupCapacity(grown.size()), capacity * 2);
+        const usize newCapacity = std::max(LookupCapacity<Entry>(grown.size()), capacity * 2);
         auto replacement = CreateBufferOrThrow(
             *gpuDevice,
             gpu::BufferDesc{newCapacity * sizeof(Entry),
@@ -1395,9 +1400,9 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     m_impl->spectralCurvesBuffer = std::move(newCurves);
     m_impl->criBuffer = std::move(newCri);
     m_impl->spectralCurveTableCapacity =
-        m_impl->spectralCurvesBuffer ? Impl::LookupCapacity(spectra.curves.size()) : 0;
+        m_impl->spectralCurvesBuffer ? Impl::LookupCapacity<SpectralCurveGPU>(spectra.curves.size()) : 0;
     m_impl->criTableCapacity =
-        m_impl->criBuffer ? Impl::LookupCapacity(spectra.refractiveIndices.size()) : 0;
+        m_impl->criBuffer ? Impl::LookupCapacity<ComplexRefractiveIndexGPU>(spectra.refractiveIndices.size()) : 0;
     m_impl->spectralCurveEntries = std::move(spectra.curves);
     m_impl->criEntries = std::move(spectra.refractiveIndices);
 
@@ -3033,13 +3038,25 @@ i32 ExternalRenderContext::AddComplexRefractiveIndex(const ComplexRefractiveInde
         return -1;
     }
 
-    // Convert CPU → GPU format (resample to uniform 64-sample grid)
-    ComplexRefractiveIndexGPU gpuCRI = ComplexRefractiveIndexGPU::FromCPU(cri);
-
+    // One table per band window (ComplexRefractiveIndexBandSlot), each
+    // resampled over the renderer's fused band inside it -- the same layout
+    // ConfigResolve uploads -- and empty where the source does not reach, so
+    // the shader falls through to the material's scalar emissivity there
+    // instead of clamping the last measured value across the gap. The index
+    // returned names the first of the kComplexRefractiveIndexBandSlots.
+    const auto [srcMin, srcMax] = cri.GetWavelengthRange();
     const i32 index = static_cast<i32>(m_impl->criEntries.size());
-    if (!m_impl->AppendLookupEntry(gpuCRI, m_impl->criEntries, m_impl->criBuffer,
-                                   m_impl->criTableCapacity))
-        return -1;
+    for (u32 s = 0; s < kComplexRefractiveIndexBandSlots; ++s) {
+        const auto& band = kComplexRefractiveIndexBands[s];
+        const ComplexRefractiveIndexGPU gpuCRI =
+            (srcMin <= band.minNm && srcMax >= band.maxNm)
+                ? ComplexRefractiveIndexGPU::FromCPUBand(cri, static_cast<f32>(band.minNm),
+                                                         static_cast<f32>(band.maxNm))
+                : ComplexRefractiveIndexGPU{};
+        if (!m_impl->AppendLookupEntry(gpuCRI, m_impl->criEntries, m_impl->criBuffer,
+                                       m_impl->criTableCapacity))
+            return -1;
+    }
 
     QL_LOG_INFO("AddComplexRefractiveIndex: Added CRI at index {} "
                 "(wavelength range: {:.0f}-{:.0f} nm, {} samples)",

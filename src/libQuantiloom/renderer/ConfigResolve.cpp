@@ -3984,15 +3984,47 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     QL_LOG_INFO("Loading complex refractive index data...");
 
     if (config.HasSection("refractive_index")) {
-        // Band edges for the active spectral mode, used to resample n,k to
-        // the render band and to validate source coverage.
-        struct BandRange { f32 minNm; f32 maxNm; };
-        const auto activeBandCRI = config.Get<String>("spectral.band", "VIS");
-        BandRange activeBandRange{400.0f, 780.0f};
-        if (activeBandCRI == "LWIR") activeBandRange = {8000.0f, 12000.0f};
-        else if (activeBandCRI == "MWIR") activeBandRange = {3000.0f, 5000.0f};
-        else if (activeBandCRI == "SWIR") activeBandRange = {1400.0f, 2400.0f};
-        else if (activeBandCRI == "NIR")  activeBandRange = {930.0f, 1200.0f};
+        // Every window of the per-band layout (ComplexRefractiveIndexBandSlot)
+        // is uploaded on its own, because one load serves every band a host
+        // may render. What a window's table must span: the renderer's fused
+        // band inside it, widened by whatever part of a detector response, a
+        // cube's axis or a single wavelength falls inside it. "rendered" marks
+        // the windows THIS load renders, the only ones whose gap can stop it.
+        constexpr u32 kSlots = kComplexRefractiveIndexBandSlots;
+        std::array<std::pair<f64, f64>, kSlots> required{};
+        std::array<bool, kSlots> rendered{};
+        for (u32 s = 0; s < kSlots; ++s)
+            required[s] = {kComplexRefractiveIndexBands[s].minNm,
+                           kComplexRefractiveIndexBands[s].maxNm};
+        const auto include = [&](f64 lo, f64 hi, bool render) {
+            constexpr f64 kEdges[kSlots + 1] = {0.0, 780.0, 1400.0, 3000.0, 6500.0, 1e9};
+            for (u32 s = 0; s < kSlots; ++s) {
+                const f64 a = std::max(lo, kEdges[s]);
+                const f64 b = std::min(hi, kEdges[s + 1]);
+                if (a > b || (a == b && ComplexRefractiveIndexBandSlot(a) != s))
+                    continue;
+                required[s] = {std::min(required[s].first, a), std::max(required[s].second, b)};
+                rendered[s] = rendered[s] || render;
+            }
+        };
+        switch (resolved.mode) {
+        case SpectralMode::Single:
+            include(resolved.wavelengthNm, resolved.wavelengthNm, true);
+            break;
+        case SpectralMode::Multispectral:
+            include(config.Get<f64>("hyperspectral.wavelength_min_nm", 400.0),
+                    config.Get<f64>("hyperspectral.wavelength_max_nm", 780.0), true);
+            break;
+        case SpectralMode::NIR_Fused:  rendered[1] = true; break;
+        case SpectralMode::SWIR_Fused: rendered[2] = true; break;
+        case SpectralMode::MWIR_Fused: rendered[3] = true; break;
+        case SpectralMode::LWIR_Fused: rendered[4] = true; break;
+        default:                       rendered[0] = true; break;
+        }
+        if (strictCamera) {
+            for (const auto& domain : deviceDomains)
+                include(domain.minNm, domain.maxNm, true);
+        }
 
         const bool allowPartialNK = config.Get<bool>("refractive_index.allow_partial_nk", false);
         const bool approximateNkAllowed =
@@ -4000,6 +4032,21 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             resolved.cameraConfig.device.calibration ==
                 camera::CalibrationStatus::GenericAssumption &&
             resolved.cameraConfig.quality.backend == camera::ProcessingBackend::GpuPreview;
+        // A render that has to be a measurement: a physical camera, or a band
+        // where the alternative to data is a heuristic rather than a colour.
+        const bool quantitative =
+            strictCamera || resolved.mode == SpectralMode::Multispectral ||
+            resolved.mode == SpectralMode::MWIR_Fused ||
+            resolved.mode == SpectralMode::LWIR_Fused ||
+            resolved.mode == SpectralMode::SWIR_Fused ||
+            resolved.mode == SpectralMode::NIR_Fused ||
+            (resolved.mode == SpectralMode::Single && resolved.wavelengthNm > 780.0);
+        const auto declaresIrEmissivity = [&](const String& name) {
+            return std::any_of(materialTables.begin(), materialTables.end(),
+                               [&](const auto& entry) {
+                                   return entry.first == name && entry.second.Has("ir_emissivity");
+                               });
+        };
 
         for (const auto& [materialName, yamlPath] : config.GetSection("refractive_index")) {
             if (materialName == "allow_partial_nk") continue;
@@ -4018,73 +4065,74 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
 
             ComplexRefractiveIndex cri = result.value();
             const auto [lambda_min, lambda_max] = cri.GetWavelengthRange();
-
-            // A physical device asks for its response domain, which may differ
-            // from the RGB preview or the mode's generic fused band. The old
-            // allow_partial_nk switch remains a preview escape hatch only.
-            bool deviceCoverageFailed = false;
-            if (strictCamera) {
-                for (const auto& domain : deviceDomains) {
-                    if (Covers(lambda_min, lambda_max, domain))
-                        continue;
-                    const String message =
-                        "n,k '" + materialName + "' covers [" + std::to_string(lambda_min) + ", " +
-                        std::to_string(lambda_max) + "] nm but camera channel '" + domain.channel +
-                        "' requires [" + std::to_string(domain.minNm) + ", " +
-                        std::to_string(domain.maxNm) + "] nm";
-                    if (approximateNkAllowed) {
-                        diag.Warn("refractive_index",
-                                  message + " -- allowed only as generic GPU preview");
-                    } else {
-                        diag.Fatal("refractive_index",
-                                   message + "; provide covering data for measurement");
-                        deviceCoverageFailed = true;
-                    }
-                }
-                if (deviceCoverageFailed)
-                    continue;
-            } else if (lambda_min > activeBandRange.minNm || lambda_max < activeBandRange.maxNm) {
-                String msg = "    n,k '" + materialName + "' covers [" +
-                    std::to_string(static_cast<int>(lambda_min)) + ", " +
-                    std::to_string(static_cast<int>(lambda_max)) + "] nm but the active band " +
-                    activeBandCRI + " requires [" +
-                    std::to_string(static_cast<int>(activeBandRange.minNm)) + ", " +
-                    std::to_string(static_cast<int>(activeBandRange.maxNm)) + "] nm";
-                if (allowPartialNK) {
-                    diag.Warn("refractive_index", msg + " -- allowed by allow_partial_nk");
-                } else {
-                    diag.Fatal("refractive_index", msg);
-                    continue;
-                }
-            }
-
-            f32 uploadMin = activeBandRange.minNm;
-            f32 uploadMax = activeBandRange.maxNm;
-            if (strictCamera && !deviceDomains.empty()) {
-                uploadMin = static_cast<f32>(deviceDomains.front().minNm);
-                uploadMax = static_cast<f32>(deviceDomains.front().maxNm);
-                for (const auto& domain : deviceDomains) {
-                    uploadMin = std::min(uploadMin, static_cast<f32>(domain.minNm));
-                    uploadMax = std::max(uploadMax, static_cast<f32>(domain.maxNm));
-                }
-            }
-            // Resample to the wavelengths actually measured, not just the
-            // preview mode, while the source coverage check above stays exact.
-            ComplexRefractiveIndexGPU gpuCRI = ComplexRefractiveIndexGPU::FromCPUBand(
-                cri, uploadMin, uploadMax);
-            if (gpuCRI.numSamples == 0) {
-                gpuCRI = ComplexRefractiveIndexGPU::FromCPU(cri);
-            }
+            const auto mat = std::find_if(scene.materials.begin(), scene.materials.end(),
+                                          [&](const Material& m) { return m.name == materialName; });
+            // Where the n,k does not reach, the material renders from what it
+            // declares next: an ir_emissivity (or a curve) in the infrared. Only
+            // a declared fallback is a legitimate one in a measurement.
+            const bool declaredFallback =
+                declaresIrEmissivity(materialName) ||
+                out.materialNameToCurve.count(materialName) > 0 ||
+                (mat != scene.materials.end() && !mat->irEmissivityCurve.empty());
 
             const i32 criIndex = static_cast<i32>(out.refractiveIndices.size());
+            Vector<String> gaps;
+            bool refused = false;
+            for (u32 s = 0; s < kSlots; ++s) {
+                const auto [lo, hi] = required[s];
+                const bool covers = lambda_min <= lo && lambda_max >= hi;
+                out.refractiveIndices.push_back(
+                    covers ? ComplexRefractiveIndexGPU::FromCPUBand(cri, static_cast<f32>(lo),
+                                                                    static_cast<f32>(hi))
+                           : ComplexRefractiveIndexGPU{});
+                if (covers)
+                    continue;
+                gaps.push_back(kComplexRefractiveIndexBands[s].name);
+                if (!rendered[s])
+                    continue;
+                const String message =
+                    "n,k '" + materialName + "' covers [" + std::to_string(lambda_min) + ", " +
+                    std::to_string(lambda_max) + "] nm but the rendered " +
+                    kComplexRefractiveIndexBands[s].name + " band needs [" + std::to_string(lo) +
+                    ", " + std::to_string(hi) + "] nm";
+                if (s != 0 && declaredFallback) {
+                    diag.Warn("refractive_index",
+                              message + "; that band renders from its declared ir_emissivity");
+                } else if (quantitative && !(strictCamera ? approximateNkAllowed : allowPartialNK)) {
+                    diag.Fatal("refractive_index",
+                               message + "; provide covering n,k data" +
+                                   (s != 0 ? " or declare the material's ir_emissivity" : ""));
+                    refused = true;
+                } else {
+                    diag.Warn("refractive_index",
+                              message + (s == 0 ? "; the visible falls back to the PBR fit"
+                                                : "; it falls back to the generic emissivity"));
+                }
+            }
+            if (refused)
+                continue;
             out.materialNameToRefractiveIndex[materialName] = criIndex;
-            out.refractiveIndices.push_back(gpuCRI);
 
+            String gapList;
+            for (const auto& g : gaps) gapList += (gapList.empty() ? "" : ", ") + g;
+            if (!gaps.empty()) {
+                // Not an error for a band this load does not render, and still
+                // said every time: Studio renders the other bands from the same
+                // load, and a material that silently changes source between
+                // bands is how a thermogram ends up wrong without anyone seeing.
+                diag.Warn("refractive_index",
+                          "n,k '" + materialName + "' covers [" +
+                              std::to_string(static_cast<int>(lambda_min)) + ", " +
+                              std::to_string(static_cast<int>(lambda_max)) + "] nm and does not reach " +
+                              gapList +
+                              (declaredFallback ? "; there it renders from its declared ir_emissivity"
+                                                : "; there it has no n,k"));
+            }
             const f32 F0_550 = cri.FresnelR0(550.0f);
-            QL_LOG_INFO("    Loaded: {} samples, λ=[{:.1f}, {:.1f}] nm, F0@550nm={:.3f} "
-                        "→ CRI index {}",
-                        gpuCRI.numSamples, gpuCRI.startWavelength_nm,
-                        gpuCRI.GetWavelength(gpuCRI.numSamples - 1), F0_550, criIndex);
+            QL_LOG_INFO("    Loaded: lambda=[{:.1f}, {:.1f}] nm, F0@550nm={:.3f}, {} band tables "
+                        "from CRI index {}{}{}",
+                        lambda_min, lambda_max, F0_550, kSlots, criIndex,
+                        gaps.empty() ? "" : ", no data in ", gapList);
         }
     }
 

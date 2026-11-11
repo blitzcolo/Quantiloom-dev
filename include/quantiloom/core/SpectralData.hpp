@@ -542,6 +542,48 @@ struct ComplexRefractiveIndexGPU {
 static_assert(sizeof(ComplexRefractiveIndexGPU) == 528, "ComplexRefractiveIndexGPU size mismatch!");
 
 // ============================================================================
+// Per-band n,k tables
+// ============================================================================
+// A material's n,k reaches the GPU as kComplexRefractiveIndexBandSlots
+// consecutive ComplexRefractiveIndexGPU tables, one per spectral window, and
+// Material::complexRefractiveIndexIndex names the first. The shader picks the
+// table by wavelength (ComplexRefractiveIndexSlot in src/shaders/common.hlsli,
+// which must agree with ComplexRefractiveIndexBandSlot below), so one load
+// serves every band a host may render -- Studio switches mode at run time on
+// the same buffers -- with 64 nodes inside each band rather than 64 across the
+// whole spectrum.
+//
+// A window the source does not cover is an EMPTY table (numSamples == 0), never
+// the source's last value clamped across the gap: the shader then treats the
+// material as having no n,k in that band and falls through to its scalar
+// emissivity. Partition (nm): <= 780 | 780-1400 | 1400-3000 | 3000-6500 | >= 6500.
+inline constexpr u32 kComplexRefractiveIndexBandSlots = 5;
+
+[[nodiscard]] constexpr u32 ComplexRefractiveIndexBandSlot(f64 lambda_nm) {
+    return lambda_nm <= 780.0    ? 0u
+           : lambda_nm < 1400.0 ? 1u
+           : lambda_nm < 3000.0 ? 2u
+           : lambda_nm < 6500.0 ? 3u
+                                : 4u;
+}
+
+// The band each window exists for -- the renderer's fused band inside it --
+// which a table must cover to be uploaded at all, and its name for diagnostics.
+struct ComplexRefractiveIndexBand {
+    const char* name;
+    f64 minNm;
+    f64 maxNm;
+};
+inline constexpr ComplexRefractiveIndexBand
+    kComplexRefractiveIndexBands[kComplexRefractiveIndexBandSlots] = {
+        {"VIS", 400.0, 780.0},
+        {"NIR", 930.0, 1200.0},
+        {"SWIR", 1400.0, 2400.0},
+        {"MWIR", 3000.0, 5000.0},
+        {"LWIR", 8000.0, 12000.0},
+};
+
+// ============================================================================
 // SolarSpectralLUT - GPU-side solar illumination spectral curves
 // ============================================================================
 // Stores full spectral irradiance curves for sun and sky illumination.

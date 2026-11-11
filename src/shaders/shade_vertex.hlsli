@@ -521,7 +521,8 @@ float3 InfraredSurfaceFractions(MaterialData material, float4 endmemberW,
         const float epsilon = saturate(EvaluateSpectralCurve(
             spectralCurves, material.irEmissivityCurveIndex, lambda));
         rho = 1.0 - epsilon - tau;
-    } else if (material.complexRefractiveIndexIndex >= 0) {
+    } else if (ComplexRefractiveIndexCovers(complexRefractiveIndices,
+                                            material.complexRefractiveIndexIndex, lambda)) {
         const float2 nk = SampleComplexRefractiveIndex(
             complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda);
         rho = FresnelF0(nk.x, nk.y);
@@ -648,7 +649,8 @@ float3 ApplyNormalMap(float3 tangentNormal, float3 worldNormal, float3 worldTang
 
 float3 ComputePhysicalF0(MaterialData material, float3 albedo, float metallic,
                          float wavelength_nm, float3 dielectricF0) {
-    if (material.complexRefractiveIndexIndex >= 0) {
+    if (ComplexRefractiveIndexCovers(complexRefractiveIndices,
+                                     material.complexRefractiveIndexIndex, wavelength_nm)) {
         // PHYSICAL PATH: Use measured n,k data from RefractiveIndex.INFO
         float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, material.complexRefractiveIndexIndex, wavelength_nm);
         float n = nk.x;
@@ -672,7 +674,8 @@ float3 ComputePhysicalF0(MaterialData material, float3 albedo, float metallic,
 // Compute full Fresnel reflectance at arbitrary angle using physical n,k data
 // Used for specular highlight computation (not just F0)
 float ComputePhysicalFresnel(MaterialData material, float cosTheta, float wavelength_nm) {
-    if (material.complexRefractiveIndexIndex >= 0) {
+    if (ComplexRefractiveIndexCovers(complexRefractiveIndices,
+                                     material.complexRefractiveIndexIndex, wavelength_nm)) {
         float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, material.complexRefractiveIndexIndex, wavelength_nm);
         return FresnelConductor(cosTheta, nk.x, nk.y);
     }
@@ -1475,7 +1478,8 @@ bool NextTransmissionChild(inout VertexFrame f, uint depth, inout ChildRequest r
     const float3 reflectDir = reflect(rayDir, N);
 
     const bool materialDisperses = (material.dispersion > 0.001) ||
-                                   (material.complexRefractiveIndexIndex >= 0);
+                                   ComplexRefractiveIndexCovers(complexRefractiveIndices,
+                                       material.complexRefractiveIndexIndex, 550.0);
     const bool heroSplit = materialDisperses &&
                            (carriesQuartet ||
                             (IsVisMode(SPEC_SPECTRAL_MODE) && f.heroIn == 0.0));
@@ -1661,6 +1665,8 @@ void CompleteTransmission(inout VertexFrame f, uint kind, PathVertex child) {
 
         // Extract the channel-specific contribution
         float channelValue = (ch == 0u) ? child.radiance.r :
+    // Dispersion is a visible-band question (the hero split and the RGB
+    // fan below are both gated on it), so it asks for n,k in the visible.
                              (ch == 1u) ? child.radiance.g :
                                           child.radiance.b;
 

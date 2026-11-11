@@ -220,7 +220,8 @@ float VisibilitySmithGGXCorrelatedIBL(float NdotV, float NdotL, float roughness)
 float3 ComputeF0(float3 albedo, float metallic,
                  int complexRefractiveIndexIndex, float wavelength_nm,
                  float3 dielectricF0) {
-    if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
+    if (wavelength_nm > 0.0 &&
+        ComplexRefractiveIndexCovers(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm)) {
         float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm);
         float F0_physical = FresnelF0(nk.x, nk.y);
         return float3(F0_physical, F0_physical, F0_physical);
@@ -231,7 +232,8 @@ float3 ComputeF0(float3 albedo, float metallic,
 float ComputeF0_Scalar(float spectralAlbedo, float metallic,
                        int complexRefractiveIndexIndex, float wavelength_nm,
                        float dielectricF0) {
-    if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
+    if (wavelength_nm > 0.0 &&
+        ComplexRefractiveIndexCovers(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm)) {
         float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm);
         return FresnelF0(nk.x, nk.y);
     }
@@ -449,7 +451,8 @@ float RefractionIOR(MaterialData material, float wavelength_nm) {
     if (wavelength_nm <= 0.0) {
         return material.ior;
     }
-    if (material.complexRefractiveIndexIndex >= 0) {
+    if (ComplexRefractiveIndexCovers(complexRefractiveIndices,
+                                     material.complexRefractiveIndexIndex, wavelength_nm)) {
         return SampleComplexRefractiveIndex(complexRefractiveIndices, material.complexRefractiveIndexIndex, wavelength_nm).x;
     }
     // Degenerates to material.ior when dispersion is 0, so this is safe as the
@@ -688,7 +691,8 @@ float3 CookTorranceBRDF(
     // is an authoring control over a fitted dielectric, and there is nothing to
     // fit when the material carries a measurement.
     float3 F;
-    if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
+    if (wavelength_nm > 0.0 &&
+        ComplexRefractiveIndexCovers(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm)) {
         float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm);
         F = float3(FresnelConductor(VdotH, nk.x, nk.y),
                    FresnelConductor(VdotH, nk.x, nk.y),
@@ -791,7 +795,8 @@ float CookTorranceBRDF_Spectral(
                                 wavelength_nm, dielectricF0);
 
     float F;
-    if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
+    if (wavelength_nm > 0.0 &&
+        ComplexRefractiveIndexCovers(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm)) {
         float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm);
         F = FresnelConductor(VdotH, nk.x, nk.y);
     } else {

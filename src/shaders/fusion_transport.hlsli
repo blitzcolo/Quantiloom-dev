@@ -26,7 +26,8 @@ void FusionAttenuateSegment(inout PathVertex p, float distance) {
     const float lambda = FusionLambda(p);
     const float n = RefractionIOR(material, lambda);
     float sigma = medium.absorptionPerMeter;
-    if ((medium.flags & 1) != 0 && material.complexRefractiveIndexIndex >= 0)
+    if ((medium.flags & 1) != 0 &&
+        ComplexRefractiveIndexCovers(complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda))
         sigma = 4 * PI *
                 SampleComplexRefractiveIndex(complexRefractiveIndices,
                                              material.complexRefractiveIndexIndex, lambda)

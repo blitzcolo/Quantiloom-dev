@@ -1440,7 +1440,15 @@ MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm
         validate(cpuMat.endmemberCurveIndex1, resources->spectralCurves, "endmember curve");
         validate(cpuMat.endmemberCurveIndex2, resources->spectralCurves, "endmember curve");
         validate(cpuMat.endmemberCurveIndex3, resources->spectralCurves, "endmember curve");
-        validate(cpuMat.complexRefractiveIndexIndex, resources->refractiveIndices, "refractive index");
+        // n,k is kComplexRefractiveIndexBandSlots consecutive tables from the
+        // index on, so the whole run has to be live, not just its first.
+        if (resources->refractiveIndices >= kComplexRefractiveIndexBandSlots - 1) {
+            validate(cpuMat.complexRefractiveIndexIndex,
+                     resources->refractiveIndices - (kComplexRefractiveIndexBandSlots - 1),
+                     "refractive index");
+        } else {
+            validate(cpuMat.complexRefractiveIndexIndex, 0, "refractive index");
+        }
     }
 
     return cpuMat;
