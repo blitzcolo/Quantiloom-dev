@@ -1,6 +1,6 @@
 ---
 name: build-and-install
-description: Build the Quantiloom core SDK (libQuantiloom + libSpectraForge + CLI + tools) from WSL2 using the Windows MSVC toolchain, compile HLSL shaders with DXC, and install the SDK to the sibling ../Quantiloom-SDK tree. Use this whenever the user asks to build, rebuild, compile, install, or "make" this project, after any C++ or shader source change that needs compiling, or when the downstream Quantiloom-Qt GUI needs a fresh SDK. Also covers build failure diagnosis and the Linux portability rules that every code change must respect.
+description: Build the Quantiloom core SDK (libQuantiloom + libSpectraForge + CLI + tools) from WSL2 using the Windows MSVC toolchain, or natively on macOS with the Metal backend (build_macos.sh), compile HLSL shaders with DXC, and install the SDK to the sibling ../Quantiloom-SDK tree. Use this whenever the user asks to build, rebuild, compile, install, or "make" this project, after any C++ or shader source change that needs compiling, or when the downstream Quantiloom-Qt GUI needs a fresh SDK. Also covers build failure diagnosis and the Linux portability rules that every code change must respect.
 ---
 
 # Build and Install (Quantiloom core)
@@ -29,7 +29,7 @@ This is the canonical path. It runs, in order:
    a warning, not a failure, but that build was checked by nothing that renders.
 6. Install: wipes and repopulates `../Quantiloom-SDK/windows_amd64` (currently `H:/Quantiloom-SDK/windows_amd64`; the prefix is derived from the repo's location, never hard-coded to a drive)
 
-There is no CI; these three gates are the only automated ones.
+After the furnace suite the script also runs the illumination suite and the six camera/dataset checkers; `build_windows.ps1` and `build_macos.sh` run the same list. There is no CI; these gates are the only automated ones.
 
 `set -euo pipefail` guarantees install never runs on a failed build or red tests. A full run takes minutes; use a generous Bash timeout (600000 ms) and never kill it mid-install — a half-written SDK breaks the Qt frontend.
 
@@ -66,6 +66,53 @@ Key outputs:
   - **Intended** (you deliberately promoted something to public API): `./scripts/check_exports.sh --update`, then commit `docs/abi/exports.golden` **with** the change. The baseline diff is what gets reviewed, and it doubles as the SemVer trigger — a removed line is a major, an added line a minor.
   - **Unintended** (`+` lines you did not mean to publish): almost always a new class that picked up `QL_API` out of habit. New code in `src/libQuantiloom/` is internal by default; the tests link the objects and see it without any export. See `src/libQuantiloom/AGENTS.md`.
   - Never silence the gate by editing `build_wsl.sh`. An unreviewed export is a promise to Quantiloom-Qt that nobody made on purpose.
+
+## macOS (Apple silicon, Metal)
+
+```bash
+./build_macos.sh
+```
+
+The Mac twin of `build_wsl.sh`: native CMake + Ninja into `build-mac/`, **Metal-only**
+(`QUANTILOOM_BACKEND_VULKAN=OFF`, `QUANTILOOM_BACKEND_METAL=ON`), the same five gates,
+then install to `../Quantiloom-SDK/macos_arm64` (`QUANTILOOM_SDK_ROOT` overrides the
+parent). Quantiloom-Qt's `build_macos.sh` links that prefix with
+`COMPONENTS MetalInterop`. Incremental: `cmake --build build-mac -j` — HLSL included,
+CMake re-runs DXC and the shader converter for a changed `.hlsl`/`.hlsli`.
+
+Prerequisites, and what the script does when one is missing:
+
+| Need | Where it is looked for | Missing |
+|---|---|---|
+| Xcode + Metal toolchain, CMake, Ninja | `PATH` (Homebrew for the last two) | configure fails |
+| DXC | `$VULKAN_SDK`, else the newest `~/VulkanSDK/*/macOS` — only its `dxc` is used | configure fails |
+| Metal Shader Converter | `$METAL_SHADER_CONVERTER_DIR[/bin]`, `/usr/local/bin` | configure fails (`FATAL_ERROR`) |
+| OpenUSD (optional) | `USD_ROOT`, `~/openusd`, `/opt/openusd` | builds with `QUANTILOOM_USE_OPENUSD=OFF` |
+| Python with numpy + OpenEXR | `$PYTHON`, `python3`, else `build-mac/gates-venv` made once with `uv` | stops before the render gates: `brew install uv` |
+
+`scripts/build_openusd.sh --install-dir ~/openusd` builds OpenUSD without sudo. When USD
+is found, the SDK installs its dylibs, TBB, MaterialX and the `usd/` plugin tree beside
+`libQuantiloom.dylib` with an `@loader_path` rpath, and `UsdLoader` finds the plugin
+tree relative to the library's own path (`dladdr`), so it still resolves when the dylib
+sits in a `.app`'s `Contents/Frameworks`. A preset `PXR_PLUGINPATH_NAME` is respected.
+
+Key outputs:
+- CLI: `build-mac/src/app/Quantiloom`; tests: `build-mac/tests/libquantiloom_tests`
+- Shaders: `share/quantiloom/shaders/metallib/*.metallib` + `*.reflection.json` + `SHADERSET`
+- SDK: `../Quantiloom-SDK/macos_arm64/{bin,include,lib,share}`
+
+Mac-specific failures:
+
+- **ABI gate: `no baseline at docs/abi/exports.macos.golden`** or a diff only on the Mac —
+  the Mac baselines are written only by a Mac (`nm -gU` + `c++filt`). An export added on
+  Windows trips this until `./scripts/check_exports.sh --update` is run here and the
+  `*.macos.golden` change is committed; see `src/libQuantiloom/AGENTS.md`.
+- **Every GPU test skips with "no Metal device"**, or the renders exit 3 — the process
+  cannot see the GPU, usually because it runs in a sandbox. Not a build problem; rerun
+  unsandboxed before reading anything into the gates.
+- **Host and shader disagree in the last bits** — non-MSVC builds pass
+  `-ffp-contract=off` so the host never fuses `a*b+c` where the shader's `precise` does
+  not. Don't drop it for speed.
 
 ## Linux portability rules (apply to every code change)
 

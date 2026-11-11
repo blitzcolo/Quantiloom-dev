@@ -1,6 +1,6 @@
 ---
 name: run-tests
-description: Configure, build, and run the Quantiloom GoogleTest unit test suite (libquantiloom_tests) from WSL2 via the Windows toolchain. Use this whenever the user asks to run tests, verify a change didn't break anything, check test coverage, or run a specific test case — and after any nontrivial change to libQuantiloom (core/io/scene/renderer/postprocess/hs_core) before claiming the work is done.
+description: Configure, build, and run the Quantiloom GoogleTest unit test suite (libquantiloom_tests) from WSL2 via the Windows toolchain, or natively on macOS (Metal). Use this whenever the user asks to run tests, verify a change didn't break anything, check test coverage, or run a specific test case — and after any nontrivial change to libQuantiloom (core/io/scene/renderer/postprocess/hs_core) before claiming the work is done.
 ---
 
 # Run Tests (Quantiloom core)
@@ -32,6 +32,24 @@ cmake.exe --build build-test --target libquantiloom_tests --config Release -j
 
 Use the Windows `cmake.exe`, never Linux cmake (Visual Studio generator + Windows SDK paths — see the build-and-install skill). Build takes minutes on a cold tree; use a long Bash timeout.
 
+### macOS
+
+Native tools, `build-mac/` tree, Metal backend; `./build_macos.sh` runs the suite as its
+gate the same way. To iterate:
+
+```bash
+cmake --build build-mac --target libquantiloom_tests -j
+./build-mac/tests/libquantiloom_tests --gtest_brief=1
+```
+
+The GPU suites are parameterized over the compiled backends, so on a Mac they run as
+`…/Metal` (on Windows `…/Vulkan`); a filter like `--gtest_filter='Gpu/*'` selects them on
+either. The full suite takes about a minute on Apple silicon with the GPU suites running.
+They need the GPU: a sandboxed shell has no Metal device and cannot read
+`assets/models/glTF-Sample-Assets`, so there ~190 cases skip and ~36 fail
+(`GltfLoaderTest.*`, seven fusion cases). Rerun outside the sandbox before calling any of
+that a regression.
+
 ## Running a subset
 
 Full suite output is long. When iterating on one area, filter:
@@ -45,7 +63,8 @@ Full suite output is long. When iterating on one area, filter:
 ## Interpreting results
 
 - Exit code 0 + `[  PASSED  ]` summary = green. Report the actual pass/fail counts, never "tests pass" without having seen the summary.
-- Some renderer tests need a working Vulkan device (NVIDIA RTX on the Windows side). If GPU-dependent tests fail with device/extension errors on a machine without RTX, say so explicitly instead of treating it as a code regression.
+- Baseline is 16 SKIPPED on both platforms: 8 BC7 (off in `build/` and `build-mac/`) and 8 `Gpu/ComputeMigrationAB.*`, which only run with `QUANTILOOM_GPU_AB=record:<file>|compare:<file>`.
+- Some renderer tests need a working ray tracing device (NVIDIA RTX on Windows, an Apple silicon GPU on a Mac). Most skip without one, but six `FusionTransportGpuTest` cases and one `FusionPublicationTest` fail on creating the renderer. If GPU-dependent tests fail with device/extension errors, say so explicitly instead of treating it as a code regression.
 - Physics tests (`test_blackbody_physics`, spectral data) encode CODATA constants and closed-form laws — a failure there is a physics regression, not a flaky test. Cross-check against `scripts/physics-audit/harness.py` (see the physics-audit skill) before touching tolerances.
 - **A failing test is not automatically a code bug.** CI never runs this suite, so it can go months without compiling; meanwhile physics-audit fixes deliberately change behavior. Before "fixing" code, check `git log` on both the test and the implementation, and check `scripts/physics-audit/evidence/*.json` — if the implementation was corrected on purpose (e.g. ClearDay `mie_beta_550nm` 2.0e-6 → 1.70e-4 per ATM-01, IR reflectance fallback → neutral 0.1 per commit a8509a3), the test is stale: update the test to pin the corrected behavior and record it in the evidence JSON.
 

@@ -91,12 +91,18 @@ a way in.
 
 `test_renderer/` 26 files; `test_core/` 24; `test_io/` 7; `test_hs_core/` 7;
 `test_scene/` 7; `test_postprocess/` 6; `test_mcp/` 2; `test_app/` 2;
-plus `test_main.cpp` and the shared `support/VulkanTestDevice`.
-The baseline includes 8 SKIPPED tests by design: the 8 BC7 texture
-compression cases (disabled after measurement showed a net quality loss).
+plus `test_main.cpp` and the shared `support/GpuTestDevice`, the fixture the
+GPU suites are parameterized on (one instance per compiled backend: Vulkan or
+Metal; `support/VulkanTestDevice` and `support/MetalTestDevice` stay for the
+backend-only cases).
+The baseline includes 16 SKIPPED tests by design: the 8 BC7 texture
+compression cases (disabled after measurement showed a net quality loss) and
+the 8 `Gpu/ComputeMigrationAB` cases, which run only when `QUANTILOOM_GPU_AB`
+asks for an A/B recording.
 The 2 EXR multipart cases that used to skip are live since the spectral EXR
-writer landed (§9.4).  A further 5 cases are `DISABLED_` by name—the
-interactive latency benchmark of `test_interactive_bench.cpp`.  Those are
+writer landed (§9.4).  A further 6 cases are `DISABLED_` by name—the five
+interactive latency benchmarks of `test_interactive_bench.cpp` and the GPU
+histogram benchmark in `test_display_range_gpu.cpp`.  Those are
 measurements rather than assertions, and a build gate that went red because a
 driver got slower would be noise.
 
