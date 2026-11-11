@@ -241,8 +241,10 @@ every indirectly lit surface at 2×.
 
 Two rendering invariants are enforced by the furnace and illumination gates:
 
-- **An isothermal cavity renders its own blackbody.**  Eight furnace
-  configurations return 1.0000.
+- **An isothermal cavity renders its own blackbody.**  Sixteen furnace
+  configurations return 1.0000 -- eight with measured *n,k* walls (water,
+  aluminium) seen at 75° and head-on, the only cavities that can tell
+  whether emission, base and residual share one directional weight.
 - **Reflected radiance does not exceed incident radiance.**
 
 These are not automatically true—making them gates is precisely because they
@@ -1020,12 +1022,29 @@ differ; and nothing measured it—two unit tests asserted the monotonicity of th
 fabricated law *itself*, and a third carried a 15% tolerance whose comment named
 the approximation it existed to tolerate.  That tolerance is now 1×10⁻¹².
 
-Directional emissivity is a real effect.  When it is wanted it belongs in a
-specular lobe driven by measured *n,k* through `FresnelConductor` (`pbr.hlsli`),
-which is exact, reciprocal and already checked against
-`physics-audit/harness.py`—not as a scale on a diffuse albedo.  The gate that
-was missing, `check_view_independence.py`, was added with the fix and shown red
-before it.
+Directional emissivity is a real effect, and it now enters exactly that way:
+a material whose infrared comes from measured *n,k* (water, glass, polished
+metal) takes a GGX microfacet lobe whose reflectance is
+`FresnelConductor(V·h; n(λ), k(λ))` (`InterfaceLobe` in `shade_vertex.hlsli`).
+One visible-normal sample per vertex gives the weight w(λ) = F · G₂/G₁ (the
+exact height-correlated Smith term, so w ≤ 1), and that one w sets the emission
+(1 − w − τ)·B(T), the base w·L_sky toward the sampled direction and the traced
+residual, so an isothermal cavity closes per sample; the MWIR sun goes through
+the same F, D and G₂.  Water at 10 µm then reflects 1% head-on and 55% at 85°,
+and a 300 K sea under a 200 K sky reads 262 K in LWIR at grazing view instead
+of 299 K.  A scalar `ir_emissivity` on such a material steps aside wherever
+its *n,k* reaches and stays the thermal solve's hemispherical value.  The
+gates are `check_view_independence.py` for the Lambertian side, added with the
+fix and shown red before it, and `check_directional_fresnel.py` (the
+illumination suite's `nk` arm) plus the 75° furnace cavities for this one.
+
+*n,k* reaches the GPU as five tables per material, one per spectral window
+(≤ 780 | 780–1400 | 1400–3000 | 3000–6500 | ≥ 6500 nm), each resampled onto the
+band inside it, so one load serves every band a host renders.  A window the
+source does not cover is empty and the material falls through to its scalar
+emissivity there -- soda-lime glass measured to 1.5 µm keeps its
+`ir_emissivity` in MWIR and LWIR instead of a 4% dielectric clamped from
+1.5 µm -- and the load says which bands each material's *n,k* does not reach.
 
 Related, and found alongside: the infrared bands now read the **textured**
 metallic value.  `GetEffectiveIREmissivity` reached inside `MaterialData` for
@@ -1935,15 +1954,26 @@ two paths is enforced by unit tests.
 - **Detector:** Quantum efficiency, well capacity, Poisson photon noise,
   read-out noise, dark-current noise—each independently switchable.
 - **Fixed-pattern noise:** PRNU (gain non-uniformity, multiplicative) and
-  DSNU (dark-signal non-uniformity, additive) modelled separately, and
-  neither independent per pixel.  PRNU is generated per **column** and
-  smoothed along the array with an 8-pixel kernel, DSNU per **row** with a
-  5-pixel one, each carrying a further per-pixel component at a tenth of its
-  amplitude and renormalised to the requested sigma.  That follows the readout
-  architecture — column amplifiers, row addressing — and it is what survives a
-  correction tuned for independent pixel noise.
-- **NUC:** Non-uniformity correction with configurable efficiency
-  (typical 95–99%).
+  DSNU (dark-signal non-uniformity, additive) drawn per pixel from the device
+  seed, plus optional **column** and **row** components -- one gain and one
+  offset per readout column and per row (`sensor.photon.column_gain_sigma`,
+  `column_offset_e_rms`, `row_gain_sigma`, `row_offset_e_rms`; on a thermal
+  detector `fpn_column_gain_sigma`, `fpn_column_offset_k` and the row pair),
+  keyed on the line index and fixed across frames.  Those follow the readout
+  architecture -- column amplifiers, row addressing -- and are what survives a
+  correction tuned for independent pixel noise.  They default to 0, which
+  leaves every output bit-identical.
+- **NUC:** without calibration maps, an ideal two-point correction that leaves
+  `nuc_residual_fraction` r of every gain and offset deviation (pixel, column
+  and row) on both detector kinds: r = 1 is the uncorrected frame, r = 0 has no
+  fixed pattern, and real systems sit at 1–5%.  With calibration maps, the maps
+  are the correction and nothing analytic is added.
+- **Lens self-emission:** `sensor.optics.lens_temperature_k` and
+  `lens_emissivity` add the optics' own emission as a background; with cos⁴
+  vignetting it falls off per pixel exactly as the scene signal does (an
+  off-axis pixel sees the exit pupil shrunk by the same factor), and the
+  correction subtracts the same per-pixel value.  The housing that fills the
+  solid angle outside the pupil is not modelled.
 - **ADC:** Configurable bit depth (12 / 14 / 16 bit) and gain.
 - **PSF blur:** Gaussian convolution with sigma matched to the Airy disk's
   FWHM (factor 0.437, analytically derived from `[2 J₁(x)/x]²`).

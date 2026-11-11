@@ -39,7 +39,12 @@ whose mean must equal the uniform one's: the sky moved its light around, not
 how much there is), `bleed`, `mis`, `hero` (the two
 visible estimators against each other), `fluor` (a transfer between two
 wavelength bands, the one check a renderer diagonal in λ cannot pass by
-accident), and `view`. `check_dispersion.py` covers the RGB path and the two
+accident), `view`, and `nk` (`check_directional_fresnel.py`: a smooth n,k
+interface must be directional -- water against Fresnel's closed form at 0-85
+degrees, no reflected energy beyond the sky, a sun glinting only along the
+mirror direction). Eight of the sixteen furnace cavities have n,k walls seen
+at 75 degrees, the one place a shared directional weight is checked.
+`check_dispersion.py` covers the RGB path and the two
 n(λ) sources and is still run by hand.
 
 **The Windows path is `./build_windows.ps1` then `./install_windows.ps1`, and it
