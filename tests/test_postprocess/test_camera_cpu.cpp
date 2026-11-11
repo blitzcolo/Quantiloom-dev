@@ -675,3 +675,132 @@ TEST(CpuCameraPipelineTest, CalibratedPrincipalPointControlsVignettingBeforePsf)
     EXPECT_NEAR(pixels(4,0,0),full/25,full*1e-6);
     EXPECT_GT(pixels(0,0,0),pixels(2,0,0));
 }
+
+
+namespace {
+
+// 300 K through the thermal fixture (8-14 um, f/2, 10 um pitch): the band
+// power and its temperature derivative, the same independent CODATA Planck
+// integrals the NETD test above quotes.
+constexpr double kFixturePower300W = 1.0151679938e-9;
+constexpr double kFixtureSlope300WPerK = 1.54829012e-11;
+
+CameraConfig CooledMwirConfig(u32 width, u32 height) {
+    auto config = PhotonConfig(width, height);
+    auto& qe = *config.device.channels.front().response.quantumEfficiency;
+    qe.wavelengthNm = {3000.0, 5000.0};
+    qe.value = {0.6, 0.6};
+    config.optics.fNumber = 2.5;
+    config.optics.pixelPitchUm = 15.0;
+    config.readout.exposureSeconds = 0.001;
+    config.photon.fullWellElectrons = 1.0e6;
+    // Twice the 5 % lens background is ~68 ke-: past a 16-bit converter.
+    config.readout.adcBits = 20;
+    config.readout.outputBits = 20;
+    return config;
+}
+
+// Electrons a lens of emissivity eps at 300 K puts into one pixel of
+// CooledMwirConfig in one exposure: eps * B(lambda, 300 K) * lambda/(hc) * QE
+// over 3-5 um, Simpson at 1 nm, times pi/(1+4N^2) and the pixel area.
+double LensBackgroundElectrons(double emissivity) {
+    constexpr double kBoltzmann = 1.380649e-23;
+    const auto integrand = [&](double nm) {
+        const double m = nm * 1e-9;
+        const double planck = 2.0 * kH * kC * kC / std::pow(m, 5.0) /
+                              std::expm1(kH * kC / (m * kBoltzmann * 300.0)) * 1e-9;
+        return emissivity * planck * 0.6 * m / (kH * kC);
+    };
+    double sum = integrand(3000.0) + integrand(5000.0);
+    for (int i = 1; i < 2000; ++i) sum += (i % 2 ? 4.0 : 2.0) * integrand(3000.0 + i);
+    const double perSrM2 = sum / 3.0;
+    const double omega = kPi / (1.0 + 4.0 * 2.5 * 2.5);
+    return perSrM2 * omega * (15e-6 * 15e-6) * 0.001;
+}
+
+} // namespace
+
+TEST(CpuCameraPipelineTest, ThermalFixedPatternIsInRawAndNucLeavesItsResidual) {
+    auto config = ThermalConfig(128, 128);
+    // No NETD and no read noise, so the fixed pattern is the only spread.
+    config.quality.noiseFree = false;
+    config.thermal.enableFpn = true;
+    config.thermal.fpnGainSigma = 0.02;
+    config.thermal.fpnOffsetKelvin = 0.5;
+    config.thermal.netdReferenceTemperatureK = 300.0;
+    Image rate(128, 128, 1);
+    std::fill(rate.data.begin(), rate.data.end(), static_cast<f32>(kFixturePower300W));
+    const double responsivity = config.thermal.responsivityDnPerWatt;
+    const double signalDn = kFixturePower300W * responsivity;
+    const double offsetDn = 0.5 * kFixtureSlope300WPerK * responsivity;
+    const double fullPatternDn2 = std::pow(0.02 * signalDn, 2) + offsetDn * offsetDn;
+
+    CaptureState state;
+    const auto uncorrected = CpuCameraPipeline(config).CaptureMeasured(state, 0.0, rate);
+    ASSERT_TRUE(uncorrected.has_value());
+    const auto& raw = uncorrected.value().rawDn->image;
+    EXPECT_NEAR(PopulationVariance(raw) / fullPatternDn2, 1.0, 0.06);
+    // No NUC: the corrected image is the raw one in watts, pattern and all.
+    EXPECT_NEAR(PopulationVariance(uncorrected.value().correctedDeviceSignal->image) *
+                    responsivity * responsivity / fullPatternDn2,
+                1.0, 0.06);
+
+    config.thermal.applyNuc = true;
+    config.thermal.nucResidualFraction = 0.05;
+    CaptureState nucState;
+    const auto corrected = CpuCameraPipeline(config).CaptureMeasured(nucState, 0.0, rate);
+    ASSERT_TRUE(corrected.has_value());
+    // The correction acts on the corrected signal only...
+    EXPECT_EQ(corrected.value().rawDn->image.data, raw.data);
+    // ...where it leaves 5 % of every pixel's deviation.
+    EXPECT_NEAR(PopulationVariance(corrected.value().correctedDeviceSignal->image) *
+                    responsivity * responsivity / (0.05 * 0.05 * fullPatternDn2),
+                1.0, 0.1);
+
+    config.quality.noiseFree = true;
+    CaptureState cleanState;
+    const auto clean = CpuCameraPipeline(config).CaptureMeasured(cleanState, 0.0, rate);
+    ASSERT_TRUE(clean.has_value());
+    EXPECT_EQ(PopulationVariance(clean.value().rawDn->image), 0.0);
+}
+
+TEST(CpuCameraPipelineTest, LensEmissionAddsBackgroundChargeAndItsShotNoise) {
+    auto config = CooledMwirConfig(64, 64);
+    config.optics.lensTemperatureK = 300.0;
+    config.optics.lensEmissivity = 0.05;
+    Image dark(64, 64, 1);  // the scene sends nothing: every electron is the lens's
+    const double expected = LensBackgroundElectrons(0.05);
+    ASSERT_GT(expected, 1000.0);
+
+    CaptureState state;
+    const auto clean = CpuCameraPipeline(config).CaptureMeasured(state, 0.0, dark);
+    ASSERT_TRUE(clean.has_value());
+    EXPECT_NEAR(Mean(clean.value().rawDn->image), expected, expected * 1e-3);
+    // A calibrated camera removes the background's mean from its signal.
+    EXPECT_NEAR(Mean(clean.value().correctedDeviceSignal->image), 0.0, 1.0);
+
+    config.quality.noiseFree = false;  // shot noise only: no read noise, no dark current
+    CaptureState noisyState;
+    const auto noisy = CpuCameraPipeline(config).CaptureMeasured(noisyState, 0.0, dark);
+    ASSERT_TRUE(noisy.has_value());
+    EXPECT_NEAR(PopulationVariance(noisy.value().rawDn->image) / expected, 1.0, 0.06);
+
+    // Derived emissivity: a lens transmitting 90 % emits 10 %, and its own
+    // emission does not pass back through it.
+    config.quality.noiseFree = true;
+    config.optics.lensEmissivity = -1.0;
+    ResponseCurve lens;
+    lens.kind = ResponseKind::LensTransmission;
+    lens.wavelengthNm = {3000.0, 5000.0};
+    lens.value = {0.9, 0.9};
+    config.device.channels.front().response.lensTransmission = lens;
+    CaptureState derivedState;
+    const auto derived = CpuCameraPipeline(config).CaptureMeasured(derivedState, 0.0, dark);
+    ASSERT_TRUE(derived.has_value());
+    EXPECT_NEAR(Mean(derived.value().rawDn->image), 2.0 * expected, 2.0 * expected * 1e-3);
+
+    // Nothing to derive it from and nothing stated: refused, not guessed.
+    config.device.channels.front().response.lensTransmission.reset();
+    CaptureState refusedState;
+    EXPECT_FALSE(CpuCameraPipeline(config).CaptureMeasured(refusedState, 0.0, dark).has_value());
+}

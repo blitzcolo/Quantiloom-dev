@@ -835,6 +835,10 @@ Result<camera::CameraConfig, String> ParseCameraConfig(
             document.GetDouble("sensor.optics.focus_distance_m", camera.optics.focusDistanceM);
         camera.optics.cosFourthVignetting =
             document.GetBool("sensor.optics.cos_fourth_vignetting", false);
+        camera.optics.lensTemperatureK =
+            document.GetDouble("sensor.optics.lens_temperature_k", camera.optics.lensTemperatureK);
+        camera.optics.lensEmissivity =
+            document.GetDouble("sensor.optics.lens_emissivity", camera.optics.lensEmissivity);
         auto& projection = camera.optics.projection;
         const auto model = document.GetString("sensor.optics.projection.model", "pinhole");
         if (model == "pinhole") projection.model = camera::ProjectionModel::Pinhole;
@@ -952,6 +956,15 @@ Result<camera::CameraConfig, String> ParseCameraConfig(
                                thermal.netdNoiseBandwidthHz);
         thermal.netdOpticalCondition =
             document.GetString("sensor.thermal.netd_optical_condition", thermal.netdOpticalCondition);
+        thermal.enableFpn = document.GetBool("sensor.thermal.enable_fpn", thermal.enableFpn);
+        thermal.fpnGainSigma =
+            document.GetDouble("sensor.thermal.fpn_gain_sigma", thermal.fpnGainSigma);
+        thermal.fpnOffsetKelvin =
+            document.GetDouble("sensor.thermal.fpn_offset_k", thermal.fpnOffsetKelvin);
+        thermal.applyNuc = document.GetBool("sensor.thermal.apply_nuc", thermal.applyNuc);
+        thermal.nucResidualFraction =
+            document.GetDouble("sensor.thermal.nuc_residual_fraction",
+                               thermal.nucResidualFraction);
         auto thermalGain = ReadCalibration(
             document, "sensor.thermal.nuc_gain_map",
             "sensor.thermal.nuc_gain_map_path", baseDir,
@@ -1184,6 +1197,8 @@ String CameraConfigToToml(const camera::CameraConfig& camera) {
         out << "focus_distance_m = " << optics.focusDistanceM << '\n';
     out << "cos_fourth_vignetting = "
         << (optics.cosFourthVignetting ? "true" : "false") << '\n';
+    out << "lens_temperature_k = " << optics.lensTemperatureK << '\n';
+    out << "lens_emissivity = " << optics.lensEmissivity << '\n';
     if (!optics.knownPsfSourcePath.empty() || !optics.knownPsfPath.empty())
         out << "known_psf_path = " <<
             Quoted(optics.knownPsfSourcePath.empty()
@@ -1269,6 +1284,11 @@ String CameraConfigToToml(const camera::CameraConfig& camera) {
     if (!thermal.netdOpticalCondition.empty())
         out << "netd_optical_condition = "
             << Quoted(thermal.netdOpticalCondition) << '\n';
+    out << "enable_fpn = " << (thermal.enableFpn ? "true" : "false") << '\n';
+    out << "fpn_gain_sigma = " << thermal.fpnGainSigma << '\n';
+    out << "fpn_offset_k = " << thermal.fpnOffsetKelvin << '\n';
+    out << "apply_nuc = " << (thermal.applyNuc ? "true" : "false") << '\n';
+    out << "nuc_residual_fraction = " << thermal.nucResidualFraction << '\n';
     if (!thermal.nucGainMapPath.empty()) {
         out << "nuc_gain_map_path = " << Quoted(thermal.nucGainMapPath) << '\n';
     } else if (!thermal.nucGainMap.empty()) {

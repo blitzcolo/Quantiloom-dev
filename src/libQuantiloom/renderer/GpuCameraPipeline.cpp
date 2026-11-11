@@ -65,7 +65,7 @@ enum CameraFlags : u32 {
     Vignette = 512u
 };
 
-using ConfigRows = std::array<std::array<f32, 4>, 9>;
+using ConfigRows = std::array<std::array<f32, 4>, 11>;
 
 void StorageBarrier(gpu::CommandList& cmd) {
     cmd.Barrier(gpu::GlobalBarrier{gpu::Access::ComputeWrite,
@@ -225,8 +225,7 @@ f64 EffectiveWavelengthNm(const camera::ResponseStack& response,
 }
 
 Result<void, String> UpdateReadoutRows(
-    const camera::CameraConfig& config,
-    std::array<std::array<f32, 4>, 9>& rows) {
+    const camera::CameraConfig& config, ConfigRows& rows) {
     const auto& optics = config.optics;
     std::array<f32, 3> thermalNoise{
         static_cast<f32>(config.thermal.readNoiseDnRms),
@@ -268,7 +267,20 @@ Result<void, String> UpdateReadoutRows(
     rows[3] = {{static_cast<f32>(thermal.timeConstantSeconds),
                 static_cast<f32>(thermal.responsivityDnPerWatt),
                 static_cast<f32>(thermal.driftDnPerSecond), thermalNoise[0]}};
-    rows[4] = {{thermalNoise[1], thermalNoise[2], 0.0f, 0.0f}};
+    rows[4] = {{thermalNoise[1], thermalNoise[2],
+                static_cast<f32>(thermal.fpnGainSigma),
+                static_cast<f32>(thermal.nucResidualFraction)}};
+    // Rows 5-8 belong to the fast-RGB pass; the readout's own continue at 9.
+    const auto offsetDn = camera::ThermalFpnOffsetDn(config);
+    if (!offsetDn) return Result<void, String>::Err(offsetDn.error());
+    const auto background = camera::LensEmissionBackground(config);
+    if (!background) return Result<void, String>::Err(background.error());
+    rows[9] = {};
+    rows[10] = {};
+    for (size_t i = 0; i < std::min<size_t>(3, config.device.channels.size()); ++i) {
+        rows[9][i] = static_cast<f32>(offsetDn.value()[i]);
+        rows[10][i] = static_cast<f32>(background.value()[i]);
+    }
     return Result<void, String>::Ok();
 }
 
@@ -727,6 +739,8 @@ CameraPush GpuCameraPipeline::Impl::MakePush(
         if (!config.photon.nucGainMap.empty()) push.flags |= NucGainMap;
         if (!config.photon.nucOffsetElectronsMap.empty()) push.flags |= NucOffsetMap;
     } else {
+        if (config.thermal.enableFpn) push.flags |= Fpn;
+        if (config.thermal.applyNuc) push.flags |= Nuc;
         if (!config.thermal.nucGainMap.empty()) push.flags |= NucGainMap;
         if (!config.thermal.nucOffsetDnMap.empty()) push.flags |= NucOffsetMap;
     }

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "postprocess/CameraConfigIO.hpp"
+#include "postprocess/CameraPresets.hpp"
 
 #include <array>
 #include <cmath>
@@ -1176,4 +1177,27 @@ TEST(CameraConfigIOTest, RejectsNonFiniteAndUnorderedAgcWindows) {
         ASSERT_TRUE(document.has_value());
         EXPECT_FALSE(ParseCameraConfig(*document, SpectralMode::RGB).has_value());
     }
+}
+
+
+TEST(CameraConfigIOTest, ThermalFixedPatternAndLensEmissionSurviveRoundTrip) {
+    auto preset = MakePresetCameraConfig(CameraPresetKind::Boson640Industrial);
+    ASSERT_TRUE(preset.has_value());
+    auto camera = preset.value();
+    camera.thermal.fpnGainSigma = 0.025;
+    camera.thermal.fpnOffsetKelvin = 1.5;
+    camera.thermal.nucResidualFraction = 0.04;
+    camera.optics.lensTemperatureK = 310.0;
+    camera.optics.lensEmissivity = 0.07;
+    const auto document = Config::Parse(CameraConfigToToml(camera));
+    ASSERT_TRUE(document.has_value()) << document.error();
+    const auto reloaded = ParseCameraConfig(document.value(), SpectralMode::LWIR_Fused);
+    ASSERT_TRUE(reloaded.has_value()) << reloaded.error();
+    EXPECT_TRUE(reloaded.value().thermal.enableFpn);
+    EXPECT_TRUE(reloaded.value().thermal.applyNuc);
+    EXPECT_DOUBLE_EQ(reloaded.value().thermal.fpnGainSigma, 0.025);
+    EXPECT_DOUBLE_EQ(reloaded.value().thermal.fpnOffsetKelvin, 1.5);
+    EXPECT_DOUBLE_EQ(reloaded.value().thermal.nucResidualFraction, 0.04);
+    EXPECT_DOUBLE_EQ(reloaded.value().optics.lensTemperatureK, 310.0);
+    EXPECT_DOUBLE_EQ(reloaded.value().optics.lensEmissivity, 0.07);
 }

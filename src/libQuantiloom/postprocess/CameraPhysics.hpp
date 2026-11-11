@@ -115,6 +115,20 @@ IntegrateBlackbodyThermal(f64 temperatureK, const ResponseStack& response,
 BlackbodyThermalDerivativeWPerK(f64 temperatureK, const ResponseStack& response,
                                 f64 fNumber, f64 pixelAreaM2);
 
+// What the optics' own emission adds at the detector, one value per device
+// channel: e-/s for a photon detector, W for a thermal one. All zero when
+// optics.lensTemperatureK is 0. See OpticsConfig::lensTemperatureK for the
+// model; the CPU readout and the GPU readout rows both take it from here.
+[[nodiscard]] Result<std::vector<f64>, String>
+LensEmissionBackground(const CameraConfig& config);
+
+// One-sigma fixed offset nonuniformity of a thermal detector, in DN per
+// device channel: thermal.fpnOffsetKelvin times the channel's dP/dT at
+// netdReferenceTemperatureK times the responsivity. All zero when the
+// detector is not thermal or its fixed pattern is off.
+[[nodiscard]] Result<std::vector<f64>, String>
+ThermalFpnOffsetDn(const CameraConfig& config);
+
 // Exact constant-forcing solution of tau ds/dt + s = absorbed power.
 // dt=0 preserves state; tau=0 gives instantaneous response. Negative or
 // non-finite inputs fail.

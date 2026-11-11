@@ -90,6 +90,18 @@ struct OpticsConfig {
     String knownPsfSourcePath; // Authored path for config round-trip.
     f64 psfSigmaPixelsOverride = -1.0; // Legacy or measured Gaussian width; -1 uses Airy.
     CameraProjection projection;
+    // Thermal self-emission of the optics. The lens fills the aperture cone
+    // every pixel collects from, so at temperature T it adds
+    // eps(lambda) * B(lambda, T) * pi / (1 + 4N^2) of irradiance that reaches
+    // the detector through the filter and the QE/absorptance but not through
+    // the lens transmission. It is photon background on a photon detector --
+    // signal, shot noise and all -- and absorbed power on a thermal one; the
+    // corrected signal subtracts its mean, as a calibrated camera does. 0 K
+    // leaves it out. Housing emission outside the aperture cone is not modelled.
+    f64 lensTemperatureK = 0.0;
+    // Emissivity of the optics. Negative derives eps(lambda) = 1 - tau(lambda)
+    // from each channel's lens transmission, which every channel must then carry.
+    f64 lensEmissivity = -1.0;
 };
 
 struct ReadoutConfig {
@@ -142,6 +154,18 @@ struct ThermalDetectorConfig {
     std::vector<f64> nucOffsetDnMap;
     String nucGainMapPath;
     String nucOffsetDnMapPath;
+    // Fixed-pattern nonuniformity of the uncorrected array, drawn once per
+    // pixel from the device seed: a responsivity factor 1 + fpnGainSigma * n1
+    // and an offset fpnOffsetKelvin * n2, the offset stated as the scene
+    // temperature step it equals at netdReferenceTemperatureK. Raw DN carries
+    // all of it. applyNuc models a two-point correction that removes all but
+    // nucResidualFraction of both, which is the residual pattern a corrected
+    // bolometer image still shows; the external maps above then act on top.
+    bool enableFpn = false;
+    f64 fpnGainSigma = 0.0;
+    f64 fpnOffsetKelvin = 0.0;
+    bool applyNuc = false;
+    f64 nucResidualFraction = 0.0;
 };
 
 struct DeviceProfile {

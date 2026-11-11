@@ -198,6 +198,16 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
          config.optics.psfSigmaPixelsOverride != -1.0) ||
         config.optics.sensorWidthPx == 0 || config.optics.sensorHeightPx == 0)
         return Result<void, String>::Err("invalid physical camera geometry");
+    if (!FiniteNonnegative(config.optics.lensTemperatureK) ||
+        !std::isfinite(config.optics.lensEmissivity) || config.optics.lensEmissivity > 1.0)
+        return Result<void, String>::Err(
+            "lens temperature must be finite and nonnegative, lens emissivity at most 1");
+    if (config.optics.lensTemperatureK > 0.0 && config.optics.lensEmissivity < 0.0)
+        for (const auto& channel : config.device.channels)
+            if (!channel.response.lensTransmission)
+                return Result<void, String>::Err(
+                    "lens emission derives emissivity from the lens transmission, which channel '" +
+                    channel.name + "' does not carry; give optics.lens_emissivity instead");
     const auto projection = ResolveProjection(config.optics.projection,
         config.optics.sensorWidthPx, config.optics.sensorHeightPx,
         config.optics.focalLengthMm, config.optics.pixelPitchUm);
@@ -298,6 +308,16 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
         if (config.thermal.netdKelvin > 0.0 &&
             config.thermal.readNoiseDnRms > 0.0)
             return Result<void, String>::Err("NETD and independent read noise would double-count one output noise");
+        if (!FiniteNonnegative(config.thermal.fpnGainSigma) ||
+            !FiniteNonnegative(config.thermal.fpnOffsetKelvin) ||
+            !FiniteNonnegative(config.thermal.nucResidualFraction) ||
+            config.thermal.nucResidualFraction > 1.0 || config.thermal.fpnGainSigma >= 1.0)
+            return Result<void, String>::Err(
+                "thermal fixed pattern needs gain sigma in [0, 1), offset >= 0 K and a NUC residual in [0, 1]");
+        if (config.thermal.enableFpn && config.thermal.fpnOffsetKelvin > 0.0 &&
+            !FinitePositive(config.thermal.netdReferenceTemperatureK))
+            return Result<void, String>::Err(
+                "a thermal offset pattern in kelvin needs netd_reference_temperature_k to convert it");
         if (!validCalibration(config.thermal.nucGainMap, true) ||
             !validCalibration(config.thermal.nucOffsetDnMap, false))
             return Result<void, String>::Err("thermal NUC maps must match device pixels");
@@ -650,6 +670,74 @@ Result<f64, String> BlackbodyThermalDerivativeWPerK(f64 temperatureK,
     const ResponseStack& response, f64 fNumber, f64 pixelAreaM2) {
     return IntegrateBlackbody(temperatureK, response, DetectorKind::Thermal,
                               fNumber, pixelAreaM2, true);
+}
+
+Result<std::vector<f64>, String> LensEmissionBackground(const CameraConfig& config) {
+    const auto& optics = config.optics;
+    std::vector<f64> background(config.device.channels.size(), 0.0);
+    if (optics.lensTemperatureK <= 0.0) return background;
+    const auto omega = ApertureSolidAngleSr(optics.fNumber);
+    const auto area = PixelCollectionAreaM2(optics);
+    if (!omega || !area)
+        return Fail<std::vector<f64>>("lens emission needs a valid aperture and pixel area");
+    const DetectorKind detector = config.device.detector;
+    for (size_t channel = 0; channel < background.size(); ++channel) {
+        const ResponseStack& stack = config.device.channels[channel].response;
+        const auto valid = ValidateResponseStack(stack, detector);
+        if (!valid) return Fail<std::vector<f64>>(valid.error().c_str());
+        // The lens emits toward the detector; its own transmission is not in
+        // that path, so the response is the stack without it.
+        ResponseStack behindLens = stack;
+        behindLens.lensTransmission.reset();
+        const auto emissivity = [&](f64 nm) {
+            return optics.lensEmissivity >= 0.0
+                ? optics.lensEmissivity
+                : std::clamp(1.0 - CurveAt(*stack.lensTransmission, nm), 0.0, 1.0);
+        };
+        const auto knots = ResponseKnots(stack, detector);
+        f64 total = 0.0;
+        for (size_t i = 1; i < knots.size(); ++i) {
+            const f64 start = knots[i - 1];
+            const f64 end = knots[i];
+            const u32 parts = static_cast<u32>(std::ceil((end - start) / 5.0));
+            for (u32 part = 0; part < parts; ++part) {
+                const f64 a = start + (end - start) * part / parts;
+                const f64 b = start + (end - start) * (part + 1) / parts;
+                total += Gauss4(a, b, [&](f64 nm) {
+                    const auto planck = PlanckRadianceWm2SrNm(nm, optics.lensTemperatureK);
+                    if (!planck) return std::numeric_limits<f64>::quiet_NaN();
+                    const f64 photonFactor = detector == DetectorKind::Photon
+                        ? nm * 1e-9 / (kPlanckJs * kLightSpeedMps) : 1.0;
+                    return emissivity(nm) * planck.value() *
+                           EffectiveResponse(behindLens, detector, nm) * photonFactor;
+                });
+            }
+        }
+        total *= omega.value() * area.value();
+        if (!FiniteNonnegative(total))
+            return Fail<std::vector<f64>>("lens emission integral overflowed");
+        background[channel] = total;
+    }
+    return background;
+}
+
+Result<std::vector<f64>, String> ThermalFpnOffsetDn(const CameraConfig& config) {
+    std::vector<f64> offset(config.device.channels.size(), 0.0);
+    const auto& thermal = config.thermal;
+    if (config.device.detector != DetectorKind::Thermal || !thermal.enableFpn ||
+        thermal.fpnOffsetKelvin <= 0.0)
+        return offset;
+    const auto area = PixelCollectionAreaM2(config.optics);
+    if (!area) return Fail<std::vector<f64>>(area.error().c_str());
+    for (size_t channel = 0; channel < offset.size(); ++channel) {
+        const auto slope = BlackbodyThermalDerivativeWPerK(
+            thermal.netdReferenceTemperatureK, config.device.channels[channel].response,
+            config.optics.fNumber, area.value());
+        if (!slope) return Fail<std::vector<f64>>(slope.error().c_str());
+        offset[channel] =
+            thermal.fpnOffsetKelvin * slope.value() * thermal.responsivityDnPerWatt;
+    }
+    return offset;
 }
 
 Result<f64, String> StepThermalResponse(f64 previousW, f64 absorbedPowerW,

@@ -4387,6 +4387,14 @@ ExternalRenderContext::TryUpdateCameraReadoutConfig(const camera::CameraConfig& 
     expected.thermal.netdNoiseBandwidthHz = config.thermal.netdNoiseBandwidthHz;
     expected.thermal.readoutWindowSeconds = config.thermal.readoutWindowSeconds;
     expected.thermal.netdOpticalCondition = config.thermal.netdOpticalCondition;
+    expected.thermal.enableFpn = config.thermal.enableFpn;
+    expected.thermal.fpnGainSigma = config.thermal.fpnGainSigma;
+    expected.thermal.fpnOffsetKelvin = config.thermal.fpnOffsetKelvin;
+    expected.thermal.applyNuc = config.thermal.applyNuc;
+    expected.thermal.nucResidualFraction = config.thermal.nucResidualFraction;
+    // The optics' emission is a constant per channel added in the readout.
+    expected.optics.lensTemperatureK = config.optics.lensTemperatureK;
+    expected.optics.lensEmissivity = config.optics.lensEmissivity;
     expected.products = config.products;
 
     camera::CameraConfig authored = config;

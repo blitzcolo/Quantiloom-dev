@@ -15,7 +15,10 @@ StructuredBuffer<float4> cameraConfig : register(t9, space0);
 // row1: prnuSigma, dsnu_e_rms, dsnuReferenceExposure_s, biasDnRms
 // row2: analogGain, electronsPerDn, blackLevelDn, nucResidualFraction
 // row3: thermalTau_s, thermalResponsivityDnPerW, driftDnPerSecond, thermalNoise0
-// row4: thermalNoise1, thermalNoise2, unused, unused
+// row4: thermalNoise1, thermalNoise2, thermalFpnGainSigma, thermalNucResidualFraction
+// rows 5-8: fast-RGB pass (camera_fast_rgb.comp.hlsl)
+// row9: thermal FPN offset DN (1 sigma) per device channel 0..2, unused
+// row10: lens self-emission per device channel 0..2 (e-/s or W), unused
 
 float CameraQuantize(float analogDn) {
     const float maxDn = exp2(float(cameraPush.adcBits)) - 1.0;
@@ -39,6 +42,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     const float4 p2 = cameraConfig[2];
     const float4 p3 = cameraConfig[3];
     const float4 p4 = cameraConfig[4];
+    const float4 p9 = cameraConfig[9];
+    const float4 p10 = cameraConfig[10];
 
     float4 raw = 0.0;
     float4 corrected = 0.0;
@@ -58,6 +63,11 @@ void main(uint3 id : SV_DispatchThreadID) {
         const uint responseChannel = cameraPush.cfa == CAMERA_MONO
             ? 0u : deviceChannel;
         const float rateOrPower = max(0.0, rate[responseChannel]);
+        // The scene plus the optics' own emission (CameraPhysics.cpp::
+        // LensEmissionBackground); responseChannel is the device channel.
+        const float lensBackground = responseChannel == 0u ? p10.x :
+                                     responseChannel == 1u ? p10.y : p10.z;
+        const float incident = rateOrPower + lensBackground;
         const float gainMap = (cameraPush.flags & CAMERA_NUC_GAIN_MAP) != 0u
             ? nucGain[noisePixel] : 1.0;
         const float offsetMap = (cameraPush.flags & CAMERA_NUC_OFFSET_MAP) != 0u
@@ -73,7 +83,7 @@ void main(uint3 id : SV_DispatchThreadID) {
                 (cameraPush.flags & CAMERA_FPN) != 0u
                 ? p1.x * CameraGaussian(noisePixel, NOISE_FIXED_PRNU, 0u, 0u)
                 : 0.0;
-            const float expectedLight = max(0.0, baselineLight * (1.0 + prnu));
+            const float expectedLight = max(0.0, incident * exposure * (1.0 + prnu));
             const float dsnu = !noiseFree &&
                 (cameraPush.flags & CAMERA_FPN) != 0u
                 ? p1.y * (exposure / max(p1.z, 1e-20)) *
@@ -105,23 +115,32 @@ void main(uint3 id : SV_DispatchThreadID) {
             correctedValue = (dn - p2.z - fixedBias) * p2.y / p2.x;
             if ((cameraPush.flags & CAMERA_DARK_CURRENT) != 0u)
                 correctedValue -= p0.z * exposure;
+            correctedValue -= lensBackground * exposure;
             if ((cameraPush.flags & CAMERA_NUC) != 0u) {
                 correctedValue = correctedValue * gainMap + offsetMap;
                 if (!noiseFree)
-                    correctedValue += p2.w * (prnu * rateOrPower * exposure + dsnu);
+                    correctedValue += p2.w * (prnu * incident * exposure + dsnu);
             }
         } else {
             const float previous = cameraPush.firstThermal != 0u
-                ? rateOrPower : max(0.0, prior[channel]);
+                ? incident : max(0.0, prior[channel]);
             const float retain = p3.x <= 0.0
                 ? 0.0 : exp(-max(0.0, cameraPush.deltaSeconds) / p3.x);
-            const float state = previous + (1.0 - retain) * (rateOrPower - previous);
+            const float state = previous + (1.0 - retain) * (incident - previous);
             thermalState[channel] = state;
             expected[channel] = state;
             float thermalNoise = deviceChannel == 0u ? p3.w :
                                  deviceChannel == 1u ? p4.x : p4.y;
-            analogDn = state * p3.y + p2.z +
-                       p3.z * cameraPush.frameTimeSeconds;
+            const bool fixedPattern = !noiseFree &&
+                (cameraPush.flags & CAMERA_FPN) != 0u;
+            const float gainDeviation = fixedPattern
+                ? p4.z * CameraGaussian(noisePixel, NOISE_FIXED_PRNU, 0u, 0u) : 0.0;
+            const float offsetSigma = responseChannel == 0u ? p9.x :
+                                      responseChannel == 1u ? p9.y : p9.z;
+            const float offsetDn = fixedPattern
+                ? offsetSigma * CameraGaussian(noisePixel, NOISE_FIXED_DSNU, 0u, 0u) : 0.0;
+            analogDn = state * p3.y * (1.0 + gainDeviation) + p2.z +
+                       p3.z * cameraPush.frameTimeSeconds + offsetDn;
             if (!noiseFree)
                 analogDn += thermalNoise * CameraGaussian(
                     noisePixel, NOISE_THERMAL_READ,
@@ -130,6 +149,12 @@ void main(uint3 id : SV_DispatchThreadID) {
             raw[channel] = dn;
             correctedValue = (dn - p2.z -
                 p3.z * cameraPush.frameTimeSeconds) / p3.y;
+            if ((cameraPush.flags & CAMERA_NUC) != 0u) {
+                const float kept = 1.0 - p4.w;
+                correctedValue = (correctedValue - kept * offsetDn / p3.y) /
+                                 (1.0 + kept * gainDeviation);
+            }
+            correctedValue -= lensBackground;
             if ((cameraPush.flags & CAMERA_NUC_GAIN_MAP) != 0u)
                 correctedValue *= gainMap;
             if ((cameraPush.flags & CAMERA_NUC_OFFSET_MAP) != 0u)

@@ -180,6 +180,10 @@ CameraConfig GenericCooledPhotonIrConfig() {
     config.photon.fullWellElectrons = 1000000.0;
     config.photon.darkCurrentElectronsPerSecond = 20000.0;
     config.photon.readNoiseElectronsRms = 500.0;
+    // A room-temperature lens with a few per cent absorption in the band: its
+    // emission is the background photon flux a cooled MWIR array integrates.
+    config.optics.lensTemperatureK = 293.15;
+    config.optics.lensEmissivity = 0.05;
     config.device.effectiveMinNm = 3000.0;
     config.device.effectiveMaxNm = 5000.0;
     return config;
@@ -207,7 +211,11 @@ CameraConfig GenericUncooledThermalIrConfig() {
     config.readout.adcBits = 14;
     config.readout.outputBits = 14;
     config.thermal.timeConstantSeconds = 0.012;
-    config.thermal.responsivityDnPerWatt = 1.0e13;
+    // A 300 K scene through f/1.4 and a 12 um pixel absorbs ~2.2e-9 W; at this
+    // scale it reads ~6700 DN and the 14-bit range holds to ~390 K. The 1e13
+    // this used to be clipped a room-temperature scene at full scale, which
+    // flattens every fixed pattern and every temperature with it.
+    config.thermal.responsivityDnPerWatt = 3.0e12;
     config.thermal.readoutWindowSeconds = 1.0 / 30.0;
     config.thermal.netdKelvin = 0.05;
     config.thermal.netdReferenceTemperatureK = 300.0;
@@ -217,6 +225,13 @@ CameraConfig GenericUncooledThermalIrConfig() {
     // delivered 35 mK while calling itself a 50 mK camera.
     config.thermal.netdNoiseBandwidthHz = 15.0;
     config.thermal.netdOpticalCondition = "f/1.4, reference conditions assumed";
+    // Raw VOx nonuniformity and a shutter two-point NUC that leaves 3 % of it:
+    // about 0.06 K of residual offset and 0.09 % of residual gain.
+    config.thermal.enableFpn = true;
+    config.thermal.fpnGainSigma = 0.03;
+    config.thermal.fpnOffsetKelvin = 2.0;
+    config.thermal.applyNuc = true;
+    config.thermal.nucResidualFraction = 0.03;
     config.device.effectiveMinNm = 8000.0;
     config.device.effectiveMaxNm = 14000.0;
     return config;
@@ -439,6 +454,8 @@ CameraConfig A6751Config() {
     config.photon.fullWellElectrons = 7.2e6;
     config.photon.darkCurrentElectronsPerSecond = 5.0e4;
     config.photon.readNoiseElectronsRms = 1500.0;
+    config.optics.lensTemperatureK = 293.15;
+    config.optics.lensEmissivity = 0.05;
     config.device.effectiveMinNm = 3000.0;
     config.device.effectiveMaxNm = 5000.0;
     config.device.parameterSources = {
@@ -479,6 +496,12 @@ CameraConfig A6751Config() {
         Source("optics.focal_length_mm", ValueProvenance::Assumed,
                kFlirA6751Page, "product page",
                "lens choice; 25 mm from the available range assumed"),
+        Source("optics.lens_temperature_k", ValueProvenance::Assumed,
+               kFlirA6751Page, "product page",
+               "lens at room temperature, 293.15 K, assumed"),
+        Source("optics.lens_emissivity", ValueProvenance::Assumed,
+               kFlirA6751Page, "product page",
+               "in-band emissivity of the lens not published; 0.05 assumed"),
     };
     return config;
 }
@@ -517,13 +540,20 @@ CameraConfig BosonConfig() {
     config.readout.adcBits = 14;    // Assumed; output width not published.
     config.readout.outputBits = 14;
     config.thermal.timeConstantSeconds = 0.008;
-    config.thermal.responsivityDnPerWatt = 1.0e13; // Assumed absolute scale.
+    // Assumed absolute scale: a 300 K scene at ~6700 DN, unclipped to ~390 K
+    // (1e13 saturated the 14-bit output at room temperature).
+    config.thermal.responsivityDnPerWatt = 3.0e12;
     config.thermal.readoutWindowSeconds = 1.0 / 60.0;
     config.thermal.netdKelvin = 0.040; // Industrial-grade limit.
     config.thermal.netdReferenceTemperatureK = 298.15;
     config.thermal.netdNoiseBandwidthHz = 30.0;
     config.thermal.netdOpticalCondition =
         "f/1.4 assumed; NETD is the Industrial-grade limit at reference scene";
+    config.thermal.enableFpn = true;
+    config.thermal.fpnGainSigma = 0.03;
+    config.thermal.fpnOffsetKelvin = 2.0;
+    config.thermal.applyNuc = true;
+    config.thermal.nucResidualFraction = 0.03;
     config.device.effectiveMinNm = 8000.0;
     config.device.effectiveMaxNm = 14000.0;
     config.device.parameterSources = {
@@ -546,8 +576,8 @@ CameraConfig BosonConfig() {
                kFlirBosonPage, "series page", "60 Hz baseline rate"),
         Source("thermal.responsivity_dn_w", ValueProvenance::Assumed,
                kFlirBosonPage, "series page",
-               "absolute responsivity not published; assumed scale, not "
-               "derived from the NETD limit"),
+               "absolute responsivity not published; assumed scale that keeps "
+               "a 300 K scene unclipped, not derived from the NETD limit"),
         Source("thermal.netd_noise_bandwidth_hz", ValueProvenance::Assumed,
                kFlirBosonPage, "series page",
                "measurement bandwidth not published; assumed"),
@@ -560,6 +590,15 @@ CameraConfig BosonConfig() {
         Source("device.channels.response", ValueProvenance::Assumed,
                kFlirBosonPage, "series page",
                "absorptance not published; flat 0.8 assumed"),
+        Source("thermal.fpn_gain_sigma", ValueProvenance::Assumed,
+               kFlirBosonPage, "series page",
+               "raw responsivity nonuniformity not published; 3 % assumed"),
+        Source("thermal.fpn_offset_k", ValueProvenance::Assumed,
+               kFlirBosonPage, "series page",
+               "raw offset nonuniformity not published; 2 K assumed"),
+        Source("thermal.nuc_residual_fraction", ValueProvenance::Assumed,
+               kFlirBosonPage, "series page",
+               "residual after the shutter NUC not published; 3 % assumed"),
     };
     return config;
 }
@@ -816,6 +855,10 @@ std::vector<Note> CameraPresetProvenanceNotes(CameraPresetKind kind) {
                        "assumed (typical cooled InSb)"),
                 NoteOf("optics.focal_length_mm", "25", "assumed",
                        "17-200 mm lens range; 25 mm assumed"),
+                NoteOf("optics.lens_temperature_k", "293.15", "assumed",
+                       "lens at room temperature"),
+                NoteOf("optics.lens_emissivity", "0.05", "assumed",
+                       "in-band lens emissivity not published"),
             };
         case CameraPresetKind::Boson640Industrial:
             return {
@@ -837,7 +880,7 @@ std::vector<Note> CameraPresetProvenanceNotes(CameraPresetKind kind) {
                        " official FAQ estimate of about 8 ms"),
                 NoteOf("readout.frame_period_s", "1/60", "manufacturer",
                        String(kFlirBosonPage) + " 60 Hz baseline rate"),
-                NoteOf("thermal.responsivity_dn_w", "1e13", "assumed",
+                NoteOf("thermal.responsivity_dn_w", "3e12", "assumed",
                        "absolute responsivity not published; assumed scale, "
                        "NOT derived from the NETD limit"),
                 NoteOf("thermal.netd_noise_bandwidth_hz", "30", "assumed",
@@ -849,6 +892,12 @@ std::vector<Note> CameraPresetProvenanceNotes(CameraPresetKind kind) {
                 NoteOf("device.channels.response", "flat absorptance 0.8",
                        "assumed",
                        "absorptance not published; VOx-with-window typical"),
+                NoteOf("thermal.fpn_gain_sigma", "0.03", "assumed",
+                       "raw responsivity nonuniformity not published"),
+                NoteOf("thermal.fpn_offset_k", "2.0", "assumed",
+                       "raw offset nonuniformity not published"),
+                NoteOf("thermal.nuc_residual_fraction", "0.03", "assumed",
+                       "residual after the shutter NUC not published"),
             };
     }
     return {};

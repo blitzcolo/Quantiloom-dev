@@ -763,6 +763,71 @@ TEST_P(CameraGpuTest, ThermalHistoryAndNetdBandwidthMatchCpuAndStatistics) {
                 0.25, 0.08);
 }
 
+TEST_P(CameraGpuTest, ThermalFixedPatternAndLensEmissionMatchCpu) {
+    constexpr u32 kSize = 32;
+    const auto compare = [&](const CameraConfig& config, f32 rate, double rawTolerance,
+                             double correctedTolerance) {
+        std::vector<f32> rgba(kSize * kSize * 4u, 0.0f);
+        Image cpuRate(kSize, kSize, 1);
+        for (size_t i = 0; i < kSize * kSize; ++i) {
+            rgba[i * 4] = rate;
+            cpuRate.data[i] = rate;
+        }
+        auto input = UploadMeasurement(Gpu(), kSize, kSize, rgba);
+        ASSERT_NE(input, nullptr);
+        auto created = GpuCameraPipeline::Create(Gpu(), kSize, kSize);
+        ASSERT_TRUE(created.has_value());
+        auto pipeline = std::move(created.value());
+        const auto configured = pipeline->Configure(config);
+        ASSERT_TRUE(configured.has_value()) << configured.error();
+        ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
+        const auto gpuRaw = ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, kSize, kSize);
+        const auto gpuCorrected =
+            ReadFloat(Gpu(), pipeline->GetOutputs().corrected, kSize, kSize);
+        ASSERT_EQ(gpuRaw.size(), kSize * kSize * 4u);
+        ASSERT_EQ(gpuCorrected.size(), kSize * kSize * 4u);
+        CaptureState state;
+        const auto cpu = CpuCameraPipeline(config).CaptureMeasured(state, 0.0, cpuRate);
+        ASSERT_TRUE(cpu.has_value()) << cpu.error();
+        double rawSpread = 0.0;
+        for (size_t pixel = 0; pixel < kSize * kSize; ++pixel) {
+            const double cpuRaw = cpu.value().rawDn->image.data[pixel];
+            EXPECT_NEAR(gpuRaw[pixel * 4], cpuRaw, rawTolerance) << "pixel " << pixel;
+            EXPECT_NEAR(gpuCorrected[pixel * 4],
+                        cpu.value().correctedDeviceSignal->image.data[pixel],
+                        correctedTolerance)
+                << "pixel " << pixel;
+            rawSpread = std::max(rawSpread,
+                                 std::abs(cpuRaw - cpu.value().rawDn->image.data[0]));
+        }
+        if (config.device.detector == DetectorKind::Thermal) EXPECT_GT(rawSpread, 50.0);
+    };
+
+    // A residual-after-NUC bolometer: the same pattern, pixel for pixel.
+    auto thermal = ThermalConfigFor(kSize, kSize);
+    thermal.quality.noiseFree = false;
+    thermal.thermal.enableFpn = true;
+    thermal.thermal.fpnGainSigma = 0.02;
+    thermal.thermal.fpnOffsetKelvin = 0.5;
+    thermal.thermal.netdReferenceTemperatureK = 300.0;
+    thermal.thermal.applyNuc = true;
+    thermal.thermal.nucResidualFraction = 0.05;
+    compare(thermal, 1.0151679938e-9f, 1.0, 2.0e-13);
+
+    // A cooled MWIR array looking at nothing: the lens's emission is the signal.
+    auto mwir = CameraConfigFor(kSize, kSize);
+    auto& qe = *mwir.device.channels.front().response.quantumEfficiency;
+    qe.wavelengthNm = {3000.0, 5000.0};
+    qe.value = {0.6, 0.6};
+    mwir.optics.fNumber = 2.5;
+    mwir.optics.pixelPitchUm = 15.0;
+    mwir.readout.exposureSeconds = 0.001;
+    mwir.photon.fullWellElectrons = 1.0e6;
+    mwir.optics.lensTemperatureK = 300.0;
+    mwir.optics.lensEmissivity = 0.05;
+    compare(mwir, 0.0f, 2.0, 2.0);
+}
+
 TEST_P(CameraGpuTest, SameAcquisitionRecomputesThermalStateFromItsPreCaptureHistory) {
     const auto config = ThermalConfigFor(1, 1);
     auto created = GpuCameraPipeline::Create(Gpu(), 1, 1);

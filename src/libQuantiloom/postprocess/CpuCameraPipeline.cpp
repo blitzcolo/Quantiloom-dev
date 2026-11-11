@@ -751,6 +751,20 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
             }
         }
     }
+    const auto lensBackground = LensEmissionBackground(config);
+    if (!lensBackground)
+        return Fail<CameraOutput>(lensBackground.error());
+    const auto thermalOffsetDn = ThermalFpnOffsetDn(config);
+    if (!thermalOffsetDn)
+        return Fail<CameraOutput>(thermalOffsetDn.error());
+    // The device channel an element reads: its slot in a multi-channel
+    // pixel, its CFA colour otherwise (0 on a mono array).
+    const auto deviceChannelOf = [&](size_t index) -> u32 {
+        if (config.device.cfa == CfaPattern::MultiChannel)
+            return static_cast<u32>(index % channels);
+        const u32 pixel = static_cast<u32>(index / channels);
+        return CfaChannelAt(config.device.cfa, pixel % width, pixel / width);
+    };
     Image measured(width, height, channels);
     Image raw(width, height, channels);
     Image corrected(width, height, channels);
@@ -762,8 +776,12 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
     }
     CaptureState nextState = state;
     if (config.device.detector == DetectorKind::Thermal &&
-        nextState.thermalPixelStateW.size() != elementCount)
+        nextState.thermalPixelStateW.size() != elementCount) {
         nextState.thermalPixelStateW = expected; // first-frame steady state.
+        for (size_t index = 0; index < elementCount; ++index)
+            nextState.thermalPixelStateW[index] +=
+                lensBackground.value()[deviceChannelOf(index)];
+    }
     const f64 elapsed = std::max(0.0, firstRowMidpointSeconds - state.frameTimeSeconds);
     for (size_t index = 0; index < elementCount; ++index) {
         const u32 pixel = static_cast<u32>(index / channels);
@@ -773,6 +791,10 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
         if (!std::isfinite(rateOrPower) || rateOrPower < 0.0)
             return Fail<CameraOutput>("camera measurement overflowed");
         measured.data[index] = static_cast<f32>(rateOrPower);
+        const u32 deviceChannel = deviceChannelOf(index);
+        // What reaches the detector: the scene plus the optics' own emission.
+        const f64 background = lensBackground.value()[deviceChannel];
+        const f64 incident = rateOrPower + background;
         f64 analogDn = 0.0, correctedValue = 0.0;
         if (config.device.detector == DetectorKind::Photon) {
             const auto& detector = config.photon;
@@ -781,7 +803,7 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
                                  ? detector.prnuSigma * FixedGaussian(effectiveSeed, noisePixel,
                                                                       NoiseClass::FixedPrnu)
                                  : 0.0;
-            const f64 expectedLight = std::max(0.0, rateOrPower * exposure * (1.0 + prnu));
+            const f64 expectedLight = std::max(0.0, incident * exposure * (1.0 + prnu));
             const f64 darkNonuniform =
                 (!config.quality.noiseFree && detector.enableFpn)
                     ? detector.dsnuElectronsRms *
@@ -820,6 +842,7 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
             correctedValue -= detector.enableDarkCurrent
                                   ? detector.darkCurrentElectronsPerSecond * exposure
                                   : 0.0;
+            correctedValue -= background * exposure;
             if (detector.applyNuc) {
                 const f64 gain = detector.nucGainMap.empty() ? 1.0 : detector.nucGainMap[index];
                 const f64 offset = detector.nucOffsetElectronsMap.empty()
@@ -828,24 +851,32 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
                 correctedValue = correctedValue * gain + offset;
                 if (!config.quality.noiseFree)
                     correctedValue += detector.nucResidualFraction *
-                                      (prnu * rateOrPower * exposure + darkNonuniform);
+                                      (prnu * incident * exposure + darkNonuniform);
             }
             corrected.data[index] = static_cast<f32>(std::max(0.0, correctedValue));
         } else {
             const auto& detector = config.thermal;
             const auto stepped =
-                StepThermalResponse(nextState.thermalPixelStateW[index], rateOrPower, elapsed,
+                StepThermalResponse(nextState.thermalPixelStateW[index], incident, elapsed,
                                     detector.timeConstantSeconds);
             if (!stepped)
                 return Fail<CameraOutput>(stepped.error());
             nextState.thermalPixelStateW[index] = stepped.value();
-            analogDn = stepped.value() * detector.responsivityDnPerWatt +
+            // Fixed pattern: a per-pixel responsivity factor and offset,
+            // drawn on the same fixed streams the photon PRNU/DSNU use.
+            const bool fixedPattern = !config.quality.noiseFree && detector.enableFpn;
+            const f64 gainDeviation =
+                fixedPattern ? detector.fpnGainSigma *
+                                   FixedGaussian(effectiveSeed, noisePixel, NoiseClass::FixedPrnu)
+                             : 0.0;
+            const f64 offsetDn =
+                fixedPattern ? thermalOffsetDn.value()[deviceChannel] *
+                                   FixedGaussian(effectiveSeed, noisePixel, NoiseClass::FixedDsnu)
+                             : 0.0;
+            analogDn = stepped.value() * detector.responsivityDnPerWatt * (1.0 + gainDeviation) +
                        config.readout.blackLevelDn +
-                       detector.driftDnPerSecond * firstRowMidpointSeconds;
+                       detector.driftDnPerSecond * firstRowMidpointSeconds + offsetDn;
             if (!config.quality.noiseFree) {
-                const u32 deviceChannel = config.device.cfa == CfaPattern::MultiChannel
-                                              ? static_cast<u32>(index % channels)
-                                              : CfaChannelAt(config.device.cfa, x, y);
                 analogDn += thermalReadNoiseDn[deviceChannel] *
                             TemporalGaussian(effectiveSeed, noisePixel, state.acquisitionIndex,
                                              NoiseClass::ThermalRead);
@@ -855,6 +886,14 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
             correctedValue = (dn - config.readout.blackLevelDn -
                               detector.driftDnPerSecond * firstRowMidpointSeconds) /
                              detector.responsivityDnPerWatt;
+            if (detector.applyNuc) {
+                // A two-point correction that estimates each pixel's gain and
+                // offset to within the residual fraction of their deviation.
+                const f64 kept = 1.0 - detector.nucResidualFraction;
+                correctedValue = (correctedValue - kept * offsetDn / detector.responsivityDnPerWatt) /
+                                 (1.0 + kept * gainDeviation);
+            }
+            correctedValue -= background;
             if (!detector.nucGainMap.empty())
                 correctedValue *= detector.nucGainMap[index];
             if (!detector.nucOffsetDnMap.empty())
