@@ -842,16 +842,32 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
             correctedValue -= detector.enableDarkCurrent
                                   ? detector.darkCurrentElectronsPerSecond * exposure
                                   : 0.0;
+            if (detector.applyNuc && detector.nucGainMap.empty() &&
+                detector.nucOffsetElectronsMap.empty()) {
+                // No calibration maps: an ideal two-point correction that
+                // estimates each pixel's gain and dark offset to within the
+                // residual fraction r of their deviation, as the thermal branch
+                // does. It removes (1 - r) of the dark nonuniformity actually in
+                // the signal and divides out (1 - r) of the gain deviation,
+                // which acts on everything that reached the pixel -- scene and
+                // lens emission alike -- so the background comes off after it.
+                // r = 1 is the uncorrected frame, r = 0 has no fixed pattern.
+                // It used to ADD r times the pattern to a signal that still
+                // carried all of it, which left (1 + r) of it.
+                const f64 kept = 1.0 - detector.nucResidualFraction;
+                const f64 darkInSignal = detector.enableDarkCurrent ? darkNonuniform : 0.0;
+                correctedValue = (correctedValue - kept * darkInSignal) / (1.0 + kept * prnu);
+            }
             correctedValue -= background * exposure;
-            if (detector.applyNuc) {
+            if (detector.applyNuc &&
+                (!detector.nucGainMap.empty() || !detector.nucOffsetElectronsMap.empty())) {
+                // Calibration maps ARE the correction: whatever pattern they
+                // fail to remove is the residual, so none is added analytically.
                 const f64 gain = detector.nucGainMap.empty() ? 1.0 : detector.nucGainMap[index];
                 const f64 offset = detector.nucOffsetElectronsMap.empty()
                                        ? 0.0
                                        : detector.nucOffsetElectronsMap[index];
                 correctedValue = correctedValue * gain + offset;
-                if (!config.quality.noiseFree)
-                    correctedValue += detector.nucResidualFraction *
-                                      (prnu * incident * exposure + darkNonuniform);
             }
             corrected.data[index] = static_cast<f32>(std::max(0.0, correctedValue));
         } else {
@@ -886,9 +902,12 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
             correctedValue = (dn - config.readout.blackLevelDn -
                               detector.driftDnPerSecond * firstRowMidpointSeconds) /
                              detector.responsivityDnPerWatt;
-            if (detector.applyNuc) {
+            if (detector.applyNuc && detector.nucGainMap.empty() &&
+                detector.nucOffsetDnMap.empty()) {
                 // A two-point correction that estimates each pixel's gain and
                 // offset to within the residual fraction of their deviation.
+                // With calibration maps the maps are the correction instead,
+                // as in the photon branch.
                 const f64 kept = 1.0 - detector.nucResidualFraction;
                 correctedValue = (correctedValue - kept * offsetDn / detector.responsivityDnPerWatt) /
                                  (1.0 + kept * gainDeviation);

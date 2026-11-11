@@ -133,6 +133,9 @@ struct PhotonDetectorConfig {
     bool enableReadNoise = true;
     bool enableDarkCurrent = true;
     bool enableFpn = false;
+    // applyNuc without calibration maps is an ideal two-point correction that
+    // leaves nucResidualFraction of the gain and offset deviations above;
+    // with maps, the maps are the correction and no residual is added to them.
     // Independent calibration coefficients; temporal noise is never scaled.
     std::vector<f64> nucGainMap;
     std::vector<f64> nucOffsetElectronsMap;
@@ -160,7 +163,8 @@ struct ThermalDetectorConfig {
     // temperature step it equals at netdReferenceTemperatureK. Raw DN carries
     // all of it. applyNuc models a two-point correction that removes all but
     // nucResidualFraction of both, which is the residual pattern a corrected
-    // bolometer image still shows; the external maps above then act on top.
+    // bolometer image still shows. When the external maps above are present
+    // they are the correction instead, and nothing analytic is applied.
     bool enableFpn = false;
     f64 fpnGainSigma = 0.0;
     f64 fpnOffsetKelvin = 0.0;

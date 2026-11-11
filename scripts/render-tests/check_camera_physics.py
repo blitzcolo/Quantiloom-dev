@@ -460,6 +460,145 @@ def check_material_capture(work):
             near(f"same capture {label} emissivity", measured, expected, 0.02)
 
 
+def nuc_capture(work, name, *, temperature, residual, apply_nuc, backend, rate_scale,
+                dark_current=0.0, dsnu=0.0, prnu=0.0, extra=None):
+    """One photon capture of the open ground with every temporal noise off.
+
+    With shot, read and dark-shot noise disabled a single frame is what an
+    average over infinitely many frames converges to: the fixed pattern and
+    nothing else, which is the quantity a two-point correction acts on.
+    """
+    exposure = 0.01
+    keys = [
+        ("renderer", "resolution", "[64, 64]"),
+        # A physical capture needs a perspective camera; a narrow one keeps
+        # the plate's radiance uniform across the array.
+        ("camera", "projection", '"perspective"'),
+        ("camera", "fov_y", "0.3667"),
+        ("lighting", "atmosphere_temperature_k", "1.0"),
+        ("sensor", "version", "1"),
+        ("sensor", "enabled", "true"),
+        ("sensor", "detector", '"photon"'),
+        ("sensor", "cfa", '"mono"'),
+        ("sensor", "noise_seed", "4242"),
+        ("sensor.optics", "f_number", "2.0"),
+        ("sensor.optics", "pixel_pitch_um", "5.0"),
+        ("sensor.optics", "fill_factor", "1.0"),
+        ("sensor.optics", "sensor_width_px", "64"),
+        ("sensor.optics", "sensor_height_px", "64"),
+        ("sensor.exposure", "time_s", str(exposure)),
+        ("sensor.readout", "adc_bits", "16"),
+        ("sensor.readout", "output_bits", "16"),
+        ("sensor.readout", "black_level_dn", "0"),
+        ("sensor.readout", "electrons_per_dn", repr(rate_scale)),
+        ("sensor.photon", "full_well_e", "1e9"),
+        ("sensor.photon", "enable_shot_noise", "false"),
+        ("sensor.photon", "enable_read_noise", "false"),
+        ("sensor.photon", "enable_dark_shot_noise", "false"),
+        ("sensor.photon", "enable_dark_current", "true" if dark_current > 0 else "false"),
+        ("sensor.photon", "dark_current_e_s", repr(dark_current)),
+        ("sensor.photon", "enable_fpn", "true"),
+        ("sensor.photon", "prnu_sigma", repr(prnu)),
+        ("sensor.photon", "dsnu_e_rms", repr(dsnu)),
+        ("sensor.photon", "dsnu_reference_exposure_s", str(exposure)),
+        ("sensor.photon", "bias_dn_rms", "0"),
+        ("sensor.photon", "apply_nuc", "true" if apply_nuc else "false"),
+        ("sensor.photon", "nuc_residual_fraction", repr(residual)),
+        ("sensor.quality", "backend", json.dumps(backend)),
+        ("sensor.quality", "wavelength_samples", "8"),
+        ("sensor.products", "corrected_device_signal", "true"),
+    ] + (extra or [])
+    cfg = case_config(name, work, temperature=temperature, emissivity=1.0, spp=4,
+                      extra=keys)
+    cfg += ('\n[[sensor.channels]]\nname = "Mono"\n'
+            '[sensor.channels.qe]\nkind = "absolute_qe"\n'
+            'wavelength_nm = [1975, 2000, 2025]\nvalue = [0, 1, 0]\n')
+    run(name, cfg, work)
+    path = work / f"{name}_corrected.exr"
+    if not path.is_file():
+        raise RenderFailure(f"{name}: no corrected product")
+    with OpenEXR.File(str(path)) as exr:
+        return next(iter(exr.channels().values())).pixels.astype(np.float64)
+
+
+def pedestal_temperature(probe_electrons, target_electrons):
+    """Plate temperature whose 2000 nm signal is target_electrons, given what
+    the 1200 K plate collected. The dark-field checks sit on such a uniform
+    pedestal because the corrected product is clipped at zero: a pattern
+    measured about a zero mean would come back as its positive half.
+    """
+    lo, hi = 300.0, 1200.0
+    goal = physics.planck_blackbody(1200.0, 2000.0) * target_electrons / probe_electrons
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if physics.planck_blackbody(mid, 2000.0) < goal:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def check_nuc_residual(work):
+    """A two-point NUC leaves r of the fixed pattern, on both backends.
+
+    Flat field (a hot uniform plate): the corrected frame's spatial relative
+    standard deviation must be r * prnu_sigma. Dark field (no scene, dark
+    current on): its standard deviation must be r * dsnu. r = 1 must equal the
+    uncorrected frame to the bit, and r = 0 must leave no pattern but the ADC's
+    quantisation. The photon branch used to ADD r times the pattern to a signal
+    that still carried all of it, which reads 1 + r here.
+    """
+    prnu, dsnu = 0.05, 200.0
+    flat_scale = None
+    pedestal = None
+    frames = {}
+    for backend in ("cpu_reference", "gpu_preview"):
+        for field in ("flat", "dark"):
+            for residual, apply_nuc in ((None, False), (1.0, True), (0.25, True), (0.0, True)):
+                tag = "off" if not apply_nuc else f"r{int(residual * 100)}"
+                name = f"nuc_{field}_{tag}_{backend.split('_')[0]}"
+                if field == "flat":
+                    if flat_scale is None:
+                        probe = nuc_capture(work, "nuc_flat_probe", temperature=1200.0,
+                                            residual=1.0, apply_nuc=False,
+                                            backend="cpu_reference", rate_scale=1e4)
+                        flat_scale = max(float(probe.mean()), 1.0) / 20000.0
+                        pedestal = pedestal_temperature(float(probe.mean()), 20000.0)
+                    img = nuc_capture(work, name, temperature=1200.0,
+                                      residual=residual or 0.0, apply_nuc=apply_nuc,
+                                      backend=backend, rate_scale=flat_scale, prnu=prnu)
+                else:
+                    # A uniform 2e4 e- pedestal and no gain pattern, so the
+                    # dark charge nonuniformity is the only spatial structure.
+                    img = nuc_capture(work, name, temperature=pedestal,
+                                      residual=residual or 0.0, apply_nuc=apply_nuc,
+                                      backend=backend, rate_scale=1.0,
+                                      dark_current=1e6, dsnu=dsnu)
+                frames[(backend, field, tag)] = img
+                if field == "flat":
+                    observed = float(img.std() / img.mean())
+                    expected = (1.0 if residual is None else residual) * prnu
+                    floor = 1e-3
+                else:
+                    observed = float(img.std())
+                    expected = (1.0 if residual is None else residual) * dsnu
+                    floor = 0.05 * dsnu
+                near(f"NUC {field} {tag} {backend}", observed, expected, 0.05, floor)
+        for field in ("flat", "dark"):
+            if not np.array_equal(frames[(backend, field, "off")],
+                                  frames[(backend, field, "r100")]):
+                raise RenderFailure(f"NUC {field} {backend}: r = 1 is not the uncorrected frame")
+    for field in ("flat", "dark"):
+        for tag in ("off", "r100", "r25", "r0"):
+            cpu = frames[("cpu_reference", field, tag)]
+            gpu = frames[("gpu_preview", field, tag)]
+            scale = max(float(np.abs(cpu).max()), 1e-30)
+            worst = float(np.abs(cpu - gpu).max()) / scale
+            print(f"NUC {field} {tag}: CPU vs GPU worst pixel {worst:.2e} of the frame maximum")
+            if worst > 1e-3:
+                raise RenderFailure(f"NUC {field} {tag}: CPU and GPU disagree by {worst:.2e}")
+
+
 def check_single_dispersion(work):
     """At fixed lambda, analytic and measured BK7 should bend the same ray."""
     original = json.loads((ROOT / "assets/models/prism_dispersion.gltf").read_text(
@@ -629,6 +768,7 @@ def main():
             check_open_sky(work)
             check_fluorescence(work)
             check_material_capture(work)
+            check_nuc_residual(work)
             check_lamp_domain(work)
             # Dispersion needs a structured colour target so the refracted
             # displacement is observable. The dedicated check_dispersion.py

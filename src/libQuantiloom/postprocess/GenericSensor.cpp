@@ -102,23 +102,12 @@ auto GenericSensor::Apply(const Image& hdr, const SensorParams& params)
                                              channel == 1 ? "G" : "B"),
             std::move(response)});
     }
-    if (params.enableNUC && params.enableFPN) {
-        const size_t count = static_cast<size_t>(hdr.width) * hdr.height *
-                             (hdr.channels == 1 ? 1u : 3u);
-        config.photon.nucGainMap.resize(count);
-        config.photon.nucOffsetElectronsMap.resize(count);
-        const u32 calibrationSeed = camera::DeviceRandomSeed(config);
-        for (size_t i = 0; i < count; ++i) {
-            const f64 prnu = params.prnuSigma * camera::CounterGaussian(
-                calibrationSeed, static_cast<u32>(i), 0,
-                camera::NoiseClass::FixedPrnu);
-            const f64 dsnu = params.dsnuSigma_e * camera::CounterGaussian(
-                calibrationSeed, static_cast<u32>(i), 0,
-                camera::NoiseClass::FixedDsnu);
-            config.photon.nucGainMap[i] = 1.0 / std::max(0.01, 1.0 + prnu);
-            config.photon.nucOffsetElectronsMap[i] = -dsnu;
-        }
-    }
+    // NUC needs no maps here: without them the pipeline's applyNuc is an
+    // ideal two-point correction that leaves nucResidualFraction (1 minus the
+    // legacy efficiency) of the fixed pattern. Building exact inverse maps and
+    // adding the residual back analytically, as this did, is the semantics the
+    // pipeline now reserves for real calibration maps, which carry their own
+    // residual and get none added.
     Image rgb(hdr.width, hdr.height, 3);
     for (u32 y = 0; y < hdr.height; ++y)
         for (u32 x = 0; x < hdr.width; ++x)

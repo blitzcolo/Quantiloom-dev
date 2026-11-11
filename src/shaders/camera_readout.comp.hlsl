@@ -74,6 +74,8 @@ void main(uint3 id : SV_DispatchThreadID) {
             ? nucOffset[noisePixel] : 0.0;
         float analogDn = 0.0;
         float correctedValue = 0.0;
+        const bool nucMaps = (cameraPush.flags &
+                              (CAMERA_NUC_GAIN_MAP | CAMERA_NUC_OFFSET_MAP)) != 0u;
 
         if (cameraPush.detector == CAMERA_PHOTON) {
             const float exposure = p0.x;
@@ -115,12 +117,18 @@ void main(uint3 id : SV_DispatchThreadID) {
             correctedValue = (dn - p2.z - fixedBias) * p2.y / p2.x;
             if ((cameraPush.flags & CAMERA_DARK_CURRENT) != 0u)
                 correctedValue -= p0.z * exposure;
-            correctedValue -= lensBackground * exposure;
-            if ((cameraPush.flags & CAMERA_NUC) != 0u) {
-                correctedValue = correctedValue * gainMap + offsetMap;
-                if (!noiseFree)
-                    correctedValue += p2.w * (prnu * incident * exposure + dsnu);
+            // CpuCameraPipeline.cpp has the reasoning: without maps an ideal
+            // two-point correction leaves r of the gain and dark deviation;
+            // with maps, the maps are the correction and nothing is added.
+            if ((cameraPush.flags & CAMERA_NUC) != 0u && !nucMaps) {
+                const float kept = 1.0 - p2.w;
+                const float darkInSignal =
+                    (cameraPush.flags & CAMERA_DARK_CURRENT) != 0u ? dsnu : 0.0;
+                correctedValue = (correctedValue - kept * darkInSignal) / (1.0 + kept * prnu);
             }
+            correctedValue -= lensBackground * exposure;
+            if ((cameraPush.flags & CAMERA_NUC) != 0u && nucMaps)
+                correctedValue = correctedValue * gainMap + offsetMap;
         } else {
             const float previous = cameraPush.firstThermal != 0u
                 ? incident : max(0.0, prior[channel]);
@@ -149,7 +157,7 @@ void main(uint3 id : SV_DispatchThreadID) {
             raw[channel] = dn;
             correctedValue = (dn - p2.z -
                 p3.z * cameraPush.frameTimeSeconds) / p3.y;
-            if ((cameraPush.flags & CAMERA_NUC) != 0u) {
+            if ((cameraPush.flags & CAMERA_NUC) != 0u && !nucMaps) {
                 const float kept = 1.0 - p4.w;
                 correctedValue = (correctedValue - kept * offsetDn / p3.y) /
                                  (1.0 + kept * gainDeviation);
