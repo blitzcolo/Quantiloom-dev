@@ -20,6 +20,22 @@ StructuredBuffer<float4> cameraConfig : register(t9, space0);
 // row9: thermal FPN offset DN (1 sigma) per device channel 0..2, unused
 // row10: lens self-emission per device channel 0..2 (e-/s or W), unused
 
+// cos^4 of a sensor pixel's field angle, the pinhole falloff camera_fast_rgb
+// applies to the scene rate (same row-8 focal length and pitch, same pixel
+// centre). The readout applies it to the lens's own emission too: an off-axis
+// pixel sees the exit pupil shrunk by the same factor (CpuCameraPipeline.cpp).
+float CameraCosFourth(uint2 physical) {
+    const float pitchM = cameraConfig[8].y;
+    const float focalM = max(cameraConfig[8].x, 1e-20);
+    const float dx = (float(physical.x) + 0.5 -
+                      float(cameraPush.physicalWidth) * 0.5) * pitchM;
+    const float dy = (float(physical.y) + 0.5 -
+                      float(cameraPush.physicalHeight) * 0.5) * pitchM;
+    const float cosine = rsqrt(1.0 + (dx * dx + dy * dy) / (focalM * focalM));
+    const float cosine2 = cosine * cosine;
+    return cosine2 * cosine2;
+}
+
 float CameraQuantize(float analogDn) {
     const float maxDn = exp2(float(cameraPush.adcBits)) - 1.0;
     return clamp(floor(analogDn + 0.5), 0.0, maxDn);
@@ -36,6 +52,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     const uint channels = multi ? min(cameraPush.channelCount, 3u) : 1u;
     const uint cfaChannel = min(2u, uint(max(0.0, rate.a) + 0.5));
     const uint physicalPixel = CameraPhysicalPixel(coord);
+    const uint2 physical = uint2(physicalPixel % cameraPush.physicalWidth,
+                                 physicalPixel / cameraPush.physicalWidth);
     const bool noiseFree = (cameraPush.flags & CAMERA_NOISE_FREE) != 0u;
     const float4 p0 = cameraConfig[0];
     const float4 p1 = cameraConfig[1];
@@ -65,8 +83,9 @@ void main(uint3 id : SV_DispatchThreadID) {
         const float rateOrPower = max(0.0, rate[responseChannel]);
         // The scene plus the optics' own emission (CameraPhysics.cpp::
         // LensEmissionBackground); responseChannel is the device channel.
-        const float lensBackground = responseChannel == 0u ? p10.x :
-                                     responseChannel == 1u ? p10.y : p10.z;
+        const float lensBackground = (responseChannel == 0u ? p10.x :
+                                      responseChannel == 1u ? p10.y : p10.z) *
+            ((cameraPush.flags & 512u) != 0u ? CameraCosFourth(physical) : 1.0);
         const float incident = rateOrPower + lensBackground;
         const float gainMap = (cameraPush.flags & CAMERA_NUC_GAIN_MAP) != 0u
             ? nucGain[noisePixel] : 1.0;

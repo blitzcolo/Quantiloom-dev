@@ -826,6 +826,13 @@ TEST_P(CameraGpuTest, ThermalFixedPatternAndLensEmissionMatchCpu) {
     mwir.optics.lensTemperatureK = 300.0;
     mwir.optics.lensEmissivity = 0.05;
     compare(mwir, 0.0f, 2.0, 2.0);
+
+    // The same lens through cos^4 optics: the background falls off with the
+    // field angle on both sides, and both subtract the same per-pixel value.
+    auto vignetted = mwir;
+    vignetted.optics.cosFourthVignetting = true;
+    vignetted.optics.focalLengthMm = 0.5;
+    compare(vignetted, 0.0f, 2.0, 2.0);
 }
 
 TEST_P(CameraGpuTest, SameAcquisitionRecomputesThermalStateFromItsPreCaptureHistory) {

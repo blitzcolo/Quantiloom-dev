@@ -764,6 +764,42 @@ TEST(CpuCameraPipelineTest, ThermalFixedPatternIsInRawAndNucLeavesItsResidual) {
     EXPECT_EQ(PopulationVariance(clean.value().rawDn->image), 0.0);
 }
 
+TEST(CpuCameraPipelineTest, LensEmissionFallsOffWithFieldAngleUnderVignetting) {
+    // An off-axis pixel sees the exit pupil shrunk by cos^4 of its field
+    // angle, so the lens's emission reaching it falls off exactly as the
+    // scene's does. A dark scene isolates it: the raw frame is the background.
+    auto config = CooledMwirConfig(16, 16);
+    config.optics.lensTemperatureK = 300.0;
+    config.optics.lensEmissivity = 0.05;
+    config.optics.cosFourthVignetting = true;
+    config.optics.psfSigmaPixelsOverride = 0;
+    auto& projection = config.optics.projection;
+    projection.explicitIntrinsics = true;
+    projection.fx = projection.fy = 8.0;
+    projection.cx = projection.cy = 8.0;
+    const double onAxis = LensBackgroundElectrons(0.05);
+    Image dark(16, 16, 1);
+    CaptureState state;
+    const auto captured = CpuCameraPipeline(config).CaptureMeasured(state, 0.0, dark);
+    ASSERT_TRUE(captured.has_value()) << captured.error();
+    const auto& raw = captured.value().rawDn->image;
+    for (const u32 x : {0u, 4u, 8u, 15u}) {
+        const double dx = x + 0.5 - 8.0, dy = 0.5;
+        const double cos2 = 64.0 / (64.0 + dx * dx + dy * dy);
+        EXPECT_NEAR(raw(x, 8, 0), onAxis * cos2 * cos2, onAxis * 2e-3) << "x " << x;
+    }
+    // The correction subtracts the same per-pixel background it collected.
+    for (const f32 value : captured.value().correctedDeviceSignal->image.data)
+        EXPECT_NEAR(value, 0.0, 1.0);
+
+    // Without vignetting the background is the on-axis value everywhere.
+    config.optics.cosFourthVignetting = false;
+    CaptureState flatState;
+    const auto flat = CpuCameraPipeline(config).CaptureMeasured(flatState, 0.0, dark);
+    ASSERT_TRUE(flat.has_value());
+    EXPECT_NEAR(flat.value().rawDn->image(0, 8, 0), onAxis, onAxis * 1e-3);
+}
+
 TEST(CpuCameraPipelineTest, LensEmissionAddsBackgroundChargeAndItsShotNoise) {
     auto config = CooledMwirConfig(64, 64);
     config.optics.lensTemperatureK = 300.0;

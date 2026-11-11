@@ -757,6 +757,18 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
     const auto thermalOffsetDn = ThermalFpnOffsetDn(config);
     if (!thermalOffsetDn)
         return Fail<CameraOutput>(thermalOffsetDn.error());
+    // The lens emits into the exit pupil, and an off-axis pixel sees that
+    // pupil shrunk by the same cos^4 that dims its share of the scene. So with
+    // vignetting on, the background a pixel collects -- and the background the
+    // correction subtracts from it -- falls off exactly as the scene signal
+    // does; a uniform background would be subtracted in full at the corners
+    // and leave the corrected frame dark there, which the cos^4 division in
+    // the apparent-temperature product then magnifies. What fills the solid
+    // angle outside the pupil at those pixels (the camera housing, at its own
+    // temperature) is not modelled.
+    const auto backgroundFalloff = CosFourthVignette(config, width, height);
+    if (!backgroundFalloff)
+        return Fail<CameraOutput>(backgroundFalloff.error());
     // The device channel an element reads: its slot in a multi-channel
     // pixel, its CFA colour otherwise (0 on a mono array).
     const auto deviceChannelOf = [&](size_t index) -> u32 {
@@ -780,7 +792,8 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
         nextState.thermalPixelStateW = expected; // first-frame steady state.
         for (size_t index = 0; index < elementCount; ++index)
             nextState.thermalPixelStateW[index] +=
-                lensBackground.value()[deviceChannelOf(index)];
+                lensBackground.value()[deviceChannelOf(index)] *
+                backgroundFalloff.value()[index / channels];
     }
     const f64 elapsed = std::max(0.0, firstRowMidpointSeconds - state.frameTimeSeconds);
     for (size_t index = 0; index < elementCount; ++index) {
@@ -793,7 +806,8 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
         measured.data[index] = static_cast<f32>(rateOrPower);
         const u32 deviceChannel = deviceChannelOf(index);
         // What reaches the detector: the scene plus the optics' own emission.
-        const f64 background = lensBackground.value()[deviceChannel];
+        const f64 background =
+            lensBackground.value()[deviceChannel] * backgroundFalloff.value()[pixel];
         const f64 incident = rateOrPower + background;
         f64 analogDn = 0.0, correctedValue = 0.0;
         if (config.device.detector == DetectorKind::Photon) {
