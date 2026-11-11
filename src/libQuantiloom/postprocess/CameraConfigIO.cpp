@@ -923,6 +923,15 @@ Result<camera::CameraConfig, String> ParseCameraConfig(
             document.GetBool("sensor.photon.enable_read_noise", photon.enableReadNoise);
         photon.enableFpn =
             document.GetBool("sensor.photon.enable_fpn", photon.enableFpn);
+        photon.columnGainSigma =
+            document.GetDouble("sensor.photon.column_gain_sigma", photon.columnGainSigma);
+        photon.columnOffsetElectronsRms =
+            document.GetDouble("sensor.photon.column_offset_e_rms",
+                               photon.columnOffsetElectronsRms);
+        photon.rowGainSigma =
+            document.GetDouble("sensor.photon.row_gain_sigma", photon.rowGainSigma);
+        photon.rowOffsetElectronsRms =
+            document.GetDouble("sensor.photon.row_offset_e_rms", photon.rowOffsetElectronsRms);
         auto photonGain = ReadCalibration(
             document, "sensor.photon.nuc_gain_map",
             "sensor.photon.nuc_gain_map_path", baseDir,
@@ -961,6 +970,14 @@ Result<camera::CameraConfig, String> ParseCameraConfig(
             document.GetDouble("sensor.thermal.fpn_gain_sigma", thermal.fpnGainSigma);
         thermal.fpnOffsetKelvin =
             document.GetDouble("sensor.thermal.fpn_offset_k", thermal.fpnOffsetKelvin);
+        thermal.fpnColumnGainSigma = document.GetDouble("sensor.thermal.fpn_column_gain_sigma",
+                                                        thermal.fpnColumnGainSigma);
+        thermal.fpnColumnOffsetKelvin = document.GetDouble("sensor.thermal.fpn_column_offset_k",
+                                                           thermal.fpnColumnOffsetKelvin);
+        thermal.fpnRowGainSigma =
+            document.GetDouble("sensor.thermal.fpn_row_gain_sigma", thermal.fpnRowGainSigma);
+        thermal.fpnRowOffsetKelvin =
+            document.GetDouble("sensor.thermal.fpn_row_offset_k", thermal.fpnRowOffsetKelvin);
         thermal.applyNuc = document.GetBool("sensor.thermal.apply_nuc", thermal.applyNuc);
         thermal.nucResidualFraction =
             document.GetDouble("sensor.thermal.nuc_residual_fraction",
@@ -1254,6 +1271,10 @@ String CameraConfigToToml(const camera::CameraConfig& camera) {
         << (photon.enableDarkShotNoise ? "true" : "false") << '\n';
     out << "enable_read_noise = " << (photon.enableReadNoise ? "true" : "false") << '\n';
     out << "enable_fpn = " << (photon.enableFpn ? "true" : "false") << '\n';
+    out << "column_gain_sigma = " << photon.columnGainSigma << '\n';
+    out << "column_offset_e_rms = " << photon.columnOffsetElectronsRms << '\n';
+    out << "row_gain_sigma = " << photon.rowGainSigma << '\n';
+    out << "row_offset_e_rms = " << photon.rowOffsetElectronsRms << '\n';
     if (!photon.nucGainMapPath.empty()) {
         out << "nuc_gain_map_path = " << Quoted(photon.nucGainMapPath) << '\n';
     } else if (!photon.nucGainMap.empty()) {
@@ -1287,6 +1308,10 @@ String CameraConfigToToml(const camera::CameraConfig& camera) {
     out << "enable_fpn = " << (thermal.enableFpn ? "true" : "false") << '\n';
     out << "fpn_gain_sigma = " << thermal.fpnGainSigma << '\n';
     out << "fpn_offset_k = " << thermal.fpnOffsetKelvin << '\n';
+    out << "fpn_column_gain_sigma = " << thermal.fpnColumnGainSigma << '\n';
+    out << "fpn_column_offset_k = " << thermal.fpnColumnOffsetKelvin << '\n';
+    out << "fpn_row_gain_sigma = " << thermal.fpnRowGainSigma << '\n';
+    out << "fpn_row_offset_k = " << thermal.fpnRowOffsetKelvin << '\n';
     out << "apply_nuc = " << (thermal.applyNuc ? "true" : "false") << '\n';
     out << "nuc_residual_fraction = " << thermal.nucResidualFraction << '\n';
     if (!thermal.nucGainMapPath.empty()) {

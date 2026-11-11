@@ -833,6 +833,36 @@ TEST_P(CameraGpuTest, ThermalFixedPatternAndLensEmissionMatchCpu) {
     vignetted.optics.cosFourthVignetting = true;
     vignetted.optics.focalLengthMm = 0.5;
     compare(vignetted, 0.0f, 2.0, 2.0);
+
+    // A photon array whose two-point NUC has no maps: it leaves r of the
+    // pixel, column and row patterns, gain and offset alike. Temporal noise
+    // is off so the fixed pattern is all there is to compare.
+    auto photon = CameraConfigFor(kSize, kSize);
+    photon.quality.noiseFree = false;
+    photon.photon.enableShotNoise = false;
+    photon.photon.enableReadNoise = false;
+    photon.photon.enableDarkShotNoise = false;
+    photon.photon.enableDarkCurrent = true;
+    photon.photon.darkCurrentElectronsPerSecond = 2.0e5;
+    photon.photon.fullWellElectrons = 1.0e7;
+    photon.photon.enableFpn = true;
+    photon.photon.prnuSigma = 0.03;
+    photon.photon.dsnuElectronsRms = 40.0;
+    photon.photon.columnGainSigma = 0.02;
+    photon.photon.columnOffsetElectronsRms = 30.0;
+    photon.photon.rowGainSigma = 0.01;
+    photon.photon.rowOffsetElectronsRms = 20.0;
+    photon.photon.applyNuc = true;
+    photon.photon.nucResidualFraction = 0.2;
+    compare(photon, 2.0e6f, 1.0, 4.0);
+
+    // A bolometer with column striping and row offsets on top of its pixels.
+    auto striped = thermal;
+    striped.thermal.fpnColumnGainSigma = 0.01;
+    striped.thermal.fpnColumnOffsetKelvin = 0.4;
+    striped.thermal.fpnRowGainSigma = 0.005;
+    striped.thermal.fpnRowOffsetKelvin = 0.2;
+    compare(striped, 1.0151679938e-9f, 1.0, 2.0e-13);
 }
 
 TEST_P(CameraGpuTest, SameAcquisitionRecomputesThermalStateFromItsPreCaptureHistory) {

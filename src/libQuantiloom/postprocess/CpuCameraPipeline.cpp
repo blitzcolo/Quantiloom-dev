@@ -757,6 +757,14 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
     const auto thermalOffsetDn = ThermalFpnOffsetDn(config);
     if (!thermalOffsetDn)
         return Fail<CameraOutput>(thermalOffsetDn.error());
+    const auto thermalLineDnPerKelvin = ThermalLineOffsetDnPerKelvin(config);
+    if (!thermalLineDnPerKelvin)
+        return Fail<CameraOutput>(thermalLineDnPerKelvin.error());
+    // One fixed draw per column or row index. A zero sigma skips the draw,
+    // which is what keeps a config without line components bit-identical.
+    const auto line = [&](f64 sigma, u32 lineIndex, NoiseClass kind) {
+        return sigma > 0.0 ? sigma * FixedGaussian(effectiveSeed, lineIndex, kind) : 0.0;
+    };
     // The lens emits into the exit pupil, and an off-axis pixel sees that
     // pupil shrunk by the same cos^4 that dims its share of the scene. So with
     // vignetting on, the background a pixel collects -- and the background the
@@ -817,7 +825,19 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
                                  ? detector.prnuSigma * FixedGaussian(effectiveSeed, noisePixel,
                                                                       NoiseClass::FixedPrnu)
                                  : 0.0;
-            const f64 expectedLight = std::max(0.0, incident * exposure * (1.0 + prnu));
+            const bool linePattern = !config.quality.noiseFree && detector.enableFpn;
+            const f64 lineGain =
+                linePattern ? line(detector.columnGainSigma, x, NoiseClass::FixedColumnGain) +
+                                  line(detector.rowGainSigma, y, NoiseClass::FixedRowGain)
+                            : 0.0;
+            const f64 lineOffset =
+                linePattern
+                    ? line(detector.columnOffsetElectronsRms, x, NoiseClass::FixedColumnOffset) +
+                          line(detector.rowOffsetElectronsRms, y, NoiseClass::FixedRowOffset)
+                    : 0.0;
+            const f64 gainDeviation = prnu + lineGain;
+            const f64 expectedLight =
+                std::max(0.0, incident * exposure * (1.0 + gainDeviation));
             const f64 darkNonuniform =
                 (!config.quality.noiseFree && detector.enableFpn)
                     ? detector.dsnuElectronsRms *
@@ -837,7 +857,7 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
                                  ? Poisson(expectedDark, effectiveSeed, noisePixel,
                                            state.acquisitionIndex, NoiseClass::DarkShot)
                                  : expectedDark;
-            f64 electrons = std::min(detector.fullWellElectrons, light + dark);
+            f64 electrons = std::min(detector.fullWellElectrons, light + dark) + lineOffset;
             if (!config.quality.noiseFree && detector.enableReadNoise)
                 electrons += detector.readNoiseElectronsRms *
                              TemporalGaussian(effectiveSeed, noisePixel, state.acquisitionIndex,
@@ -869,8 +889,10 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
                 // It used to ADD r times the pattern to a signal that still
                 // carried all of it, which left (1 + r) of it.
                 const f64 kept = 1.0 - detector.nucResidualFraction;
-                const f64 darkInSignal = detector.enableDarkCurrent ? darkNonuniform : 0.0;
-                correctedValue = (correctedValue - kept * darkInSignal) / (1.0 + kept * prnu);
+                const f64 offsetInSignal =
+                    (detector.enableDarkCurrent ? darkNonuniform : 0.0) + lineOffset;
+                correctedValue =
+                    (correctedValue - kept * offsetInSignal) / (1.0 + kept * gainDeviation);
             }
             correctedValue -= background * exposure;
             if (detector.applyNuc &&
@@ -897,12 +919,21 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
             const bool fixedPattern = !config.quality.noiseFree && detector.enableFpn;
             const f64 gainDeviation =
                 fixedPattern ? detector.fpnGainSigma *
-                                   FixedGaussian(effectiveSeed, noisePixel, NoiseClass::FixedPrnu)
+                                       FixedGaussian(effectiveSeed, noisePixel,
+                                                     NoiseClass::FixedPrnu) +
+                                   line(detector.fpnColumnGainSigma, x,
+                                        NoiseClass::FixedColumnGain) +
+                                   line(detector.fpnRowGainSigma, y, NoiseClass::FixedRowGain)
                              : 0.0;
             const f64 offsetDn =
-                fixedPattern ? thermalOffsetDn.value()[deviceChannel] *
-                                   FixedGaussian(effectiveSeed, noisePixel, NoiseClass::FixedDsnu)
-                             : 0.0;
+                fixedPattern
+                    ? thermalOffsetDn.value()[deviceChannel] *
+                              FixedGaussian(effectiveSeed, noisePixel, NoiseClass::FixedDsnu) +
+                          thermalLineDnPerKelvin.value()[deviceChannel] *
+                              (line(detector.fpnColumnOffsetKelvin, x,
+                                    NoiseClass::FixedColumnOffset) +
+                               line(detector.fpnRowOffsetKelvin, y, NoiseClass::FixedRowOffset))
+                    : 0.0;
             analogDn = stepped.value() * detector.responsivityDnPerWatt * (1.0 + gainDeviation) +
                        config.readout.blackLevelDn +
                        detector.driftDnPerSecond * firstRowMidpointSeconds + offsetDn;
@@ -933,8 +964,6 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
                 correctedValue += detector.nucOffsetDnMap[index] / detector.responsivityDnPerWatt;
             corrected.data[index] = static_cast<f32>(std::max(0.0, correctedValue));
         }
-        (void)x;
-        (void)y;
     }
     // Acquisition statistics for the AE/AWB loop, computed while raw and
     // corrected are still intact (the products below move out of them).

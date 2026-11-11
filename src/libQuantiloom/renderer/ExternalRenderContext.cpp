@@ -4410,6 +4410,10 @@ ExternalRenderContext::TryUpdateCameraReadoutConfig(const camera::CameraConfig& 
     expected.photon.enableDarkShotNoise = config.photon.enableDarkShotNoise;
     expected.photon.enableReadNoise = config.photon.enableReadNoise;
     expected.photon.enableFpn = config.photon.enableFpn;
+    expected.photon.columnGainSigma = config.photon.columnGainSigma;
+    expected.photon.columnOffsetElectronsRms = config.photon.columnOffsetElectronsRms;
+    expected.photon.rowGainSigma = config.photon.rowGainSigma;
+    expected.photon.rowOffsetElectronsRms = config.photon.rowOffsetElectronsRms;
     expected.photon.applyNuc = config.photon.applyNuc;
     expected.thermal.responsivityDnPerWatt = config.thermal.responsivityDnPerWatt;
     expected.thermal.readNoiseDnRms = config.thermal.readNoiseDnRms;
@@ -4422,6 +4426,10 @@ ExternalRenderContext::TryUpdateCameraReadoutConfig(const camera::CameraConfig& 
     expected.thermal.enableFpn = config.thermal.enableFpn;
     expected.thermal.fpnGainSigma = config.thermal.fpnGainSigma;
     expected.thermal.fpnOffsetKelvin = config.thermal.fpnOffsetKelvin;
+    expected.thermal.fpnColumnGainSigma = config.thermal.fpnColumnGainSigma;
+    expected.thermal.fpnColumnOffsetKelvin = config.thermal.fpnColumnOffsetKelvin;
+    expected.thermal.fpnRowGainSigma = config.thermal.fpnRowGainSigma;
+    expected.thermal.fpnRowOffsetKelvin = config.thermal.fpnRowOffsetKelvin;
     expected.thermal.applyNuc = config.thermal.applyNuc;
     expected.thermal.nucResidualFraction = config.thermal.nucResidualFraction;
     // The optics' emission is a constant per channel added in the readout.

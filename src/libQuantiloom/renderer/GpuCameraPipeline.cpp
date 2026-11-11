@@ -65,7 +65,7 @@ enum CameraFlags : u32 {
     Vignette = 512u
 };
 
-using ConfigRows = std::array<std::array<f32, 4>, 11>;
+using ConfigRows = std::array<std::array<f32, 4>, 14>;
 
 void StorageBarrier(gpu::CommandList& cmd) {
     cmd.Barrier(gpu::GlobalBarrier{gpu::Access::ComputeWrite,
@@ -275,12 +275,25 @@ Result<void, String> UpdateReadoutRows(
     if (!offsetDn) return Result<void, String>::Err(offsetDn.error());
     const auto background = camera::LensEmissionBackground(config);
     if (!background) return Result<void, String>::Err(background.error());
+    const auto lineDnPerKelvin = camera::ThermalLineOffsetDnPerKelvin(config);
+    if (!lineDnPerKelvin) return Result<void, String>::Err(lineDnPerKelvin.error());
     rows[9] = {};
     rows[10] = {};
+    rows[13] = {};
     for (size_t i = 0; i < std::min<size_t>(3, config.device.channels.size()); ++i) {
         rows[9][i] = static_cast<f32>(offsetDn.value()[i]);
         rows[10][i] = static_cast<f32>(background.value()[i]);
+        rows[13][i] = static_cast<f32>(lineDnPerKelvin.value()[i]);
     }
+    // Column and row fixed pattern (camera_readout.comp.hlsl rows 11-12).
+    rows[11] = {{static_cast<f32>(photon.columnGainSigma),
+                 static_cast<f32>(photon.columnOffsetElectronsRms),
+                 static_cast<f32>(photon.rowGainSigma),
+                 static_cast<f32>(photon.rowOffsetElectronsRms)}};
+    rows[12] = {{static_cast<f32>(thermal.fpnColumnGainSigma),
+                 static_cast<f32>(thermal.fpnRowGainSigma),
+                 static_cast<f32>(thermal.fpnColumnOffsetKelvin),
+                 static_cast<f32>(thermal.fpnRowOffsetKelvin)}};
     return Result<void, String>::Ok();
 }
 

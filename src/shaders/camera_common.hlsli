@@ -35,6 +35,10 @@ static const uint NOISE_FIXED_DSNU = 5u;
 static const uint NOISE_THERMAL_READ = 6u;
 static const uint NOISE_EMPIRICAL_NOISE = 9u;
 static const uint NOISE_EMPIRICAL_DRIFT = 10u;
+static const uint NOISE_FIXED_COLUMN_GAIN = 11u;
+static const uint NOISE_FIXED_COLUMN_OFFSET = 12u;
+static const uint NOISE_FIXED_ROW_GAIN = 13u;
+static const uint NOISE_FIXED_ROW_OFFSET = 14u;
 
 uint CameraMix32(uint x) {
     x ^= x >> 16;
@@ -48,7 +52,9 @@ uint CameraMix32(uint x) {
 uint CameraCounterU32(uint seed, uint pixelIndex, uint acquisitionLo,
                       uint acquisitionHi, uint noiseClass, uint counter) {
     const bool fixedPattern = noiseClass == NOISE_FIXED_PRNU ||
-                              noiseClass == NOISE_FIXED_DSNU;
+                              noiseClass == NOISE_FIXED_DSNU ||
+                              (noiseClass >= NOISE_FIXED_COLUMN_GAIN &&
+                               noiseClass <= NOISE_FIXED_ROW_OFFSET);
     const uint lo = fixedPattern ? 0u : acquisitionLo;
     const uint hi = fixedPattern ? 0u : acquisitionHi;
     uint state = CameraMix32(seed ^ 0x9e3779b9u);

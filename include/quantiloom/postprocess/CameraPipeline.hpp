@@ -133,9 +133,21 @@ struct PhotonDetectorConfig {
     bool enableReadNoise = true;
     bool enableDarkCurrent = true;
     bool enableFpn = false;
+    // Line-correlated fixed pattern, gated by enableFpn like PRNU and DSNU:
+    // one gain deviation and one offset per sensor column (a column amplifier
+    // or ADC) and per row, drawn once from the device seed keyed on the
+    // column or row index, so a whole column shares one value and it never
+    // changes between frames. Gains are fractions (one sigma), offsets are
+    // electrons (one sigma). All zero by default, which leaves every output
+    // bit-identical to a pattern that is white in space.
+    f64 columnGainSigma = 0.0;
+    f64 columnOffsetElectronsRms = 0.0;
+    f64 rowGainSigma = 0.0;
+    f64 rowOffsetElectronsRms = 0.0;
     // applyNuc without calibration maps is an ideal two-point correction that
-    // leaves nucResidualFraction of the gain and offset deviations above;
-    // with maps, the maps are the correction and no residual is added to them.
+    // leaves nucResidualFraction of every gain and offset deviation above
+    // (pixel, column and row alike); with maps, the maps are the correction
+    // and no residual is added to them.
     // Independent calibration coefficients; temporal noise is never scaled.
     std::vector<f64> nucGainMap;
     std::vector<f64> nucOffsetElectronsMap;
@@ -168,6 +180,16 @@ struct ThermalDetectorConfig {
     bool enableFpn = false;
     f64 fpnGainSigma = 0.0;
     f64 fpnOffsetKelvin = 0.0;
+    // Column and row components of the same pattern -- the striping that
+    // dominates an uncooled microbolometer's residual nonuniformity: one
+    // responsivity deviation (fraction) and one offset (kelvin at the NETD
+    // reference temperature) per column and per row, keyed on the column or
+    // row index, fixed across frames, removed to the residual fraction by
+    // applyNuc like the per-pixel terms. All zero by default.
+    f64 fpnColumnGainSigma = 0.0;
+    f64 fpnColumnOffsetKelvin = 0.0;
+    f64 fpnRowGainSigma = 0.0;
+    f64 fpnRowOffsetKelvin = 0.0;
     bool applyNuc = false;
     f64 nucResidualFraction = 0.0;
 };

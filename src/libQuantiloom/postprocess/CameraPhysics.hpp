@@ -17,7 +17,11 @@ enum class NoiseClass : u32 {
     ThermalRead, ThermalDrift, EmpiricalEffect,
     // Display-only empirical effects (the HSV display-grading stage). Independent streams, so
     // enabling one never perturbs the trace-seed stream above.
-    EmpiricalNoise, EmpiricalDrift
+    EmpiricalNoise, EmpiricalDrift,
+    // Line-correlated fixed pattern, keyed on a column or row index rather
+    // than a pixel. Appended: the values above are shared with
+    // camera_common.hlsli and must not move.
+    FixedColumnGain, FixedColumnOffset, FixedRowGain, FixedRowOffset
 };
 
 [[nodiscard]] Result<void, String> ValidateResponse(const ResponseCurve& response);
@@ -128,6 +132,13 @@ LensEmissionBackground(const CameraConfig& config);
 // detector is not thermal or its fixed pattern is off.
 [[nodiscard]] Result<std::vector<f64>, String>
 ThermalFpnOffsetDn(const CameraConfig& config);
+
+// DN per kelvin of scene temperature at netdReferenceTemperatureK, per device
+// channel: what turns the column and row offset sigmas (stated in kelvin) into
+// DN. All zero unless the detector is thermal, its fixed pattern is on and a
+// column or row offset is set, so a config without them costs nothing.
+[[nodiscard]] Result<std::vector<f64>, String>
+ThermalLineOffsetDnPerKelvin(const CameraConfig& config);
 
 // Exact constant-forcing solution of tau ds/dt + s = absorbed power.
 // dt=0 preserves state; tau=0 gives instantaneous response. Negative or

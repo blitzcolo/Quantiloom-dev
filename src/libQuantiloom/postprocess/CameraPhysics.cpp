@@ -287,7 +287,11 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
             !FiniteNonnegative(config.photon.dsnuElectronsRms) ||
             !FinitePositive(config.photon.dsnuReferenceExposureSeconds) ||
             !FiniteNonnegative(config.photon.biasDnRms) ||
-            !FiniteNonnegative(config.photon.nucResidualFraction))
+            !FiniteNonnegative(config.photon.nucResidualFraction) ||
+            !FiniteNonnegative(config.photon.columnGainSigma) ||
+            !FiniteNonnegative(config.photon.columnOffsetElectronsRms) ||
+            !FiniteNonnegative(config.photon.rowGainSigma) ||
+            !FiniteNonnegative(config.photon.rowOffsetElectronsRms))
             return Result<void, String>::Err("invalid photon detector parameters");
         if (!validCalibration(config.photon.nucGainMap, true) ||
             !validCalibration(config.photon.nucOffsetElectronsMap, false))
@@ -314,7 +318,17 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
             config.thermal.nucResidualFraction > 1.0 || config.thermal.fpnGainSigma >= 1.0)
             return Result<void, String>::Err(
                 "thermal fixed pattern needs gain sigma in [0, 1), offset >= 0 K and a NUC residual in [0, 1]");
-        if (config.thermal.enableFpn && config.thermal.fpnOffsetKelvin > 0.0 &&
+        if (!FiniteNonnegative(config.thermal.fpnColumnGainSigma) ||
+            !FiniteNonnegative(config.thermal.fpnColumnOffsetKelvin) ||
+            !FiniteNonnegative(config.thermal.fpnRowGainSigma) ||
+            !FiniteNonnegative(config.thermal.fpnRowOffsetKelvin) ||
+            config.thermal.fpnGainSigma + config.thermal.fpnColumnGainSigma +
+                    config.thermal.fpnRowGainSigma >= 1.0)
+            return Result<void, String>::Err(
+                "thermal column/row pattern needs sigmas >= 0 and gain sigmas summing below 1");
+        if (config.thermal.enableFpn &&
+            (config.thermal.fpnOffsetKelvin > 0.0 || config.thermal.fpnColumnOffsetKelvin > 0.0 ||
+             config.thermal.fpnRowOffsetKelvin > 0.0) &&
             !FinitePositive(config.thermal.netdReferenceTemperatureK))
             return Result<void, String>::Err(
                 "a thermal offset pattern in kelvin needs netd_reference_temperature_k to convert it");
@@ -740,6 +754,24 @@ Result<std::vector<f64>, String> ThermalFpnOffsetDn(const CameraConfig& config) 
     return offset;
 }
 
+Result<std::vector<f64>, String> ThermalLineOffsetDnPerKelvin(const CameraConfig& config) {
+    std::vector<f64> dnPerKelvin(config.device.channels.size(), 0.0);
+    const auto& thermal = config.thermal;
+    if (config.device.detector != DetectorKind::Thermal || !thermal.enableFpn ||
+        (thermal.fpnColumnOffsetKelvin <= 0.0 && thermal.fpnRowOffsetKelvin <= 0.0))
+        return dnPerKelvin;
+    const auto area = PixelCollectionAreaM2(config.optics);
+    if (!area) return Fail<std::vector<f64>>(area.error().c_str());
+    for (size_t channel = 0; channel < dnPerKelvin.size(); ++channel) {
+        const auto slope = BlackbodyThermalDerivativeWPerK(
+            thermal.netdReferenceTemperatureK, config.device.channels[channel].response,
+            config.optics.fNumber, area.value());
+        if (!slope) return Fail<std::vector<f64>>(slope.error().c_str());
+        dnPerKelvin[channel] = slope.value() * thermal.responsivityDnPerWatt;
+    }
+    return dnPerKelvin;
+}
+
 Result<f64, String> StepThermalResponse(f64 previousW, f64 absorbedPowerW,
                                        f64 dtSeconds, f64 tauSeconds) {
     if (!FiniteNonnegative(previousW) || !FiniteNonnegative(absorbedPowerW) ||
@@ -754,7 +786,11 @@ Result<f64, String> StepThermalResponse(f64 previousW, f64 absorbedPowerW,
 u32 CounterRandomU32(u32 deviceSeed, u32 pixelIndex, u64 acquisitionIndex,
                      NoiseClass noiseClass, u32 counter) {
     const bool fixed = noiseClass == NoiseClass::FixedPrnu ||
-                       noiseClass == NoiseClass::FixedDsnu;
+                       noiseClass == NoiseClass::FixedDsnu ||
+                       noiseClass == NoiseClass::FixedColumnGain ||
+                       noiseClass == NoiseClass::FixedColumnOffset ||
+                       noiseClass == NoiseClass::FixedRowGain ||
+                       noiseClass == NoiseClass::FixedRowOffset;
     const u32 lo = fixed ? 0U : static_cast<u32>(acquisitionIndex);
     const u32 hi = fixed ? 0U : static_cast<u32>(acquisitionIndex >> 32);
     u32 state = Mix32(deviceSeed ^ 0x9e3779b9U);

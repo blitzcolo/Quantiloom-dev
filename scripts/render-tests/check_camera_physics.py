@@ -461,7 +461,7 @@ def check_material_capture(work):
 
 
 def nuc_capture(work, name, *, temperature, residual, apply_nuc, backend, rate_scale,
-                dark_current=0.0, dsnu=0.0, prnu=0.0, extra=None):
+                dark_current=0.0, dsnu=0.0, prnu=0.0, extra=None, size=64):
     """One photon capture of the open ground with every temporal noise off.
 
     With shot, read and dark-shot noise disabled a single frame is what an
@@ -470,7 +470,7 @@ def nuc_capture(work, name, *, temperature, residual, apply_nuc, backend, rate_s
     """
     exposure = 0.01
     keys = [
-        ("renderer", "resolution", "[64, 64]"),
+        ("renderer", "resolution", f"[{size}, {size}]"),
         # A physical capture needs a perspective camera; a narrow one keeps
         # the plate's radiance uniform across the array.
         ("camera", "projection", '"perspective"'),
@@ -484,8 +484,8 @@ def nuc_capture(work, name, *, temperature, residual, apply_nuc, backend, rate_s
         ("sensor.optics", "f_number", "2.0"),
         ("sensor.optics", "pixel_pitch_um", "5.0"),
         ("sensor.optics", "fill_factor", "1.0"),
-        ("sensor.optics", "sensor_width_px", "64"),
-        ("sensor.optics", "sensor_height_px", "64"),
+        ("sensor.optics", "sensor_width_px", str(size)),
+        ("sensor.optics", "sensor_height_px", str(size)),
         ("sensor.exposure", "time_s", str(exposure)),
         ("sensor.readout", "adc_bits", "16"),
         ("sensor.readout", "output_bits", "16"),
@@ -597,6 +597,62 @@ def check_nuc_residual(work):
             print(f"NUC {field} {tag}: CPU vs GPU worst pixel {worst:.2e} of the frame maximum")
             if worst > 1e-3:
                 raise RenderFailure(f"NUC {field} {tag}: CPU and GPU disagree by {worst:.2e}")
+
+
+def check_line_pattern(work):
+    """Column and row fixed pattern: the spread of the line means.
+
+    With per-pixel PRNU off, a flat field's column means differ only by the
+    column gains, so their relative standard deviation is the column sigma;
+    rows likewise, and in the dark field the same holds for the offsets in
+    electrons. A two-point NUC must leave r of each. 256 lines, so the
+    estimate of a standard deviation is good to about 4.4 percent.
+    """
+    size = 256
+    col_gain, row_gain, col_off, row_off = 0.02, 0.01, 120.0, 60.0
+    keys = [("sensor.photon", "column_gain_sigma", repr(col_gain)),
+            ("sensor.photon", "row_gain_sigma", repr(row_gain)),
+            ("sensor.photon", "column_offset_e_rms", repr(col_off)),
+            ("sensor.photon", "row_offset_e_rms", repr(row_off))]
+    probe = nuc_capture(work, "line_probe", temperature=1200.0, residual=1.0,
+                        apply_nuc=False, backend="cpu_reference", rate_scale=1e4,
+                        size=size)
+    scale = max(float(probe.mean()), 1.0) / 20000.0
+    pedestal = pedestal_temperature(float(probe.mean()), 20000.0)
+    offsets = keys[2:]
+    frames = {}
+    for backend in ("cpu_reference", "gpu_preview"):
+        for residual, apply_nuc in ((1.0, False), (0.25, True)):
+            tag = "off" if not apply_nuc else "r25"
+            r = 1.0 if not apply_nuc else residual
+            flat = nuc_capture(work, f"line_flat_{tag}_{backend.split('_')[0]}",
+                               temperature=1200.0, residual=residual, apply_nuc=apply_nuc,
+                               backend=backend, rate_scale=scale, extra=keys, size=size)
+            # The line offsets (~1e2 electrons) vanish against the hot plate's
+            # signal, so the flat field's line means measure the gains alone.
+            cols = flat.mean(axis=0)
+            rows = flat.mean(axis=1)
+            # Offsets alone, on a uniform pedestal (see pedestal_temperature).
+            dark = nuc_capture(work, f"line_dark_{tag}_{backend.split('_')[0]}",
+                               temperature=pedestal, residual=residual, apply_nuc=apply_nuc,
+                               backend=backend, rate_scale=1.0, extra=offsets, size=size)
+            frames[(backend, tag)] = (flat, dark)
+            near(f"column gain {tag} {backend}", float(cols.std() / cols.mean()),
+                 r * col_gain, 0.15)
+            near(f"row gain {tag} {backend}", float(rows.std() / rows.mean()),
+                 r * row_gain, 0.15)
+            near(f"column offset {tag} {backend}", float(dark.mean(axis=0).std()),
+                 r * col_off, 0.15)
+            near(f"row offset {tag} {backend}", float(dark.mean(axis=1).std()),
+                 r * row_off, 0.15)
+    for tag in ("off", "r25"):
+        for index, field in ((0, "flat"), (1, "dark")):
+            cpu = frames[("cpu_reference", tag)][index]
+            gpu = frames[("gpu_preview", tag)][index]
+            worst = float(np.abs(cpu - gpu).max()) / max(float(np.abs(cpu).max()), 1e-30)
+            print(f"line {field} {tag}: CPU vs GPU worst pixel {worst:.2e} of the frame maximum")
+            if worst > 1e-3:
+                raise RenderFailure(f"line {field} {tag}: CPU and GPU disagree by {worst:.2e}")
 
 
 def check_single_dispersion(work):
@@ -769,6 +825,7 @@ def main():
             check_fluorescence(work)
             check_material_capture(work)
             check_nuc_residual(work)
+            check_line_pattern(work)
             check_lamp_domain(work)
             # Dispersion needs a structured colour target so the refracted
             # displacement is observable. The dedicated check_dispersion.py
