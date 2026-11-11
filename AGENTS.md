@@ -1,7 +1,8 @@
 # Quantiloom
 
-Spectral path tracer on Vulkan ray tracing. Renders VIS/SWIR/MWIR/LWIR bands and
-hyperspectral cubes from TOML scene configs. C++20 + HLSL, one CMake project.
+Spectral path tracer on GPU ray tracing -- Vulkan on Windows, Metal on macOS. Renders
+VIS/SWIR/MWIR/LWIR bands and hyperspectral cubes from TOML scene configs. C++20 + HLSL,
+one CMake project.
 
 ## Build: WSL2 shell, Windows toolchain
 
@@ -22,10 +23,12 @@ drive the Visual Studio generator. Run everything from the repo root.
 Quantiloom-Qt frontend links against. It takes minutes — use a 600000 ms timeout and
 never interrupt it mid-install.
 
-Four gates run before the install, so nothing red reaches the SDK: the test
+Five gates run before the install, so nothing red reaches the SDK: the test
 suite, `scripts/check_exports.sh` against `docs/abi/*.golden`, the furnace
-cavities, and the illumination suite. The export gate prints what to do when it
-trips; `src/libQuantiloom/AGENTS.md` has the rule it enforces.
+cavities, the illumination suite, and the camera checkers (`check_camera_dynamic`,
+`_isp`, `_history`, `_ae`, `check_dataset_prerequisites`, `check_fusion_ready`).
+The export gate prints what to do when it trips; `src/libQuantiloom/AGENTS.md`
+has the rule it enforces.
 
 The illumination suite has seven arms: `nir`/`swir`/`mwir` occlusion, `open`
 (SWIR open sky against a closed form), `open:vis` (the same ground in the
@@ -42,7 +45,8 @@ n(λ) sources and is still run by hand.
 **The Windows path is `./build_windows.ps1` then `./install_windows.ps1`, and it
 must stay equivalent.** Both paths install the same SDK to the same prefix and
 Quantiloom-Qt cannot tell which produced it, so a gate added to one belongs in
-the other. The gates are *ported*, not wrapped: a Windows build machine has MSVC
+the other -- and in `./build_macos.sh` (below), the third script that runs the
+same gates. The gates are *ported*, not wrapped: a Windows build machine has MSVC
 and CMake and need not have bash or WSL, so `check_exports.ps1` and the two
 `run_*_suite.ps1` are PowerShell reimplementations of their `.sh` twins. What is
 shared rather than duplicated: the furnace cavity list (`furnace_cases.txt`, read
@@ -65,19 +69,61 @@ numpy and OpenEXR (`H:\paper-exp\.venv\Scripts\python.exe` has both; the
 miniconda base has numpy only), then the two `run_*_suite.ps1` directly. Their
 output is line for line the bash twins'.
 
+## Build on macOS: native toolchain, Metal backend
+
+On a Mac (Apple silicon) everything is native -- no `.exe`, no WSL -- and the
+library is built **Metal-only**: `QUANTILOOM_BACKEND_VULKAN=OFF`,
+`QUANTILOOM_BACKEND_METAL=ON`, so not one line of Vulkan is compiled.
+
+| Change | Command |
+|---|---|
+| Full build + the same five gates + SDK install | `./build_macos.sh` |
+| C++ or HLSL | `cmake --build build-mac -j` (CMake re-runs DXC and the shader converter) |
+| CMakeLists / new file | `./build_macos.sh` |
+
+It builds into `build-mac/` with Ninja and installs to
+`../Quantiloom-SDK/macos_arm64` (`QUANTILOOM_SDK_ROOT` overrides the parent),
+which is where Quantiloom-Qt's CMake looks on a Mac. It needs Xcode with its
+Metal toolchain, CMake and Ninja, DXC (the LunarG SDK's macOS `dxc`, found
+under `$VULKAN_SDK` or `~/VulkanSDK/*/macOS`; nothing else of that SDK is used)
+and Apple's Metal Shader Converter (`/usr/local/bin`, or
+`METAL_SHADER_CONVERTER_DIR`; configure stops without it).
+Shaders go HLSL -> DXIL -> metallib plus a `*.reflection.json` each, which is
+what `gpu/metal/` encodes its argument buffers from (`src/libQuantiloom/gpu/metal/AGENTS.md`).
+OpenUSD is optional and found at `USD_ROOT`, `~/openusd` or `/opt/openusd`
+(`scripts/build_openusd.sh --install-dir ~/openusd` needs no sudo); when found,
+its dylibs and plugin tree install beside `libQuantiloom.dylib`. The render
+gates' Python is `$PYTHON` or `python3` if either has numpy and OpenEXR, else a
+venv the script makes once in `build-mac/gates-venv` with `uv`.
+
+The ABI gate compares `docs/abi/*.macos.golden` here (`nm -gU`, not
+`dumpbin`), and a Mac is the only machine that can regenerate them -- see
+`src/libQuantiloom/AGENTS.md`. The checkers find the binaries through the `CLI`
+and `TESTS` environment variables, which `build_macos.sh` exports; unset, they
+default to the Windows `build/.../Release/*.exe`.
+
 ## Tests
 
-1366 tests run in ~8 s, and the binary reruns without rebuilding. They link the
-objects, not the DLL, so internal code is testable without being exported.
+About 2000 tests (2006 at the Metal merge), and the binary reruns without
+rebuilding. They link the objects, not the DLL, so internal code is testable
+without being exported. The GPU suites are parameterized over the backends the
+build compiled, so the same cases run on Vulkan on Windows and on Metal on a Mac.
 
 ```bash
-./build/tests/Release/libquantiloom_tests.exe --gtest_brief=1          # all (122 lines, not 2086)
+./build/tests/Release/libquantiloom_tests.exe --gtest_brief=1          # all; prints only failures and skips
 ./build/tests/Release/libquantiloom_tests.exe --gtest_filter='Foo*'    # one suite (~0.04 s)
+./build-mac/tests/libquantiloom_tests --gtest_brief=1                  # macOS (~55 s with the GPU suites)
 ```
 
 `ctest` registers a single aggregate test here, so `ctest -R` cannot select a case —
-always use `--gtest_filter`. 8 SKIPPED is the normal baseline: the BC7 cases,
-deliberately off, see `build_wsl.sh`. A test needing an asset
+always use `--gtest_filter`. 16 SKIPPED is the normal baseline: the 8 BC7 cases,
+deliberately off (see `build_wsl.sh`), and the 8 `Gpu/ComputeMigrationAB.*`, which
+run only when `QUANTILOOM_GPU_AB=record:<file>` or `compare:<file>` asks for an A/B
+recording. A process that cannot reach the GPU (a sandboxed shell, a headless
+runner) skips the GPU suites, except six `FusionTransportGpuTest` cases and
+`FusionPublicationTest.CancellationDuringWorkAndBeforeCommitPreservesOldPackage`,
+which fail on creating the renderer instead -- read those seven as "no device",
+not as a regression. A test needing an asset
 must build its path from `QUANTILOOM_SOURCE_ROOT`, never a relative or absolute one —
 those resolve against the caller's cwd and skip on miss, so a wrong path reads as
 "no test data" rather than as a failure.
@@ -89,25 +135,29 @@ those resolve against the caller's cwd and skip on miss, so a wrong path reads a
 | `include/quantiloom/` | **Public** headers — the only ones the SDK installs, 7 modules |
 | `src/libQuantiloom/` | Core library sources and **internal** headers |
 | `src/libQuantiloom/thermal/` | Surface energy balance: what sets a temperature, rather than what a config says it is |
-| `src/shaders/` | HLSL → SPIR-V, ray tracing + compute |
+| `src/libQuantiloom/gpu/` | The internal RHI every renderer module talks to; `gpu/vulkan/` and `gpu/metal/` are the only places a native API appears |
+| `src/shaders/` | HLSL → SPIR-V (Vulkan) or DXIL → metallib (Metal), ray tracing + compute; structs and bindings shared with C++ live in `ql_shared_*.hlsli` and `ql_rt_bindings.hlsli` |
 | `src/app/` | CLI: `Quantiloom.exe <config.toml>`, `batch <list.txt>`, `serve` |
 | `src/libSpectraForge/` | IR material generation library |
 | `src/tools/` | `fusion_tool`, `QLTrans` (MODTRAN wrapper) |
 | `tests/` | GoogleTest; directories mirror libQuantiloom module names |
-| `docs/abi/` | Reviewed export baselines — the ABI gate's reference |
+| `docs/abi/` | Reviewed export baselines — the ABI gate's reference; `*.golden` for Windows, `*.macos.golden` for macOS |
 | `assets/configs/` | TOML scene configs — the CLI's only input |
-| `scripts/` | Python/PowerShell tooling (spectral baking, LUT gen, physics audit) |
+| `scripts/` | Python/PowerShell/bash tooling (spectral baking, LUT gen, physics audit, `gpu-ab/` migration evidence) |
 
 The SDK's runtime data installs to `<prefix>/share/quantiloom/`
-(`shaders/spirv/*.spv` + `SHADERSET`, `assets/atmos_models`, `assets/luts`),
-never to `bin/`. At runtime `core/ResourceLocator` resolves
+(`shaders/spirv/*.spv` on Vulkan, `shaders/metallib/*.metallib` +
+`*.reflection.json` on Metal, each with its `SHADERSET`; `assets/atmos_models`,
+`assets/luts`), never to `bin/`. At runtime `core/ResourceLocator` resolves
 `SetResourceRoot()` -> `QUANTILOOM_RESOURCE_ROOT` -> `<library>/../share/quantiloom`
 -> `<library>/share/quantiloom` -> the working-directory development fallback
 (`src/shaders`, `shaders`, `../shaders`, `assets/`), and rejects a root whose
 SHADERSET stamp is not the digest the library was built with. Public headers
-are backend-neutral: Vulkan types appear only under
+are backend-neutral: native types appear only under
 `include/quantiloom/renderer/interop/`, which consumers get through
-`find_package(Quantiloom COMPONENTS VulkanInterop)`.
+`find_package(Quantiloom COMPONENTS VulkanInterop)` or, on Apple,
+`COMPONENTS MetalInterop` (`MetalInterop.hpp` passes `id<MTLDevice>` and friends
+as `void*`, so it needs no Objective-C).
 
 ## Environment maps light RGB previews, and nothing else
 

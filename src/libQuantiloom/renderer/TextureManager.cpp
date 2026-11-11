@@ -1,9 +1,10 @@
 #include "TextureManager.hpp"
 #include "TextureCompressor.hpp"
-#include "GpuBuffer.hpp"
-#include "CommandHelper.hpp"
 #include "core/Log.hpp"
+#include "renderer/GpuAlloc.hpp"
+#include "renderer/TextureTransitions.hpp"
 #include <algorithm>
+#include <span>
 #include <stdexcept>
 #include <cmath>
 
@@ -13,18 +14,17 @@ namespace {
 
 // Every stage that samples the uploaded textures. The material textures are
 // read by the ray-tracing stages (and by compute passes sharing the layout); a
-// barrier whose destination mask names only the fragment stage leaves them
+// barrier whose destination names only the fragment stage leaves them
 // unsynchronised against the transfer that wrote them.
-constexpr VkPipelineStageFlags kSampleStages = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+constexpr gpu::Access kSampleAccess =
+    gpu::Access::RayTraceRead | gpu::Access::ComputeRead | gpu::Access::FragmentRead;
 
 }  // namespace
 
 struct TextureManager::PendingUpload {
-    std::unique_ptr<GpuBuffer> staging;
-    std::unique_ptr<GpuImage> image;
-    VkFormat format = VK_FORMAT_UNDEFINED;
+    std::unique_ptr<gpu::Buffer> staging;
+    std::unique_ptr<gpu::Texture> image;
+    gpu::Format format = gpu::Format::Undefined;
     u32 width = 0;
     u32 height = 0;
     u32 mipLevels = 1;
@@ -37,23 +37,15 @@ struct TextureManager::PendingUpload {
 // Construction / Destruction
 // ============================================================================
 
-TextureManager::TextureManager(VulkanContext& context, VkDeviceSize uploadBatchBytes)
-    : m_context(context)
-    , m_uploadBatchBytes(std::max<VkDeviceSize>(uploadBatchBytes, 1)) {
+TextureManager::TextureManager(gpu::Device& device, u64 uploadBatchBytes)
+    : m_device(device)
+    , m_uploadBatchBytes(std::max<u64>(uploadBatchBytes, 1)) {
     // Resources are allocated lazily in UploadTextures
 }
 
-TextureManager::~TextureManager() {
-    // Destroy all VkSampler objects
-    VkDevice device = m_context.GetDevice();
-    for (VkSampler sampler : m_samplers) {
-        if (sampler != VK_NULL_HANDLE) {
-            vkDestroySampler(device, sampler, nullptr);
-        }
-    }
-
-    // GpuImage objects will destroy VkImage and VkImageView automatically (RAII)
-}
+// m_samplerObjects is declared after m_images: every sampler is destroyed, then every
+// gpu::Texture destroys its image and view (RAII)
+TextureManager::~TextureManager() = default;
 
 // ============================================================================
 // Texture Upload
@@ -62,11 +54,9 @@ TextureManager::~TextureManager() {
 void TextureManager::UploadTextures(std::vector<Texture>& textures) {
     // Clear previous state
     m_images.clear();
-    for (VkSampler sampler : m_samplers) {
-        vkDestroySampler(m_context.GetDevice(), sampler, nullptr);
-    }
-    m_samplers.clear();
-    m_imageViews.clear();
+    m_samplerObjects.clear();
+    m_samplerRefs.clear();
+    m_textureRefs.clear();
     m_lastUploadBatchCount = 0;
 
     // Handle empty texture list: create dummy 1x1 white texture
@@ -75,13 +65,14 @@ void TextureManager::UploadTextures(std::vector<Texture>& textures) {
         Texture dummyTex = CreateDummyTexture();
 
         auto pending = PrepareTexture(dummyTex);
-        CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
-            RecordTextureUpload(cmd, *pending);
+        m_device.ExecuteImmediate([&](gpu::CommandList& list) {
+            RecordTextureUpload(list, *pending);
         });
         ++m_lastUploadBatchCount;
         m_images.push_back(std::move(pending->image));
-        m_samplers.push_back(CreateSampler(dummyTex.sampler));
-        m_imageViews.push_back(m_images.back()->GetView());
+        m_samplerObjects.push_back(CreateSampler(dummyTex.sampler));
+        m_samplerRefs.push_back(m_samplerObjects.back()->Ref());
+        m_textureRefs.push_back(m_images.back()->Ref());
 
         return;
     }
@@ -94,21 +85,22 @@ void TextureManager::UploadTextures(std::vector<Texture>& textures) {
         std::unique_ptr<PendingUpload> upload;
     };
     std::vector<BatchEntry> batch;
-    VkDeviceSize batchBytes = 0;
+    u64 batchBytes = 0;
 
     const auto flush = [&]() {
         if (batch.empty()) return;
-        CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
+        m_device.ExecuteImmediate([&](gpu::CommandList& list) {
             for (const BatchEntry& entry : batch) {
-                RecordTextureUpload(cmd, *entry.upload);
+                RecordTextureUpload(list, *entry.upload);
             }
         });
         ++m_lastUploadBatchCount;
 
         for (BatchEntry& entry : batch) {
-            VkSampler sampler = CreateSampler(entry.source->sampler);
-            m_imageViews.push_back(entry.upload->image->GetView());
-            m_samplers.push_back(sampler);
+            std::unique_ptr<gpu::Sampler> sampler = CreateSampler(entry.source->sampler);
+            m_textureRefs.push_back(entry.upload->image->Ref());
+            m_samplerRefs.push_back(sampler->Ref());
+            m_samplerObjects.push_back(std::move(sampler));
             m_images.push_back(std::move(entry.upload->image));
 
             // Release only after the submission that consumed the staging
@@ -122,16 +114,16 @@ void TextureManager::UploadTextures(std::vector<Texture>& textures) {
     };
 
     for (Texture& texture : textures) {
-        const VkDeviceSize rawBytes =
-            static_cast<VkDeviceSize>(texture.width) * texture.height * 4;
-        const VkDeviceSize estimate = texture.HasBC7Data()
-            ? static_cast<VkDeviceSize>(texture.bc7Data->data.size()) : rawBytes;
+        const u64 rawBytes =
+            static_cast<u64>(texture.width) * texture.height * 4;
+        const u64 estimate = texture.HasBC7Data()
+            ? static_cast<u64>(texture.bc7Data->data.size()) : rawBytes;
         if (!batch.empty() && batchBytes + estimate > m_uploadBatchBytes) {
             flush();
         }
 
         auto pending = PrepareTexture(texture);
-        const VkDeviceSize uploadBytes = pending->staging->GetSize();
+        const u64 uploadBytes = pending->staging->Size();
         if (!batch.empty() && batchBytes + uploadBytes > m_uploadBatchBytes) {
             flush();
         }
@@ -148,7 +140,7 @@ void TextureManager::UploadTextures(std::vector<Texture>& textures) {
 
     QL_LOG_INFO("  Texture upload complete: {} textures, {} samplers, {} batch(es) "
                 "(CPU memory released)",
-                m_images.size(), m_samplers.size(), m_lastUploadBatchCount);
+                m_images.size(), m_samplerRefs.size(), m_lastUploadBatchCount);
 }
 
 i32 TextureManager::AppendTexture(const Texture& texture) {
@@ -161,11 +153,12 @@ i32 TextureManager::AppendTexture(const Texture& texture) {
     if (!gpuImage) {
         return -1;
     }
-    VkSampler sampler = CreateSampler(texture.sampler);
+    std::unique_ptr<gpu::Sampler> sampler = CreateSampler(texture.sampler);
 
     const i32 index = static_cast<i32>(m_images.size());
-    m_imageViews.push_back(gpuImage->GetView());
-    m_samplers.push_back(sampler);
+    m_textureRefs.push_back(gpuImage->Ref());
+    m_samplerRefs.push_back(sampler->Ref());
+    m_samplerObjects.push_back(std::move(sampler));
     m_images.push_back(std::move(gpuImage));
 
     QL_LOG_INFO("  Appended texture '{}' at index {} ({} total)", texture.name, index,
@@ -177,10 +170,10 @@ i32 TextureManager::AppendTexture(const Texture& texture) {
 // Internal Helper Functions
 // ============================================================================
 
-std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) const {
+std::unique_ptr<gpu::Texture> TextureManager::UploadTexture(const Texture& texture) const {
     auto pending = PrepareTexture(texture);
-    CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
-        RecordTextureUpload(cmd, *pending);
+    m_device.ExecuteImmediate([&](gpu::CommandList& list) {
+        RecordTextureUpload(list, *pending);
     });
     return std::move(pending->image);
 }
@@ -199,7 +192,7 @@ std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareTexture(
         throw std::runtime_error("Only RGBA8 textures are supported");
     }
 
-    VkDeviceSize uncompressedSize = static_cast<VkDeviceSize>(texture.width) * texture.height * 4;
+    u64 uncompressedSize = static_cast<u64>(texture.width) * texture.height * 4;
 
     if (texture.pixels.size() != uncompressedSize) {
         QL_LOG_ERROR("Texture '{}' pixel data size mismatch: expected {} bytes, got {}",
@@ -239,7 +232,7 @@ std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareTexture(
     // ========================================================================
     // Uncompressed Upload Path (original code)
     // ========================================================================
-    VkFormat format = texture.isSRGB ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    gpu::Format format = texture.isSRGB ? gpu::Format::RGBA8Srgb : gpu::Format::RGBA8Unorm;
     const char* formatName = texture.isSRGB ? "RGBA8_SRGB" : "RGBA8_UNORM";
 
     QL_LOG_INFO("  Uploading texture '{}': {}x{} {} ({} bytes)",
@@ -247,28 +240,24 @@ std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareTexture(
 
     // Step 1: Create staging buffer (CPU-accessible)
     auto pending = std::make_unique<PendingUpload>();
-    pending->staging = std::make_unique<GpuBuffer>(
-        m_context.GetAllocator(),
-        uncompressedSize,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_CPU_ONLY
-    );
+    pending->staging = CreateBufferOrThrow(
+        m_device,
+        gpu::BufferDesc{uncompressedSize, gpu::BufferUsage::TransferSrc, gpu::MemoryClass::HostOnly, 0});
 
     // Step 2: Upload CPU pixel data to staging buffer
     pending->staging->Upload(texture.pixels.data(), uncompressedSize);
 
     // Step 3: Create device-local GPU image with correct format and full mipmap chain
     u32 mipLevels = static_cast<u32>(std::floor(std::log2(std::max(texture.width, texture.height)))) + 1;
-    pending->image = std::make_unique<GpuImage>(
-        m_context.GetAllocator(),
-        m_context.GetDevice(),
-        texture.width,
-        texture.height,
-        format,  // sRGB or UNORM based on texture usage
-        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY,
-        mipLevels  // Full mipmap chain
-    );
+    gpu::TextureDesc imageDesc;
+    imageDesc.width = texture.width;
+    imageDesc.height = texture.height;
+    imageDesc.mipLevels = mipLevels;  // Full mipmap chain
+    imageDesc.format = format;  // sRGB or UNORM based on texture usage
+    imageDesc.usage = gpu::TextureUsage::TransferSrc | gpu::TextureUsage::TransferDst |
+                      gpu::TextureUsage::Sampled;
+    imageDesc.memory = gpu::MemoryClass::DeviceLocal;
+    pending->image = CreateTextureOrThrow(m_device, imageDesc);
 
     pending->format = format;
     pending->width = texture.width;
@@ -277,73 +266,73 @@ std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareTexture(
     return pending;
 }
 
-VkSampler TextureManager::CreateSampler(const TextureSampler& samplerInfo) const {
-    VkSamplerCreateInfo samplerCreateInfo{};
-    samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+std::unique_ptr<gpu::Sampler> TextureManager::CreateSampler(const TextureSampler& samplerInfo) const {
+    // Field for field the sampler create info this filled by hand; every field it left
+    // alone is the desc's zero default.
+    gpu::SamplerDesc desc;
 
     // Filter modes
-    samplerCreateInfo.magFilter = ToVkFilter(samplerInfo.magFilter);
-    samplerCreateInfo.minFilter = ToVkFilter(samplerInfo.minFilter);
+    desc.magFilter = ToFilter(samplerInfo.magFilter);
+    desc.minFilter = ToFilter(samplerInfo.minFilter);
 
     // Wrap modes
-    samplerCreateInfo.addressModeU = ToVkAddressMode(samplerInfo.wrapS);
-    samplerCreateInfo.addressModeV = ToVkAddressMode(samplerInfo.wrapT);
-    samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;  // Default for W
+    desc.addressModeU = ToAddressMode(samplerInfo.wrapS);
+    desc.addressModeV = ToAddressMode(samplerInfo.wrapT);
+    desc.addressModeW = gpu::AddressMode::Repeat;  // Default for W
 
     // Anisotropy (disabled for M1 - can be enabled in M2+ if needed)
-    samplerCreateInfo.anisotropyEnable = VK_FALSE;
-    samplerCreateInfo.maxAnisotropy = 1.0f;
+    desc.anisotropyEnable = false;
+    desc.maxAnisotropy = 1.0f;
 
     // Border color (for clamp-to-border mode, not used in glTF)
-    samplerCreateInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    desc.borderColor = gpu::BorderColor::IntOpaqueBlack;
 
     // Coordinate system (normalized [0, 1] for glTF)
-    samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+    desc.unnormalizedCoordinates = false;
 
     // Comparison (for shadow mapping, not used here)
-    samplerCreateInfo.compareEnable = VK_FALSE;
-    samplerCreateInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+    desc.compareEnable = false;
+    desc.compareOp = gpu::CompareOp::Always;
 
     // Mipmapping (trilinear filtering)
-    samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    samplerCreateInfo.mipLodBias = 0.0f;
-    samplerCreateInfo.minLod = 0.0f;
-    samplerCreateInfo.maxLod = VK_LOD_CLAMP_NONE;  // Use all mip levels
+    desc.mipmapMode = gpu::Filter::Linear;
+    desc.mipLodBias = 0.0f;
+    desc.minLod = 0.0f;
+    desc.maxLod = gpu::kLodClampNone;  // Use all mip levels
 
-    VkSampler sampler;
-
-    if (const VkResult result = vkCreateSampler(m_context.GetDevice(), &samplerCreateInfo, nullptr, &sampler);
-        result != VK_SUCCESS) {
-        QL_LOG_ERROR("Failed to create VkSampler: error code {}", static_cast<int>(result));
-        throw std::runtime_error("VkSampler creation failed");
+    auto sampler = m_device.CreateSampler(desc);
+    if (!sampler.has_value()) {
+        // The backend's Err is the result code as a decimal
+        QL_LOG_ERROR("Failed to create texture sampler: error code {}", sampler.error());
+        throw std::runtime_error("Texture sampler creation failed");
     }
 
-    return sampler;
+    return std::move(sampler.value());
 }
 
-VkFilter TextureManager::ToVkFilter(TextureSampler::Filter filter) {
+gpu::Filter TextureManager::ToFilter(TextureSampler::Filter filter) {
     switch (filter) {
         case TextureSampler::Filter::Nearest:
-            return VK_FILTER_NEAREST;
+            return gpu::Filter::Nearest;
         case TextureSampler::Filter::Linear:
-            return VK_FILTER_LINEAR;
+            return gpu::Filter::Linear;
         default:
             QL_LOG_WARN("Unknown TextureSampler::Filter, defaulting to LINEAR");
-            return VK_FILTER_LINEAR;
+            return gpu::Filter::Linear;
     }
 }
 
-VkSamplerAddressMode TextureManager::ToVkAddressMode(TextureSampler::WrapMode wrapMode) {
+gpu::AddressMode TextureManager::ToAddressMode(TextureSampler::WrapMode wrapMode) {
     switch (wrapMode) {
         case TextureSampler::WrapMode::Repeat:
-            return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            return gpu::AddressMode::Repeat;
         case TextureSampler::WrapMode::ClampToEdge:
-            return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            return gpu::AddressMode::ClampToEdge;
         case TextureSampler::WrapMode::MirroredRepeat:
-            return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+            return gpu::AddressMode::MirroredRepeat;
         default:
             QL_LOG_WARN("Unknown TextureSampler::WrapMode, defaulting to REPEAT");
-            return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            return gpu::AddressMode::Repeat;
     }
 }
 
@@ -376,7 +365,7 @@ std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareBC7Texture
     const BC7CompressedData& compressed) const {
 
     // Choose BC7 format based on color space
-    VkFormat format = compressed.isSRGB ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK;
+    gpu::Format format = compressed.isSRGB ? gpu::Format::BC7Srgb : gpu::Format::BC7Unorm;
     const char* formatName = compressed.isSRGB ? "BC7_SRGB" : "BC7_UNORM";
 
     QL_LOG_INFO("  Uploading BC7 texture '{}': {}x{} {} ({} bytes, ratio: {:.1f}x)",
@@ -394,31 +383,26 @@ std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareBC7Texture
     u32 mipLevels = 1;
 
     // Step 1: Create staging buffer for compressed data
-    VkDeviceSize compressedSize = static_cast<VkDeviceSize>(compressed.GetCompressedSize());
+    u64 compressedSize = static_cast<u64>(compressed.GetCompressedSize());
     auto pending = std::make_unique<PendingUpload>();
-    pending->staging = std::make_unique<GpuBuffer>(
-        m_context.GetAllocator(),
-        compressedSize,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_CPU_ONLY
-    );
+    pending->staging = CreateBufferOrThrow(
+        m_device,
+        gpu::BufferDesc{compressedSize, gpu::BufferUsage::TransferSrc, gpu::MemoryClass::HostOnly, 0});
 
     // Step 2: Copy compressed data to staging buffer
     pending->staging->Upload(compressed.data.data(), compressedSize);
 
     // Step 3: Create device-local GPU image with BC7 format
     // Note: For BC7, image dimensions should be the original texture dimensions,
-    // not the aligned dimensions. Vulkan handles the block alignment internally.
-    pending->image = std::make_unique<GpuImage>(
-        m_context.GetAllocator(),
-        m_context.GetDevice(),
-        texture.width,  // Original width (Vulkan handles alignment)
-        texture.height, // Original height
-        format,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY,
-        mipLevels
-    );
+    // not the aligned dimensions. The driver handles the block alignment internally.
+    gpu::TextureDesc imageDesc;
+    imageDesc.width = texture.width;    // Original width (the driver handles alignment)
+    imageDesc.height = texture.height;  // Original height
+    imageDesc.mipLevels = mipLevels;
+    imageDesc.format = format;
+    imageDesc.usage = gpu::TextureUsage::TransferDst | gpu::TextureUsage::Sampled;
+    imageDesc.memory = gpu::MemoryClass::DeviceLocal;
+    pending->image = CreateTextureOrThrow(m_device, imageDesc);
 
     pending->format = format;
     pending->width = texture.width;
@@ -430,150 +414,104 @@ std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareBC7Texture
     return pending;
 }
 
-void TextureManager::RecordTextureUpload(VkCommandBuffer cmd,
+void TextureManager::RecordTextureUpload(gpu::CommandList& list,
                                          const PendingUpload& upload) const {
-    CommandHelper::TransitionImageLayout(
-        cmd, upload.image->GetImage(), upload.format,
-        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        upload.compressed ? upload.mipLevels : 1);
+    // Sampled textures have per-state layouts: transfer destination, then shader read.
+    const gpu::TextureRef image =
+        upload.image->Ref().WithLayout(gpu::TextureLayoutPolicy::Optimal);
 
-    VkBufferImageCopy region{};
-    region.bufferOffset = 0;
+    rendercore::LegacyTransition(list, image, rendercore::Layout::Undefined,
+                                 rendercore::Layout::TransferDst,
+                                 upload.compressed ? upload.mipLevels : 1);
+
+    gpu::BufferTextureCopy region;
     region.bufferRowLength = upload.bufferRowLength;
     region.bufferImageHeight = upload.bufferImageHeight;
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.mipLevel = 0;
-    region.imageSubresource.baseArrayLayer = 0;
-    region.imageSubresource.layerCount = 1;
-    region.imageExtent = {upload.width, upload.height, 1};
-    vkCmdCopyBufferToImage(cmd, upload.staging->GetHandle(), upload.image->GetImage(),
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    region.width = upload.width;
+    region.height = upload.height;
+    list.CopyBufferToTexture(upload.staging->Ref(), image, region);
 
     if (!upload.compressed) {
-        GenerateMipmaps(cmd, upload.image.get(), upload.format,
+        GenerateMipmaps(list, *upload.image, upload.format,
                         upload.width, upload.height, upload.mipLevels);
         return;
     }
 
-    VkImageMemoryBarrier ready{};
-    ready.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    ready.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    ready.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    ready.image = upload.image->GetImage();
-    ready.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    ready.subresourceRange.baseMipLevel = 0;
-    ready.subresourceRange.levelCount = upload.mipLevels;
-    ready.subresourceRange.baseArrayLayer = 0;
-    ready.subresourceRange.layerCount = 1;
-    ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    ready.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, kSampleStages, 0,
-        0, nullptr, 0, nullptr, 1, &ready);
+    gpu::TextureBarrier ready;
+    ready.texture = image;
+    ready.from = gpu::Access::TransferWrite;
+    ready.to = kSampleAccess;
+    ready.mipCount = upload.mipLevels;
+    list.Barrier(ready);
 }
 
 // ============================================================================
 // Mipmap Generation Helper
 // ============================================================================
 
-void TextureManager::GenerateMipmaps(VkCommandBuffer cmd, GpuImage* gpuImage,
-                                      VkFormat format, u32 texWidth, u32 texHeight,
+void TextureManager::GenerateMipmaps(gpu::CommandList& list, const gpu::Texture& gpuImage,
+                                      gpu::Format format, u32 texWidth, u32 texHeight,
                                       u32 mipLevels) const {
-    // Generate mipmaps using vkCmdBlitImage
-    // Transition base level to TRANSFER_SRC for blit source
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.image = gpuImage->GetImage();
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
-    barrier.subresourceRange.levelCount = 1;
+    // Generate mipmaps by blitting each level from the one above it. Every barrier
+    // covers one mip level of layer 0.
+    const gpu::TextureRef image =
+        gpuImage.Ref().WithLayout(gpu::TextureLayoutPolicy::Optimal);
 
     u32 mipWidth = texWidth;
     u32 mipHeight = texHeight;
 
     for (u32 i = 1; i < mipLevels; ++i) {
         // Transition previous level to TRANSFER_SRC_OPTIMAL
-        barrier.subresourceRange.baseMipLevel = i - 1;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-            0, nullptr,
-            0, nullptr,
-            1, &barrier);
+        gpu::TextureBarrier toSource;
+        toSource.texture = image;
+        toSource.from = gpu::Access::TransferWrite;
+        toSource.to = gpu::Access::TransferRead;
+        toSource.baseMip = i - 1;
+        list.Barrier(toSource);
 
         // Blit from level i-1 to level i
-        VkImageBlit blit{};
-        blit.srcOffsets[0] = {0, 0, 0};
-        blit.srcOffsets[1] = {static_cast<i32>(mipWidth), static_cast<i32>(mipHeight), 1};
-        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        blit.srcSubresource.mipLevel = i - 1;
-        blit.srcSubresource.baseArrayLayer = 0;
-        blit.srcSubresource.layerCount = 1;
+        gpu::BlitRegion blit;
+        blit.srcMip = i - 1;
+        blit.srcX1 = static_cast<i32>(mipWidth);
+        blit.srcY1 = static_cast<i32>(mipHeight);
 
         if (mipWidth > 1) mipWidth /= 2;
         if (mipHeight > 1) mipHeight /= 2;
 
-        blit.dstOffsets[0] = {0, 0, 0};
-        blit.dstOffsets[1] = {static_cast<i32>(mipWidth), static_cast<i32>(mipHeight), 1};
-        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        blit.dstSubresource.mipLevel = i;
-        blit.dstSubresource.baseArrayLayer = 0;
-        blit.dstSubresource.layerCount = 1;
+        blit.dstMip = i;
+        blit.dstX1 = static_cast<i32>(mipWidth);
+        blit.dstY1 = static_cast<i32>(mipHeight);
 
-        // Transition current level to TRANSFER_DST before blit
-        barrier.subresourceRange.baseMipLevel = i;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        // Transition current level to TRANSFER_DST before blit. Nothing is waited on, but
+        // at the transfer stage: no access alone would make the source top of pipe.
+        gpu::TextureBarrier toDestination;
+        toDestination.texture = image;
+        toDestination.to = gpu::Access::TransferWrite;
+        toDestination.discard = true;
+        toDestination.baseMip = i;
+        gpu::BarrierBatch toDestinationBatch;
+        toDestinationBatch.textures = std::span<const gpu::TextureBarrier>(&toDestination, 1);
+        toDestinationBatch.srcStages = gpu::PipelineStage::Transfer;
+        list.Barrier(toDestinationBatch);
 
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-            0, nullptr,
-            0, nullptr,
-            1, &barrier);
-
-        vkCmdBlitImage(cmd,
-            gpuImage->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            gpuImage->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            1, &blit,
-            VK_FILTER_LINEAR);
+        list.BlitTexture(image, image, blit, gpu::Filter::Linear);
 
         // Transition previous level to SHADER_READ_ONLY
-        barrier.subresourceRange.baseMipLevel = i - 1;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, kSampleStages, 0,
-            0, nullptr,
-            0, nullptr,
-            1, &barrier);
+        gpu::TextureBarrier toSampled;
+        toSampled.texture = image;
+        toSampled.from = gpu::Access::TransferRead;
+        toSampled.to = kSampleAccess;
+        toSampled.baseMip = i - 1;
+        list.Barrier(toSampled);
     }
 
     // Transition last mip level to SHADER_READ_ONLY
-    barrier.subresourceRange.baseMipLevel = mipLevels - 1;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-    vkCmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, kSampleStages, 0,
-        0, nullptr,
-        0, nullptr,
-        1, &barrier);
+    gpu::TextureBarrier last;
+    last.texture = image;
+    last.from = gpu::Access::TransferWrite;
+    last.to = kSampleAccess;
+    last.baseMip = mipLevels - 1;
+    list.Barrier(last);
 }
 
 } // namespace quantiloom

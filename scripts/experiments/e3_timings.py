@@ -74,7 +74,7 @@ def gpu_name():
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--filter", default="InteractiveBench*",
+    parser.add_argument("--filter", default="*InteractiveBench*",
                         help="gtest filter; a bare 'T1'/'T2' is expanded")
     parser.add_argument("--timeout", type=int, default=7200)
     parser.add_argument("--from-stdout", type=pathlib.Path,
@@ -92,8 +92,8 @@ def main():
 
         gtest_filter = args.filter
         if gtest_filter in ("T1", "T2"):
-            gtest_filter = {"T1": "InteractiveBench.DISABLED_Geometry*",
-                            "T2": "InteractiveBench.DISABLED_Thermal*"}[gtest_filter]
+            gtest_filter = {"T1": "*InteractiveBench.DISABLED_Geometry*",
+                            "T2": "*InteractiveBench.DISABLED_Thermal*"}[gtest_filter]
 
         print(f"running {gtest_filter} ...", flush=True)
         result = subprocess.run(

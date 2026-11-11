@@ -41,7 +41,7 @@ String JoinProbed(const Vector<String>& lines) {
 }
 
 String ReadShaderSetStamp(const fs::path& root) {
-    std::ifstream file(root / "shaders" / "spirv" / "SHADERSET", std::ios::binary);
+    std::ifstream file(root / "shaders" / kShaderSubdir / "SHADERSET", std::ios::binary);
     if (!file.is_open()) return {};
     std::ostringstream contents;
     contents << file.rdbuf();
@@ -70,15 +70,16 @@ ResolvedResources ResolveResourceCandidates(const ResourceCandidates& candidates
                        const String& description) -> ResolvedResources {
         ResolvedResources result;
         std::error_code ec;
-        const fs::path shaderDir = root / "shaders" / "spirv";
+        const String subdir = String("shaders/") + kShaderSubdir;
+        const fs::path shaderDir = root / "shaders" / kShaderSubdir;
         if (!fs::is_directory(shaderDir, ec)) {
-            note(description + " (no shaders/spirv)");
+            note(description + " (no " + subdir + ")");
             return result;
         }
         if (!candidates.shaderSetDigest.empty()) {
             const String stamp = ReadShaderSetStamp(root);
             if (stamp.empty()) {
-                note(description + " (shaders/spirv/SHADERSET is missing or empty; "
+                note(description + " (" + subdir + "/SHADERSET is missing or empty; "
                                    "expected shader set " + candidates.shaderSetDigest + ")");
                 return result;
             }
@@ -129,7 +130,7 @@ ResolvedResources ResolveResourceCandidates(const ResourceCandidates& candidates
     if (!rejectedLibraryRoot) {
         for (const auto& dir : candidates.devShaderDirs) {
             std::error_code ec;
-            if (!fs::is_regular_file(dir / "raygen.spv", ec)) continue;
+            if (!fs::is_regular_file(dir / kShaderProbe, ec)) continue;
             ResolvedResources result;
             result.origin = ResourceOrigin::Development;
             result.shaderDir = dir;
@@ -137,7 +138,7 @@ ResolvedResources ResolveResourceCandidates(const ResourceCandidates& candidates
             note("development fallback " + dir.string());
             return result;
         }
-        note("development fallback (no raygen.spv in the working-directory candidates)");
+        note(String("development fallback (no ") + kShaderProbe + " in the working-directory candidates)");
     }
 
     ResolvedResources result;
@@ -181,6 +182,14 @@ void SetResourceRootOverride(const std::filesystem::path& root) {
 
 String CompiledShaderSetDigest() {
     return kShaderSetDigest;
+}
+
+String CompiledShaderSubdir() {
+    return kShaderSubdir;
+}
+
+String CompiledShaderProbe() {
+    return kShaderProbe;
 }
 
 const ResolvedResources& GetResolvedResources() {

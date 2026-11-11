@@ -31,7 +31,9 @@ namespace quantiloom {
 // Forward declarations
 class RayTracingPipeline;
 class Scene;
-class VulkanContext;
+namespace gpu {
+class Device;
+}
 
 // ============================================================================
 // Rendering Status
@@ -73,7 +75,7 @@ const char* HyperspectralStatusToString(HyperspectralStatus status);
  *
  * Example usage:
  * @code
- * HyperspectralRenderer renderer(vulkanContext, pipeline, scene);
+ * HyperspectralRenderer renderer(device, pipeline, scene);
  *
  * auto config = HyperspectralConfig::MWIR(50.0f);
  * config.spp = 64;
@@ -97,12 +99,12 @@ public:
 
     /**
      * @brief Construct hyperspectral renderer
-     * @param context Vulkan context (must remain valid during rendering)
+     * @param device The device the pipeline was created on (must outlive the renderer)
      * @param pipeline Ray tracing pipeline (must support single-wavelength mode)
      * @param scene Scene to render (must remain valid during rendering)
      */
     HyperspectralRenderer(
-        VulkanContext& context,
+        gpu::Device& device,
         RayTracingPipeline& pipeline,
         Scene& scene
     );

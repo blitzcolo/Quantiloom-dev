@@ -21,13 +21,16 @@
 
 #pragma once
 
-#include "renderer/VulkanContext.hpp"
+#include "core/Types.hpp"
+#include "gpu/GpuTypes.hpp"
 #include "thermal/ThermalTypes.hpp"
-
-#include <vulkan/vulkan.h>
 
 #include <memory>
 #include <span>
+
+namespace quantiloom::gpu {
+class Device;
+}
 
 namespace quantiloom::rendercore {
 
@@ -55,7 +58,8 @@ public:
         f32 sunAngularRadius = 0.00465f;
     };
 
-    ThermalExchangePrecompute(VulkanContext& context);
+    /// `device` must outlive this object, which creates and records through it.
+    ThermalExchangePrecompute(gpu::Device& device);
     ~ThermalExchangePrecompute();
 
     ThermalExchangePrecompute(const ThermalExchangePrecompute&) = delete;
@@ -88,14 +92,15 @@ public:
     /**
      * @brief Cast the rays and reduce them into sparse rows
      *
-     * @param tlas      the scene's top-level acceleration structure
+     * @param tlas      the scene's top-level acceleration structure; an empty
+     *                  ref returns an empty result
      * @param elements  surface elements, in BuildThermalMesh order
      * @param instanceElementBase  first element of each TLAS instance
      * @param params    ray counts and the sun
      * @return the exchange geometry, or an empty one on failure
      */
     [[nodiscard]] thermal::ExchangeGeometry Run(
-        VkAccelerationStructureKHR tlas, const Vector<thermal::ThermalElement>& elements,
+        gpu::RtSceneRef tlas, const Vector<thermal::ThermalElement>& elements,
         const Vector<u32>& instanceElementBase, const Params& params);
 
     /**
@@ -108,7 +113,7 @@ public:
      * @return K * elementCount floats, or empty on failure
      */
     [[nodiscard]] Vector<f32> RunSunVisibility(
-        VkAccelerationStructureKHR tlas, const Vector<thermal::ThermalElement>& elements,
+        gpu::RtSceneRef tlas, const Vector<thermal::ThermalElement>& elements,
         const Vector<u32>& instanceElementBase,
         std::span<const glm::vec3> directions, u32 sunRays = 8,
         f32 sunAngularRadius = 0.00465f);

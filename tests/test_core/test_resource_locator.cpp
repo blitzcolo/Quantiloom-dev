@@ -25,6 +25,11 @@ using quantiloom::core::ResolvedResources;
 
 constexpr const char* kDigest = "0123456789abcdef";
 
+// The layout this build resolves: shaders/spirv and raygen.spv on Vulkan,
+// shaders/metallib and raygen.metallib on Metal.
+const String kSubdir = quantiloom::core::CompiledShaderSubdir();
+const String kProbe = quantiloom::core::CompiledShaderProbe();
+
 class ResourceLocatorTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -44,11 +49,11 @@ protected:
     /// SHADERSET stamp, plus an assets directory.
     fs::path MakeRoot(const char* name, const String& stamp = kDigest) {
         const fs::path root = dir / name;
-        fs::create_directories(root / "shaders" / "spirv");
+        fs::create_directories(root / "shaders" / kSubdir);
         fs::create_directories(root / "assets");
-        std::ofstream(root / "shaders" / "spirv" / "raygen.spv", std::ios::binary)
-            << "spirv";
-        std::ofstream(root / "shaders" / "spirv" / "SHADERSET") << stamp << "\n";
+        std::ofstream(root / "shaders" / kSubdir / kProbe, std::ios::binary)
+            << kSubdir;
+        std::ofstream(root / "shaders" / kSubdir / "SHADERSET") << stamp << "\n";
         return root;
     }
 
@@ -76,7 +81,7 @@ TEST_F(ResourceLocatorTest, HostRootWinsOverEveryOtherCandidate) {
     ASSERT_TRUE(resolved.Found()) << resolved.error;
     EXPECT_EQ(resolved.origin, ResourceOrigin::Host);
     EXPECT_EQ(resolved.root, host);
-    EXPECT_EQ(resolved.shaderDir, host / "shaders" / "spirv");
+    EXPECT_EQ(resolved.shaderDir, host / "shaders" / kSubdir);
     EXPECT_EQ(resolved.assetDir, host / "assets");
 }
 
@@ -127,7 +132,7 @@ TEST_F(ResourceLocatorTest, StampMismatchNamesBothDigests) {
 
 TEST_F(ResourceLocatorTest, MissingStampIsRejected) {
     const fs::path root = MakeRoot("unstamped");
-    fs::remove(root / "shaders" / "spirv" / "SHADERSET");
+    fs::remove(root / "shaders" / kSubdir / "SHADERSET");
 
     auto candidates = Candidates();
     candidates.hostRoot = root;
@@ -141,7 +146,7 @@ TEST_F(ResourceLocatorTest, StaleLibraryRootDoesNotFallBackToTheWorkingDirectory
     const fs::path stale = MakeRoot("stale", "deadbeef");
     const fs::path devShaders = dir / "src" / "shaders";
     fs::create_directories(devShaders);
-    std::ofstream(devShaders / "raygen.spv", std::ios::binary) << "spirv";
+    std::ofstream(devShaders / kProbe, std::ios::binary) << kSubdir;
 
     auto candidates = Candidates();
     candidates.libraryRoots = {stale};
@@ -168,7 +173,7 @@ TEST_F(ResourceLocatorTest, FirstMatchingLibraryRootWins) {
 TEST_F(ResourceLocatorTest, DevelopmentFallbackWhenNoRootExists) {
     const fs::path devShaders = dir / "src" / "shaders";
     fs::create_directories(devShaders);
-    std::ofstream(devShaders / "raygen.spv", std::ios::binary) << "spirv";
+    std::ofstream(devShaders / kProbe, std::ios::binary) << kSubdir;
 
     auto candidates = Candidates();
     candidates.libraryRoots = {dir / "absent"};
@@ -180,7 +185,7 @@ TEST_F(ResourceLocatorTest, DevelopmentFallbackWhenNoRootExists) {
     EXPECT_TRUE(resolved.root.empty());
     EXPECT_EQ(resolved.shaderDir, devShaders);
     EXPECT_EQ(resolved.assetDir, fs::path("assets"));
-    EXPECT_EQ(resolved.ShaderPath("raygen.spv"), devShaders / "raygen.spv");
+    EXPECT_EQ(resolved.ShaderPath(kProbe), devShaders / kProbe);
 }
 
 TEST_F(ResourceLocatorTest, NothingFoundListsTheProbedRoots) {

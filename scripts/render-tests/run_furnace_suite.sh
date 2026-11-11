@@ -21,7 +21,7 @@
 #
 # 3 is not 1 on purpose. This repo already decided that a missing ray tracing
 # device makes a GPU check skip with a reason rather than fail (see
-# tests/support/VulkanTestDevice.hpp); a build machine without an RTX card
+# tests/support/GpuTestDevice.hpp); a build machine without an RTX card
 # should not be told its physics is broken when the truth is that nobody
 # looked.
 set -uo pipefail
@@ -84,7 +84,8 @@ while read -r band case <&3; do
     # straight into grep would test grep's status instead, and grep
     # succeeds precisely when it has found the word FAIL.
     printf '%-22s ' "${band}_${case}"
-    if report=$("$PY" scripts/render-tests/check_furnace.py "$out" "${band^^}"); then
+    # tr rather than ${band^^}: macOS ships bash 3.2, which has no case conversion.
+    if report=$("$PY" scripts/render-tests/check_furnace.py "$out" "$(printf '%s' "$band" | tr '[:lower:]' '[:upper:]')"); then
         echo "$report" | grep -E 'Rel error' | tr -d '\n'; echo '  PASS'
     else
         echo "$report" | grep -E 'Rel error|FAIL' | tr '\n' ' '; echo

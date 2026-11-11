@@ -1,4 +1,5 @@
 #include "postprocess/CameraPhysics.hpp"
+#include "core/BesselJ.hpp"
 #include "postprocess/CameraConfigIO.hpp"
 #include "core/ResultFail.hpp"
 
@@ -541,7 +542,7 @@ Result<f64, String> AiryIntensityNormalized(f64 radiusM, f64 wavelengthNm, f64 f
         return Fail<f64>("invalid Airy radius, wavelength or f-number");
     const f64 x = std::numbers::pi_v<f64> * radiusM / (wavelengthNm * 1e-9 * fNumber);
     if (x == 0.0) return 1.0;
-    const f64 ratio = 2.0 * std::cyl_bessel_j(1.0, x) / x;
+    const f64 ratio = 2.0 * core::CylBesselJ(1, x) / x;
     return ratio * ratio;
 }
 

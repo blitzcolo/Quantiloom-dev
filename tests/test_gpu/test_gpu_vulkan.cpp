@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
 
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
 
 #include "gpu/Device.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
+#include "gpu/vulkan/VulkanResources.hpp"
 
 #include <array>
 #include <cstring>
@@ -11,11 +11,12 @@
 
 using namespace quantiloom;
 using namespace quantiloom::gpu;
-using quantiloom::testing::VulkanDeviceTest;
+using quantiloom::testing::GpuDeviceTest;
 
 namespace {
 
-class GpuVulkanTest : public VulkanDeviceTest {};
+class GpuBackendTest : public GpuDeviceTest {};
+QL_INSTANTIATE_GPU_SUITE(GpuBackendTest);
 
 std::unique_ptr<gpu::Buffer> MakeBuffer(gpu::Device& device, u64 size, BufferUsage usage, MemoryClass memory) {
     auto created = device.CreateBuffer(BufferDesc{size, usage, memory, 0});
@@ -25,15 +26,15 @@ std::unique_ptr<gpu::Buffer> MakeBuffer(gpu::Device& device, u64 size, BufferUsa
 
 }  // namespace
 
-TEST_F(GpuVulkanTest, InfoReportsTheVulkanDevice) {
-    const DeviceInfo& info = GpuDevice().Info();
-    EXPECT_EQ(info.backend, Backend::Vulkan);
+TEST_P(GpuBackendTest, InfoReportsTheVulkanDevice) {
+    const DeviceInfo& info = Gpu().Info();
+    EXPECT_EQ(info.backend, Backend());
     EXPECT_FALSE(info.name.empty());
     EXPECT_GT(info.maxStorageBufferRange, 0u);
 }
 
-TEST_F(GpuVulkanTest, CopyBufferRoundTripsThroughReadback) {
-    auto& device = GpuDevice();
+TEST_P(GpuBackendTest, CopyBufferRoundTripsThroughReadback) {
+    auto& device = Gpu();
     std::array<u32, 64> data{};
     for (u32 i = 0; i < data.size(); ++i) data[i] = i * 2654435761u;
 
@@ -55,8 +56,8 @@ TEST_F(GpuVulkanTest, CopyBufferRoundTripsThroughReadback) {
     dst->Unmap();
 }
 
-TEST_F(GpuVulkanTest, FillAndUpdateWriteTheBuffer) {
-    auto& device = GpuDevice();
+TEST_P(GpuBackendTest, FillAndUpdateWriteTheBuffer) {
+    auto& device = Gpu();
     auto dst = MakeBuffer(device, 64, BufferUsage::TransferDst, MemoryClass::Readback);
     ASSERT_NE(dst, nullptr);
     const std::array<u32, 4> patch{1u, 2u, 3u, 4u};
@@ -77,15 +78,15 @@ TEST_F(GpuVulkanTest, FillAndUpdateWriteTheBuffer) {
     dst->Unmap();
 }
 
-TEST_F(GpuVulkanTest, NestedExecuteImmediateDoesNotDeadlock) {
-    auto& device = GpuDevice();
+TEST_P(GpuBackendTest, NestedExecuteImmediateDoesNotDeadlock) {
+    auto& device = Gpu();
     bool inner = false;
     device.ExecuteImmediate([&](CommandList&) { device.ExecuteImmediate([&](CommandList&) { inner = true; }); });
     EXPECT_TRUE(inner);
 }
 
-TEST_F(GpuVulkanTest, TextureRefCarriesTheDescriptorIdentity) {
-    auto& device = GpuDevice();
+TEST_P(GpuBackendTest, TextureRefCarriesTheDescriptorIdentity) {
+    auto& device = Gpu();
     TextureDesc desc;
     desc.width = 16;
     desc.height = 8;
@@ -98,18 +99,20 @@ TEST_F(GpuVulkanTest, TextureRefCarriesTheDescriptorIdentity) {
     EXPECT_EQ(ref.width, 16u);
     EXPECT_EQ(ref.layout, TextureLayoutPolicy::General);
     EXPECT_EQ(ref.Identity(), ref.view);
-    EXPECT_EQ(vulkan::Ref(vulkan::AsGpuImage(*created.value())), ref);
+    if (Backend() == gpu::Backend::Vulkan) {
+        EXPECT_EQ(vulkan::Ref(vulkan::AsGpuImage(*created.value())), ref);
+    }
 }
 
-TEST_F(GpuVulkanTest, RepeatedBindingSlotsAreRejected) {
+TEST_P(GpuBackendTest, RepeatedBindingSlotsAreRejected) {
     const std::array<BindingSlot, 2> slots{BindingSlot{3, BindingKind::ReadOnlyBuffer, 1, false},
                                            BindingSlot{3, BindingKind::ReadWriteBuffer, 1, false}};
-    const auto layout = GpuDevice().CreateBindingLayout(BindingLayoutDesc{0, slots});
+    const auto layout = Gpu().CreateBindingLayout(BindingLayoutDesc{0, slots});
     EXPECT_FALSE(layout.has_value());
 }
 
-TEST_F(GpuVulkanTest, AKernelBindsAndWritesItsGroup) {
-    auto& device = GpuDevice();
+TEST_P(GpuBackendTest, AKernelBindsAndWritesItsGroup) {
+    auto& device = Gpu();
     const StringView names[] = {"spectral_reconstruct"};
     const auto code = device.Shaders().Load(names);
     if (!code.has_value()) GTEST_SKIP() << code.error();

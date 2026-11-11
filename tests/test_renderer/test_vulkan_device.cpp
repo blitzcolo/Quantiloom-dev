@@ -13,9 +13,9 @@
 
 #include "support/VulkanTestDevice.hpp"
 
-#include "renderer/CommandHelper.hpp"
-#include "renderer/GpuBuffer.hpp"
-#include "renderer/VulkanContext.hpp"
+#include "gpu/vulkan/CommandHelper.hpp"
+#include "gpu/vulkan/GpuBuffer.hpp"
+#include "gpu/vulkan/VulkanContext.hpp"
 
 #include <cstring>
 #include <numeric>

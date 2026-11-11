@@ -14,22 +14,21 @@
 #include <gtest/gtest.h>
 
 #include "support/FacadeScene.hpp"
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
+#include "support/GpuTestHelpers.hpp"
 
-#include "gpu/vulkan/VulkanBridge.hpp"
+#include "gpu/Device.hpp"
 
 #include "core/Sha256.hpp"
 #include "core/SpectralCube.hpp"
 #include "hs_core/GpuSpectralReconstructor.hpp"
 #include "postprocess/CameraPhysics.hpp"
-#include "renderer/CommandHelper.hpp"
 #include "renderer/ExternalRenderContext.hpp"
-#include "renderer/GpuBuffer.hpp"
+#include "renderer/GpuAlloc.hpp"
 #include "renderer/GpuCameraPipeline.hpp"
 #include "renderer/GpuDisplayRange.hpp"
-#include "renderer/GpuImage.hpp"
 #include "renderer/GpuThermalStepper.hpp"
-#include "renderer/VulkanContext.hpp"
+#include "renderer/TextureTransitions.hpp"
 #include "thermal/ThermalSolver.hpp"
 
 #include <array>
@@ -44,7 +43,7 @@
 using namespace quantiloom;
 using namespace quantiloom::camera;
 using namespace quantiloom::rendercore;
-using quantiloom::testing::VulkanDeviceTest;
+using quantiloom::testing::GpuDeviceTest;
 
 namespace {
 
@@ -99,10 +98,10 @@ std::string HashOf(const std::vector<T>& values) {
     return sha.FinalizeHex();
 }
 
-class ComputeMigrationAB : public VulkanDeviceTest {
+class ComputeMigrationAB : public GpuDeviceTest {
 protected:
     void SetUp() override {
-        VulkanDeviceTest::SetUp();
+        GpuDeviceTest::SetUp();
         if (IsSkipped()) return;
         mode_ = ReadMode();
         if (mode_.kind == AbMode::Kind::Off) {
@@ -111,45 +110,21 @@ protected:
     }
     AbMode mode_;
 };
+QL_INSTANTIATE_GPU_SUITE(ComputeMigrationAB);
 
-std::unique_ptr<GpuImage> UploadRgba32f(VulkanContext& context, u32 width, u32 height,
-                                        const std::vector<f32>& rgba) {
-    auto image = std::make_unique<GpuImage>(
-        context.GetAllocator(), context.GetDevice(), width, height, VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY);
-    GpuBuffer staging(context.GetAllocator(), rgba.size() * sizeof(f32), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                      VMA_MEMORY_USAGE_CPU_TO_GPU);
-    staging.Upload(rgba.data(), rgba.size() * sizeof(f32));
-    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        CommandHelper::TransitionImageLayout(cmd, image->GetImage(), VK_FORMAT_R32G32B32A32_SFLOAT,
-                                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        VkBufferImageCopy copy{};
-        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy.imageSubresource.layerCount = 1;
-        copy.imageExtent = {width, height, 1};
-        vkCmdCopyBufferToImage(cmd, staging.GetHandle(), image->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                               &copy);
-        VkImageMemoryBarrier ready{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-        ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        ready.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        ready.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        ready.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.image = image->GetImage();
-        ready.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        ready.subresourceRange.levelCount = 1;
-        ready.subresourceRange.layerCount = 1;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
-                             0, nullptr, 1, &ready);
-    });
+std::unique_ptr<gpu::Texture> UploadRgba32f(gpu::Device& device, u32 width, u32 height,
+                                            const std::vector<f32>& rgba) {
+    auto image = CreateTextureOrThrow(
+        device, gpu::TextureDesc{.width = width, .height = height, .format = gpu::Format::RGBA32Float,
+                                 .usage = gpu::TextureUsage::Storage | gpu::TextureUsage::TransferDst |
+                                          gpu::TextureUsage::TransferSrc});
+    quantiloom::testing::UploadTexture(device, image->Ref(), rgba.data(), rgba.size() * sizeof(f32));
     return image;
 }
 
 }  // namespace
 
-TEST_F(ComputeMigrationAB, SpectralReconstruct) {
+TEST_P(ComputeMigrationAB, SpectralReconstruct) {
     constexpr u32 kWidth = 37;
     constexpr u32 kHeight = 23;
     const std::vector<f32> sourceWavelengths{400.f, 430.f, 490.f, 560.f, 600.f, 680.f, 750.f, 820.f, 900.f};
@@ -164,7 +139,7 @@ TEST_F(ComputeMigrationAB, SpectralReconstruct) {
         targets[i] = 400.0f + 500.0f * static_cast<f32>(i) / static_cast<f32>(targets.size() - 1);
     }
 
-    GpuSpectralReconstructor reconstructor(GpuDevice());
+    GpuSpectralReconstructor reconstructor(Gpu());
     if (reconstructor.Initialize() != GpuReconstructorStatus::Success) {
         GTEST_SKIP() << "spectral_reconstruct shader unavailable";
     }
@@ -182,11 +157,11 @@ TEST_F(ComputeMigrationAB, SpectralReconstruct) {
     }
 }
 
-TEST_F(ComputeMigrationAB, ThermalStep) {
+TEST_P(ComputeMigrationAB, ThermalStep) {
     using namespace quantiloom::thermal;
     using quantiloom::rendercore::GpuThermalStepper;
 
-    GpuThermalStepper stepper(GpuDevice());
+    GpuThermalStepper stepper(Gpu());
     if (!stepper.IsValid()) GTEST_SKIP() << "thermal_step.spv unavailable";
 
     Vector<ThermalElement> elements(2);
@@ -254,24 +229,24 @@ TEST_F(ComputeMigrationAB, ThermalStep) {
     Check(mode_, "ThermalStep.longwaveIrradiance_W_m2", HashOf(state.longwaveIrradiance_W_m2));
 }
 
-TEST_F(ComputeMigrationAB, DisplayRange) {
+TEST_P(ComputeMigrationAB, DisplayRange) {
     constexpr u32 kWidth = 257;
     constexpr u32 kHeight = 131;
     std::vector<f32> rgba(static_cast<usize>(kWidth) * kHeight * 4);
     std::mt19937 rng(7);
     std::uniform_real_distribution<f32> dist(-2.0f, 40.0f);
     for (f32& v : rgba) v = dist(rng);
-    auto image = UploadRgba32f(Device(), kWidth, kHeight, rgba);
-    ASSERT_TRUE(image->IsValid());
+    auto image = UploadRgba32f(Gpu(), kWidth, kHeight, rgba);
+    ASSERT_TRUE(image->Ref().IsValid());
 
-    auto created = rendercore::GpuDisplayRange::Create(GpuDevice());
+    auto created = rendercore::GpuDisplayRange::Create(Gpu());
     ASSERT_TRUE(created.has_value()) << created.error();
     auto gpu = std::move(created.value());
 
     const std::pair<f32, f32> percentiles[] = {{1.0f, 99.0f}, {0.0f, 100.0f}, {5.0f, 95.0f}};
     std::vector<f32> windows;
     for (const auto& [low, high] : percentiles) {
-        const auto range = gpu->Compute(gpu::vulkan::Ref(*image), kWidth, kHeight, low, high);
+        const auto range = gpu->Compute(image->Ref(), kWidth, kHeight, low, high);
         ASSERT_TRUE(range.has_value()) << range.error();
         windows.push_back(range.value().min);
         windows.push_back(range.value().max);
@@ -362,138 +337,54 @@ void FillBayerMeasurement(u32 width, u32 height, std::vector<f32>& rgba, f32 bas
     }
 }
 
-std::unique_ptr<GpuImage> UploadMeasurement(VulkanContext& context, u32 width, u32 height,
-                                            const std::vector<f32>& rgba) {
-    const VkFormat format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    auto image = std::make_unique<GpuImage>(
-        context.GetAllocator(), context.GetDevice(), width, height, format,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-            VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY);
-    if (!image->IsValid() || rgba.size() != static_cast<size_t>(width) * height * 4) return {};
-    const VkDeviceSize bytes = rgba.size() * sizeof(f32);
-    GpuBuffer staging(context.GetAllocator(), bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    if (!staging.IsValid()) return {};
-    staging.Upload(rgba.data(), bytes);
-    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        CommandHelper::TransitionImageLayout(cmd, image->GetImage(), format, VK_IMAGE_LAYOUT_UNDEFINED,
-                                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        VkBufferImageCopy region{};
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent = {width, height, 1};
-        vkCmdCopyBufferToImage(cmd, staging.GetHandle(), image->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                               &region);
-        VkImageMemoryBarrier ready{};
-        ready.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        ready.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        ready.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        ready.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.image = image->GetImage();
-        ready.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        ready.subresourceRange.levelCount = 1;
-        ready.subresourceRange.layerCount = 1;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
-                             0, nullptr, 1, &ready);
-    });
+std::unique_ptr<gpu::Texture> UploadMeasurement(gpu::Device& device, u32 width, u32 height,
+                                                const std::vector<f32>& rgba) {
+    auto image = CreateTextureOrThrow(
+        device, gpu::TextureDesc{.width = width, .height = height, .format = gpu::Format::RGBA32Float,
+                                 .usage = gpu::TextureUsage::Storage | gpu::TextureUsage::Sampled |
+                                          gpu::TextureUsage::TransferDst | gpu::TextureUsage::TransferSrc});
+    if (rgba.size() != static_cast<size_t>(width) * height * 4) return {};
+    quantiloom::testing::UploadTexture(device, image->Ref(), rgba.data(), rgba.size() * sizeof(f32));
     return image;
 }
 
-std::unique_ptr<GpuImage> UploadStrataImage(VulkanContext& context, u32 width, u32 height, u32 layers,
-                                            VkFormat format, const std::vector<f32>& texelData,
-                                            u32 componentsPerTexel) {
-    auto image = std::make_unique<GpuImage>(
-        context.GetAllocator(), context.GetDevice(), width, height, format,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY, 1u, layers, 0, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
-    if (!image->IsValid() ||
-        texelData.size() != static_cast<size_t>(width) * height * layers * componentsPerTexel) {
+std::unique_ptr<gpu::Texture> UploadStrataImage(gpu::Device& device, u32 width, u32 height, u32 layers,
+                                                gpu::Format format, const std::vector<f32>& texelData,
+                                                u32 componentsPerTexel) {
+    auto image = CreateTextureOrThrow(
+        device, gpu::TextureDesc{.width = width, .height = height, .layers = layers, .format = format,
+                                 .usage = gpu::TextureUsage::Storage | gpu::TextureUsage::TransferDst |
+                                          gpu::TextureUsage::TransferSrc,
+                                 .dimension = gpu::TextureDimension::Tex2DArray});
+    if (texelData.size() != static_cast<size_t>(width) * height * layers * componentsPerTexel) {
         return {};
     }
-    const VkDeviceSize bytes = texelData.size() * sizeof(f32);
-    GpuBuffer staging(context.GetAllocator(), bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    if (!staging.IsValid()) return {};
-    staging.Upload(texelData.data(), bytes);
-    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        CommandHelper::TransitionImageLayout(cmd, image->GetImage(), format, VK_IMAGE_LAYOUT_UNDEFINED,
-                                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, layers);
-        for (u32 layer = 0; layer < layers; ++layer) {
-            VkBufferImageCopy region{};
-            region.bufferOffset = static_cast<VkDeviceSize>(layer) * width * height * componentsPerTexel * sizeof(f32);
-            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.mipLevel = 0;
-            region.imageSubresource.baseArrayLayer = layer;
-            region.imageSubresource.layerCount = 1;
-            region.imageExtent = {width, height, 1};
-            vkCmdCopyBufferToImage(cmd, staging.GetHandle(), image->GetImage(),
-                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-        }
-        VkImageMemoryBarrier ready{};
-        ready.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        ready.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        ready.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        ready.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ready.image = image->GetImage();
-        ready.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        ready.subresourceRange.levelCount = 1;
-        ready.subresourceRange.layerCount = layers;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
-                             0, nullptr, 1, &ready);
-    });
+    quantiloom::testing::UploadTexture(device, image->Ref(), texelData.data(), texelData.size() * sizeof(f32),
+                                       quantiloom::testing::UploadHandoff::ComputeReadWrite);
     return image;
 }
 
-Result<void, String> RecordCamera(VulkanContext& context, GpuCameraPipeline& pipeline, const GpuImage& measurement,
-                                  u64 acquisitionIndex, f64 timeSeconds) {
+Result<void, String> RecordCamera(gpu::Device& device, GpuCameraPipeline& pipeline,
+                                  const gpu::Texture& measurement, u64 acquisitionIndex, f64 timeSeconds) {
     Result<void, String> status = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
-        status = pipeline.RecordMeasurement(list, gpu::vulkan::Ref(measurement),
+    device.ExecuteImmediate([&](gpu::CommandList& list) {
+        status = pipeline.RecordMeasurement(list, measurement.Ref(),
                                             acquisitionIndex, timeSeconds);
     });
     return status;
 }
 
-std::vector<f32> ReadFloat(VulkanContext& context, gpu::TextureRef image, u32 width, u32 height) {
+std::vector<f32> ReadFloat(gpu::Device& device, gpu::TextureRef image, u32 width, u32 height) {
     if (!image.IsValid()) return {};
-    return CommandHelper::ReadbackImage(context, gpu::vulkan::NativeImage(image),
-                                        gpu::vulkan::ToVk(image.format), width, height);
+    return rendercore::ReadbackTexture(device, image, width, height);
 }
 
-std::vector<u32> ReadUint(VulkanContext& context, gpu::TextureRef image, u32 width, u32 height) {
+std::vector<u32> ReadUint(gpu::Device& device, gpu::TextureRef image, u32 width, u32 height) {
     if (!image.IsValid() || image.format != gpu::Format::RGBA32Uint) return {};
-    const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 4 * sizeof(u32);
-    GpuBuffer staging(context.GetAllocator(), bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
-    if (!staging.IsValid()) return {};
-    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        CommandHelper::TransitionImageLayout(cmd, gpu::vulkan::NativeImage(image),
-                                             gpu::vulkan::ToVk(image.format), VK_IMAGE_LAYOUT_GENERAL,
-                                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        VkBufferImageCopy region{};
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent = {width, height, 1};
-        vkCmdCopyImageToBuffer(cmd, gpu::vulkan::NativeImage(image), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                               staging.GetHandle(), 1, &region);
-        CommandHelper::TransitionImageLayout(cmd, gpu::vulkan::NativeImage(image),
-                                             gpu::vulkan::ToVk(image.format),
-                                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
-    });
-    std::vector<u32> out(static_cast<size_t>(width) * height * 4);
-    const void* data = staging.Map();
-    if (!data) return {};
-    std::memcpy(out.data(), data, bytes);
-    staging.Unmap();
-    return out;
+    return quantiloom::testing::ReadTextureWords(device, image, width, height);
 }
 
-void HashProducts(const AbMode& mode, VulkanContext& device, GpuCameraPipeline& pipeline, u32 width, u32 height,
+void HashProducts(const AbMode& mode, gpu::Device& device, GpuCameraPipeline& pipeline, u32 width, u32 height,
                   const std::string& prefix) {
     const auto outputs = pipeline.GetOutputs();
     const std::pair<const char*, gpu::TextureRef> products[] = {
@@ -526,17 +417,15 @@ void HashStats(const AbMode& mode, GpuCameraPipeline& pipeline, const std::strin
     Check(mode, prefix + ".stats.histogram", HashOf(histogram));
 }
 
-void RecordReprocess(VulkanContext& device, GpuCameraPipeline& pipeline, const CameraConfig& readoutConfig,
+void RecordReprocess(gpu::Device& device, GpuCameraPipeline& pipeline, const CameraConfig& readoutConfig,
                      const CameraConfig& displayConfig) {
     Result<void, String> readout = Result<void, String>::Ok();
     Result<void, String> display = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(device, [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    device.ExecuteImmediate([&](gpu::CommandList& list) {
         readout = pipeline.RecordReadoutReprocess(list, readoutConfig);
     });
     ASSERT_TRUE(readout.has_value()) << readout.error();
-    CommandHelper::ExecuteImmediate(device, [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    device.ExecuteImmediate([&](gpu::CommandList& list) {
         display = pipeline.RecordDisplayReprocess(list, displayConfig);
     });
     ASSERT_TRUE(display.has_value()) << display.error();
@@ -544,7 +433,7 @@ void RecordReprocess(VulkanContext& device, GpuCameraPipeline& pipeline, const C
 
 }  // namespace
 
-TEST_F(ComputeMigrationAB, CameraPhoton) {
+TEST_P(ComputeMigrationAB, CameraPhoton) {
     constexpr u32 kSize = 16;
     auto config = CameraConfigFor(kSize, kSize);
     config.quality.noiseFree = false;
@@ -553,33 +442,32 @@ TEST_F(ComputeMigrationAB, CameraPhoton) {
     std::mt19937 rng(11);
     std::uniform_real_distribution<f32> dist(0.0f, 4000.0f);
     for (u32 i = 0; i < kSize * kSize; ++i) rgba[i * 4] = dist(rng);
-    auto input = UploadMeasurement(Device(), kSize, kSize, rgba);
+    auto input = UploadMeasurement(Gpu(), kSize, kSize, rgba);
     ASSERT_NE(input, nullptr);
 
-    auto created = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
+    auto created = GpuCameraPipeline::Create(Gpu(), kSize, kSize);
     ASSERT_TRUE(created.has_value()) << created.error();
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
     for (u64 i = 0; i < 3; ++i) {
-        ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, i, 0.1 * static_cast<f64>(i)).has_value());
+        ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, i, 0.1 * static_cast<f64>(i)).has_value());
     }
-    HashProducts(mode_, Device(), *pipeline, kSize, kSize, "CameraPhoton.acquisition");
+    HashProducts(mode_, Gpu(), *pipeline, kSize, kSize, "CameraPhoton.acquisition");
     HashStats(mode_, *pipeline, "CameraPhoton");
 
     Result<void, String> randomStatus = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
         randomStatus = pipeline->RecordRandomVectors(list, 1234u, 2, NoiseClass::PhotonShot, 0);
     });
     ASSERT_TRUE(randomStatus.has_value()) << randomStatus.error();
     Check(mode_, "CameraPhoton.randomVectors",
-          HashOf(ReadUint(Device(), pipeline->GetRandomVectors(), kSize, kSize)));
+          HashOf(ReadUint(Gpu(), pipeline->GetRandomVectors(), kSize, kSize)));
 
-    RecordReprocess(Device(), *pipeline, config, config);
-    HashProducts(mode_, Device(), *pipeline, kSize, kSize, "CameraPhoton.reprocess");
+    RecordReprocess(Gpu(), *pipeline, config, config);
+    HashProducts(mode_, Gpu(), *pipeline, kSize, kSize, "CameraPhoton.reprocess");
 }
 
-TEST_F(ComputeMigrationAB, CameraBayerHsv) {
+TEST_P(ComputeMigrationAB, CameraBayerHsv) {
     constexpr u32 kSize = 16;
     auto config = BayerColorConfigFor(kSize, kSize);
     config.quality.noiseFree = false;
@@ -590,26 +478,26 @@ TEST_F(ComputeMigrationAB, CameraBayerHsv) {
 
     std::vector<f32> rgba;
     FillBayerMeasurement(kSize, kSize, rgba);
-    auto input = UploadMeasurement(Device(), kSize, kSize, rgba);
+    auto input = UploadMeasurement(Gpu(), kSize, kSize, rgba);
     ASSERT_NE(input, nullptr);
 
-    auto created = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
+    auto created = GpuCameraPipeline::Create(Gpu(), kSize, kSize);
     ASSERT_TRUE(created.has_value()) << created.error();
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
     for (u64 i = 0; i < 3; ++i) {
-        ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, i, 0.1 * static_cast<f64>(i)).has_value());
+        ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, i, 0.1 * static_cast<f64>(i)).has_value());
     }
-    HashProducts(mode_, Device(), *pipeline, kSize, kSize, "CameraBayerHsv.acquisition");
+    HashProducts(mode_, Gpu(), *pipeline, kSize, kSize, "CameraBayerHsv.acquisition");
     HashStats(mode_, *pipeline, "CameraBayerHsv");
 
     auto edited = config;
     edited.isp.hsv.hueOffsetDegrees = 70.0;
-    RecordReprocess(Device(), *pipeline, config, edited);
-    HashProducts(mode_, Device(), *pipeline, kSize, kSize, "CameraBayerHsv.reprocess");
+    RecordReprocess(Gpu(), *pipeline, config, edited);
+    HashProducts(mode_, Gpu(), *pipeline, kSize, kSize, "CameraBayerHsv.reprocess");
 }
 
-TEST_F(ComputeMigrationAB, CameraThermalCheckpoint) {
+TEST_P(ComputeMigrationAB, CameraThermalCheckpoint) {
     constexpr u32 kSize = 16;
     auto config = ThermalConfigFor(kSize, kSize);
     config.quality.noiseFree = false;
@@ -617,52 +505,50 @@ TEST_F(ComputeMigrationAB, CameraThermalCheckpoint) {
     config.thermal.driftDnPerSecond = 7.0;
     std::vector<f32> rgba(static_cast<size_t>(kSize) * kSize * 4, 0.0f);
     for (u32 pixel = 0; pixel < kSize * kSize; ++pixel) rgba[pixel * 4] = 2.5e-11f;
-    auto input = UploadMeasurement(Device(), kSize, kSize, rgba);
+    auto input = UploadMeasurement(Gpu(), kSize, kSize, rgba);
     ASSERT_NE(input, nullptr);
 
-    auto created = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
+    auto created = GpuCameraPipeline::Create(Gpu(), kSize, kSize);
     ASSERT_TRUE(created.has_value()) << created.error();
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
 
     const auto hashPair = [&](const std::string& label) {
         Check(mode_, "CameraThermalCheckpoint." + label + ".rawDn",
-              HashOf(ReadFloat(Device(), pipeline->GetOutputs().rawDn, kSize, kSize)));
+              HashOf(ReadFloat(Gpu(), pipeline->GetOutputs().rawDn, kSize, kSize)));
         Check(mode_, "CameraThermalCheckpoint." + label + ".display",
-              HashOf(ReadFloat(Device(), pipeline->GetOutputs().display, kSize, kSize)));
+              HashOf(ReadFloat(Gpu(), pipeline->GetOutputs().display, kSize, kSize)));
     };
 
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 0, 0.0).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 1, 0.1).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 0, 0.0).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 1, 0.1).has_value());
     Result<GpuCameraPipeline::GpuCheckpoint, String> checkpoint =
         Result<GpuCameraPipeline::GpuCheckpoint, String>::Err("checkpoint was not recorded");
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
         checkpoint = pipeline->RecordStateCheckpoint(list);
     });
     ASSERT_TRUE(checkpoint.has_value()) << checkpoint.error();
 
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 2, 0.2).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 3, 0.3).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 2, 0.2).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 3, 0.3).has_value());
     hashPair("continuous");
 
     Result<void, String> restored = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        auto list = gpu::vulkan::Wrap(cmd);
+    Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
         restored = pipeline->RestoreStateCheckpoint(checkpoint.value(), list);
     });
     ASSERT_TRUE(restored.has_value()) << restored.error();
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 2, 0.2).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 2, 0.2).has_value());
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 3, 0.3).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 2, 0.2).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 2, 0.2).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 3, 0.3).has_value());
     hashPair("replayed");
 
-    ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 4, 0.4).has_value());
+    ASSERT_TRUE(RecordCamera(Gpu(), *pipeline, *input, 4, 0.4).has_value());
     hashPair("after");
     HashStats(mode_, *pipeline, "CameraThermalCheckpoint");
 }
 
-TEST_F(ComputeMigrationAB, CameraStratified) {
+TEST_P(ComputeMigrationAB, CameraStratified) {
     constexpr u32 kWidth = 32;
     constexpr u32 kHeight = 8;
     constexpr u32 kLayers = 8;
@@ -686,8 +572,8 @@ TEST_F(ComputeMigrationAB, CameraStratified) {
             }
         }
     }
-    auto strataRate = UploadStrataImage(Device(), kWidth, kHeight, kLayers, VK_FORMAT_R32G32B32A32_SFLOAT, rate, 4);
-    auto strataDepth = UploadStrataImage(Device(), kWidth, kHeight, kLayers, VK_FORMAT_R32_SFLOAT, depth, 1);
+    auto strataRate = UploadStrataImage(Gpu(), kWidth, kHeight, kLayers, gpu::Format::RGBA32Float, rate, 4);
+    auto strataDepth = UploadStrataImage(Gpu(), kWidth, kHeight, kLayers, gpu::Format::R32Float, depth, 1);
     ASSERT_NE(strataRate, nullptr);
     ASSERT_NE(strataDepth, nullptr);
 
@@ -701,15 +587,15 @@ TEST_F(ComputeMigrationAB, CameraStratified) {
         frames[k].params = {0.5f, 4.0f, 0.5f + 0.01f * static_cast<f32>(k), 0.0f};
     }
 
-    auto created = GpuCameraPipeline::Create(GpuDevice(), kWidth, kHeight);
+    auto created = GpuCameraPipeline::Create(Gpu(), kWidth, kHeight);
     ASSERT_TRUE(created.has_value()) << created.error();
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
 
     for (u64 acquisition = 0; acquisition < 2; ++acquisition) {
         DynamicExposureInput dynamic;
-        dynamic.strataRate = gpu::vulkan::Ref(*strataRate);
-        dynamic.strataDepth = gpu::vulkan::Ref(*strataDepth);
+        dynamic.strataRate = strataRate->Ref();
+        dynamic.strataDepth = strataDepth->Ref();
         dynamic.layerCameras = frames.data();
         dynamic.strataCount = count;
         dynamic.strataLayers = kLayers;
@@ -717,14 +603,13 @@ TEST_F(ComputeMigrationAB, CameraStratified) {
         dynamic.exposureSeconds = 0.125;
         dynamic.rowDelaySeconds = acquisition == 0 ? 0.0 : 0.0005;
         Result<void, String> status = Result<void, String>::Ok();
-        CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-            auto list = gpu::vulkan::Wrap(cmd);
-            status = pipeline->RecordMeasurement(list, gpu::vulkan::Ref(*strataRate),
+        Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
+            status = pipeline->RecordMeasurement(list, strataRate->Ref(),
                                                  acquisition, 0.5, {}, dynamic);
         });
         ASSERT_TRUE(status.has_value()) << status.error();
     }
-    HashProducts(mode_, Device(), *pipeline, kWidth, kHeight, "CameraStratified");
+    HashProducts(mode_, Gpu(), *pipeline, kWidth, kHeight, "CameraStratified");
     HashStats(mode_, *pipeline, "CameraStratified");
     const auto counters = pipeline->ReadDynamicCounters();
     ASSERT_TRUE(counters.has_value()) << counters.error();
@@ -732,9 +617,9 @@ TEST_F(ComputeMigrationAB, CameraStratified) {
           HashOf(std::vector<u32>(counters.value().begin(), counters.value().end())));
 }
 
-TEST_F(ComputeMigrationAB, ClaheFacade) {
+TEST_P(ComputeMigrationAB, ClaheFacade) {
     if (!quantiloom::testing::FacadeScene::HasAssets()) GTEST_SKIP() << "cornell_box.gltf not in assets";
-    quantiloom::testing::FacadeScene scene(Device());
+    quantiloom::testing::FacadeScene scene(Gpu());
     ASSERT_TRUE(scene.Ready()) << scene.Error();
     ASSERT_TRUE(scene.ApplyScene()) << scene.Error();
 

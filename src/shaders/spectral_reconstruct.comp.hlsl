@@ -32,17 +32,10 @@
 // Bindings
 // ============================================================================
 
-// Push constants for reconstruction parameters
-struct ReconstructPush {
-    uint width;             // Image width
-    uint height;            // Image height
-    uint srcBands;          // Number of source (sparse) bands
-    uint dstBands;          // Number of destination (full) bands
-    uint interpolationMode; // 0=Linear, 1=CatmullRom, 2=Akima
-    uint _pad0;
-    uint _pad1;
-    uint _pad2;
-};
+// Push constants for reconstruction parameters, shared with
+// hs_core/GpuSpectralReconstructor.cpp: ql_shared_compute.hlsli.
+#define QL_SHARED_WANT_ReconstructPush
+#include "ql_shared_compute.hlsli"
 QL_PUSH_CONSTANTS(ReconstructPush, params);
 
 // Source sparse cube data (BSQ layout: band0_all_pixels, band1_all_pixels, ...)

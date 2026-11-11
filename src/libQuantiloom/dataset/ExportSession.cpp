@@ -506,7 +506,14 @@ ExportSession::Create(const String& outputPath, const Config& replayConfig,
     try {
         auto session = std::unique_ptr<ExportSession>(new ExportSession);
         auto& impl = *session->m_impl;
-        const fs::path output = fs::absolute(fs::path(outputPath)).lexically_normal();
+        fs::path output = fs::absolute(fs::path(outputPath)).lexically_normal();
+#if defined(__APPLE__)
+        // macOS keeps /var, /tmp and /etc behind links into /private, so every
+        // temporary directory crosses one. The tree refuses to follow a link it
+        // walks through (SecureExportTree.hpp); the ancestry that already exists
+        // is resolved once, here, and the tree then pins what it resolved to.
+        output = fs::weakly_canonical(output.parent_path()) / output.filename();
+#endif
         if (!Basename(output.filename().string()) || output.stem().empty())
             throw std::runtime_error("invalid export basename");
         impl.directory = output.parent_path().lexically_normal();

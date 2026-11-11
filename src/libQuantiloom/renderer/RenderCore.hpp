@@ -40,22 +40,28 @@
 #include "core/Config.hpp"
 #include "core/Image.hpp"
 #include "core/Types.hpp"
+#include "gpu/Resources.hpp"
 #include "renderer/AccelerationStructure.hpp"
 #include "renderer/BRDFLutGenerator.hpp"
-#include "renderer/GpuBuffer.hpp"
 #include "renderer/MaterialGpuData.hpp"
 #include "scene/Scene.hpp"
-
-#include <vulkan/vulkan.h>
 
 #include <memory>
 #include <vector>
 
+// InstanceGeometryInfo and EmissiveTriangleGPU, defined once for common.hlsli and
+// the host. By a path relative to this file, as RtBindings.hpp includes its
+// manifest.
+#include "../../shaders/ql_shared_scene.hlsli"
+
 namespace quantiloom {
-class GpuImage;
 class RayTracingPipeline;
 class TextureManager;
-class VulkanContext;
+namespace gpu {
+class CommandList;
+class Device;
+class PipelineCache;
+}
 }
 
 namespace quantiloom::rendercore {
@@ -176,7 +182,7 @@ public:
     /**
      * @brief Load or generate the LUT, upload it, and create its sampler
      *
-     * @param ctx       Device to allocate on
+     * @param device    Device to allocate on
      * @param cachePath Binary cache, read when present and written when not.
      *        Empty means the default: the LUT shipped with the SDK
      *        (`<root>/assets/luts/brdf_lut_512_ggx.bin`) when it is readable,
@@ -188,19 +194,20 @@ public:
      *                  uploaded into a mismatched image
      * @return An invalid BrdfLut if the sampler could not be created
      */
-    static BrdfLut Create(VulkanContext& ctx,
+    static BrdfLut Create(gpu::Device& device,
                           const String& cachePath = {},
                           const BRDFLutGenerator::Config& config = {});
 
-    [[nodiscard]] bool IsValid() const { return m_sampler != VK_NULL_HANDLE; }
-    [[nodiscard]] VkImageView View() const;
-    [[nodiscard]] VkSampler Sampler() const { return m_sampler; }
+    [[nodiscard]] bool IsValid() const { return m_sampler != nullptr; }
+    /// The sampled LUT (shader-read layout); empty when invalid.
+    [[nodiscard]] gpu::TextureRef View() const;
+    [[nodiscard]] gpu::SamplerRef Sampler() const;
     [[nodiscard]] u32 Resolution() const { return m_resolution; }
 
 private:
-    VkDevice m_device = VK_NULL_HANDLE;
-    std::unique_ptr<GpuImage> m_image;
-    VkSampler m_sampler = VK_NULL_HANDLE;
+    std::unique_ptr<gpu::Texture> m_image;
+    // After m_image, so the sampler is destroyed first.
+    std::unique_ptr<gpu::Sampler> m_sampler;
     u32 m_resolution = 0;
 };
 
@@ -217,13 +224,18 @@ private:
  * maxLod is 0 -- right for a single-level LUT, and enough to pin every environment
  * lookup to mip 0, so the chain above was built and never read.
  */
+/// EnvironmentCubemap::Params. At namespace scope because the class's own `= {}`
+/// default arguments use its default member initializers, which Clang will not
+/// read before the enclosing class is complete.
+struct EnvironmentCubemapParams {
+    u32 faceSize = 512;
+    /// Clamped to what faceSize supports -- see MipLevels() for what was used.
+    u32 mipLevels = 8;
+};
+
 class EnvironmentCubemap {
 public:
-    struct Params {
-        u32 faceSize = 512;
-        /// Clamped to what faceSize supports -- see MipLevels() for what was used.
-        u32 mipLevels = 8;
-    };
+    using Params = EnvironmentCubemapParams;
 
     /// A placeholder, not an environment. The ray tracing pipeline declares
     /// binding 10 with descriptorCount 1 and no partially-bound flag, so a
@@ -237,8 +249,7 @@ public:
     static constexpr Params kFallbackParams{1, 1};
 
     EnvironmentCubemap() = default;
-    // Out of line: GpuImage is only forward declared here, so the destructor cannot
-    // be implicit -- it would need the complete type at every use site.
+    // Out of line, as it was when the image type was only forward declared here.
     ~EnvironmentCubemap();
     EnvironmentCubemap(EnvironmentCubemap&&) noexcept;
     EnvironmentCubemap& operator=(EnvironmentCubemap&&) noexcept;
@@ -252,26 +263,27 @@ public:
      *       work. The CLI used to call ReadEXR directly and silently fall back to
      *       sky blue for anything else.
      */
-    static Result<EnvironmentCubemap, String> Load(VulkanContext& ctx,
+    static Result<EnvironmentCubemap, String> Load(gpu::Device& device,
                                                    const String& path,
                                                    const Params& requested = {});
 
     /// A black placeholder to keep binding 10 valid for a scene that configures
     /// no environment map. See kFallbackParams for why it is not a sky.
-    static EnvironmentCubemap Fallback(VulkanContext& ctx,
+    static EnvironmentCubemap Fallback(gpu::Device& device,
                                        const Params& requested = kFallbackParams);
 
-    [[nodiscard]] bool IsValid() const { return m_image != nullptr && m_sampler != VK_NULL_HANDLE; }
-    [[nodiscard]] VkImageView View() const;
+    [[nodiscard]] bool IsValid() const { return m_image != nullptr && m_sampler != nullptr; }
+    /// The six faces as one sampled cube (shader-read layout); empty when invalid.
+    [[nodiscard]] gpu::TextureRef View() const;
     /// Trilinear and unclamped, so `lod` from the shader actually selects a level.
-    [[nodiscard]] VkSampler Sampler() const { return m_sampler; }
+    [[nodiscard]] gpu::SamplerRef Sampler() const;
     [[nodiscard]] u32 FaceSize() const { return m_faceSize; }
     [[nodiscard]] u32 MipLevels() const { return m_mipLevels; }
 
 private:
-    VkDevice m_device = VK_NULL_HANDLE;
-    std::unique_ptr<GpuImage> m_image;
-    VkSampler m_sampler = VK_NULL_HANDLE;
+    std::unique_ptr<gpu::Texture> m_image;
+    // After m_image, so the sampler is destroyed first.
+    std::unique_ptr<gpu::Sampler> m_sampler;
     u32 m_faceSize = 0;
     u32 m_mipLevels = 0;
 };
@@ -283,24 +295,15 @@ private:
  * instance's slice of each merged global buffer starts, which is how the closest-hit
  * shader finds its vertices after every primitive was concatenated into one buffer.
  *
- * @note Defined once. It used to be declared separately in ExternalRenderContext.cpp
- *       and in the CLI's main.cpp, two copies of a layout the shader depends on.
+ * thermalElementBase is the first thermal element of the instance, or 0xFFFFFFFF
+ * where no solve ran. The vertex shading adds the hit's primitive index to it,
+ * which is the whole of how a triangle finds the temperature the balance gave it.
+ *
+ * @note Defined once, for the shader and the host, in ql_shared_scene.hlsli. It
+ *       used to be declared separately in ExternalRenderContext.cpp, in the CLI's
+ *       main.cpp and in the shader, three copies of one layout.
  */
-struct InstanceGeometryInfo {
-    u32 vertexOffset;   // Offset into the merged vertex buffer, in vertices
-    u32 indexOffset;    // Offset into the merged index buffer, in indices
-    u32 normalOffset;   // Offset into the merged normal buffer, in normals
-    u32 uvOffset;       // Offset into the merged UV buffer, in UVs
-    u32 tangentOffset;  // Offset into the merged tangent buffer, in tangents
-    u32 materialId;     // Index into Scene::materials
-    /// First thermal element of this instance, or 0xFFFFFFFF where no solve
-    /// ran. The vertex shading adds the hit's primitive index to it, which is the
-    /// whole of how a triangle finds the temperature the balance gave it.
-    u32 thermalElementBase;
-    u32 pad;            // Pad to 32 bytes
-};
-
-static_assert(sizeof(InstanceGeometryInfo) == 32, "InstanceGeometryInfo size mismatch");
+using InstanceGeometryInfo = shader::InstanceGeometryInfo;
 
 /**
  * @brief One emissive triangle, in world space, for next-event estimation
@@ -332,14 +335,7 @@ static_assert(sizeof(InstanceGeometryInfo) == 32, "InstanceGeometryInfo size mis
  * curve -- which is the whole point, since the density may be approximate but
  * the radiance may not.
  */
-struct EmissiveTriangleGPU {
-    glm::vec3 v0;         float cumulativePower;  //  0..16
-    glm::vec3 edge1;      float area;             // 16..32
-    glm::vec3 edge2;      i32   emissiveCurveIndex; // 32..48
-    glm::vec3 emissive;   float _pad1;            // 48..64
-};
-
-static_assert(sizeof(EmissiveTriangleGPU) == 64, "EmissiveTriangleGPU size mismatch");
+using EmissiveTriangleGPU = shader::EmissiveTriangleGPU;  // ql_shared_scene.hlsli
 
 /**
  * @brief The emissive triangles of a scene, in world space, power-ordered CDF built
@@ -361,8 +357,8 @@ Vector<EmissiveTriangleGPU> CollectEmissiveTriangles(const Scene& scene);
  * because the descriptor has to be written with something and
  * LightingParams::emissiveTriangleCount is what says whether to read it.
  */
-std::unique_ptr<GpuBuffer> CreateEmissiveTriangleBuffer(
-    VulkanContext& ctx, const Vector<EmissiveTriangleGPU>& triangles);
+std::unique_ptr<gpu::Buffer> CreateEmissiveTriangleBuffer(
+    gpu::Device& device, const Vector<EmissiveTriangleGPU>& triangles);
 
 /**
  * @brief Everything the ray tracing pipeline needs to trace a scene's geometry
@@ -385,8 +381,9 @@ public:
     SceneGeometry& operator=(const SceneGeometry&) = delete;
 
     /// Merge, build and upload. A scene with no primitives yields an invalid result
-    /// rather than empty buffers, since there is nothing to trace.
-    static SceneGeometry Build(VulkanContext& ctx, const Scene& scene);
+    /// rather than empty buffers, since there is nothing to trace. The structures
+    /// keep `device` for their later builds and refits, so it must outlive the result.
+    static SceneGeometry Build(gpu::Device& device, const Scene& scene);
 
     /// Rebuild only the TLAS, from the BLAS already built, after node
     /// transforms or the node set changed. Handles topology edits
@@ -395,12 +392,12 @@ public:
     /// rebind both the TLAS and InstanceInfo() afterwards. Per-primitive
     /// structures and the merged buffers are geometry, not placement, and
     /// are never redone.
-    void RebuildTlas(VulkanContext& ctx, const Scene& scene);
+    void RebuildTlas(gpu::Device& device, const Scene& scene);
 
     /**
      * @brief Rebuild any BLAS whose material changed its ray-tracing opacity
      *
-     * VK_GEOMETRY_OPAQUE_BIT_KHR is baked into the acceleration structure at
+     * The geometry's opaque flag is baked into the acceleration structure at
      * build time, so flipping a material between OPAQUE and MASK/BLEND -- or
      * switching transmission on -- leaves the geometry behaving as it was
      * built until the structure is rebuilt. This finds the primitives that
@@ -410,7 +407,7 @@ public:
      * accumulation when nothing moved. Cheap when nothing changed: one
      * comparison per primitive and no GPU work.
      */
-    bool RefreshMaterialOpacity(VulkanContext& ctx, const Scene& scene);
+    bool RefreshMaterialOpacity(gpu::Device& device, const Scene& scene);
 
     /// Copy the scene's transforms into the CPU-side TLAS instance list.
     /// Returns false when no TLAS exists or the instance count changed.
@@ -419,25 +416,26 @@ public:
     [[nodiscard]] bool PrepareTlasRefit(const Scene& scene);
 
     /// Record the prepared instance upload and in-place TLAS update into an
-    /// existing command buffer. Call only after PrepareTlasRefit() succeeds.
+    /// existing command list from a gpu::Device (it carries the ray tracing entry
+    /// points). Call only after PrepareTlasRefit() succeeds.
     /// Barriers order prior ray queries/traces, the instance upload, the AS
     /// update, and subsequent consumers on the graphics queue.
-    void RecordPreparedTlasRefit(VkCommandBuffer cmd);
+    void RecordPreparedTlasRefit(gpu::CommandList& list);
 
     /// Synchronous compatibility path for consumers that need the new TLAS
     /// before returning (picking and thermal precompute). Interactive rendering
     /// uses PrepareTlasRefit() + RecordPreparedTlasRefit() to avoid a CPU wait.
-    [[nodiscard]] bool RefitTlas(VulkanContext& ctx, const Scene& scene);
+    [[nodiscard]] bool RefitTlas(gpu::Device& device, const Scene& scene);
 
     [[nodiscard]] bool IsValid() const { return m_tlas != nullptr; }
 
     [[nodiscard]] const TLAS& Tlas() const { return *m_tlas; }
-    [[nodiscard]] const GpuBuffer& Vertices() const { return *m_vertices; }
-    [[nodiscard]] const GpuBuffer& Indices() const { return *m_indices; }
-    [[nodiscard]] const GpuBuffer& Normals() const { return *m_normals; }
-    [[nodiscard]] const GpuBuffer& UVs() const { return *m_uvs; }
-    [[nodiscard]] const GpuBuffer& Tangents() const { return *m_tangents; }
-    [[nodiscard]] const GpuBuffer& InstanceInfo() const { return *m_instanceInfo; }
+    [[nodiscard]] const gpu::Buffer& Vertices() const { return *m_vertices; }
+    [[nodiscard]] const gpu::Buffer& Indices() const { return *m_indices; }
+    [[nodiscard]] const gpu::Buffer& Normals() const { return *m_normals; }
+    [[nodiscard]] const gpu::Buffer& UVs() const { return *m_uvs; }
+    [[nodiscard]] const gpu::Buffer& Tangents() const { return *m_tangents; }
+    [[nodiscard]] const gpu::Buffer& InstanceInfo() const { return *m_instanceInfo; }
 
     /// Point each instance at its first thermal element and re-upload.
     ///
@@ -473,14 +471,14 @@ public:
 private:
     // Declared before the BLAS so reverse destruction order keeps these alive
     // until every non-owning GeometrySlice is gone.
-    std::unique_ptr<GpuBuffer> m_vertices;
-    std::unique_ptr<GpuBuffer> m_indices;
-    std::unique_ptr<GpuBuffer> m_normals;
-    std::unique_ptr<GpuBuffer> m_uvs;
-    std::unique_ptr<GpuBuffer> m_tangents;
+    std::unique_ptr<gpu::Buffer> m_vertices;
+    std::unique_ptr<gpu::Buffer> m_indices;
+    std::unique_ptr<gpu::Buffer> m_normals;
+    std::unique_ptr<gpu::Buffer> m_uvs;
+    std::unique_ptr<gpu::Buffer> m_tangents;
     Vector<std::unique_ptr<BLAS>> m_blas;
     std::unique_ptr<TLAS> m_tlas;
-    std::unique_ptr<GpuBuffer> m_instanceInfo;
+    std::unique_ptr<gpu::Buffer> m_instanceInfo;
     Vector<InstanceGeometryInfo> m_instances;
     Vector<u32> m_instanceToNode;
     /// Per-primitive (globalPrim-indexed) geometry offsets from Build's first
@@ -597,10 +595,10 @@ MaterialDataCPU ConvertMaterial(const Material& material, f32 wavelengthNm,
  *                spectralReflectanceCurveIndex and complexRefractiveIndexIndex.
  * @return null when the scene has no materials -- there is nothing to bind
  */
-std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& scene,
-                                               f32 wavelengthNm,
-                                               const Vector<MaterialGpuIndices>& indices = {},
-                                               const MaterialResourceCounts* resources = nullptr);
+std::unique_ptr<gpu::Buffer> BuildMaterialBuffer(gpu::Device& device, const Scene& scene,
+                                                 f32 wavelengthNm,
+                                                 const Vector<MaterialGpuIndices>& indices = {},
+                                                 const MaterialResourceCounts* resources = nullptr);
 
 /**
  * @brief Create the ray tracing target: an RGBA32F storage image in GENERAL layout
@@ -612,8 +610,8 @@ std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& 
  *       every Resize(), and the CLI creates one per run. All three specified the same
  *       format, usage and initial transition; only the surrounding code differed.
  */
-std::unique_ptr<GpuImage> CreateRenderTarget(VulkanContext& ctx, u32 width, u32 height,
-                                             VkFormat format = VK_FORMAT_R32G32B32A32_SFLOAT);
+std::unique_ptr<gpu::Texture> CreateRenderTarget(gpu::Device& device, u32 width, u32 height,
+                                                 gpu::Format format = gpu::Format::RGBA32Float);
 
 /**
  * @brief Everything the ray tracing pipeline binds, in one place
@@ -622,15 +620,16 @@ std::unique_ptr<GpuImage> CreateRenderTarget(VulkanContext& ctx, u32 width, u32 
  * sequences. Naming the set once means a new binding is added where it is declared
  * rather than in whichever sequence the author happened to be reading.
  *
- * Null members are skipped. `RayTracingPipeline`'s buffer binders already accept a
- * null pointer for the optional spectral resources; the rest are simply not written.
+ * Empty refs and null pointers are skipped. `RayTracingPipeline`'s binders for the
+ * optional spectral resources take an empty ref as "none" and bind their own fallback;
+ * the rest are simply not written.
  */
 struct PipelineBindings {
-    const GpuImage* outputImage = nullptr;
-    const GpuImage* depthImage = nullptr;  // primary-hit depth AOV (binding 22)
+    gpu::TextureRef outputImage{};
+    gpu::TextureRef depthImage{};  // primary-hit depth AOV (binding 22)
     const SceneGeometry* geometry = nullptr;
-    const GpuBuffer* lightingParams = nullptr;
-    const GpuBuffer* materials = nullptr;
+    gpu::BufferRef lightingParams{};
+    gpu::BufferRef materials{};
     const TextureManager* textures = nullptr;
     const EnvironmentCubemap* environment = nullptr;
     const BrdfLut* brdfLut = nullptr;
@@ -639,39 +638,39 @@ struct PipelineBindings {
     // config; the interactive context binds zero-filled placeholders (see
     // CreateDummyBuffers) except for the refractive index, which Qt fills through
     // ExternalRenderContext::AddComplexRefractiveIndex.
-    const GpuBuffer* spectralCurves = nullptr;
-    const GpuBuffer* complexRefractiveIndex = nullptr;
-    const GpuBuffer* solarLut = nullptr;
-    const GpuBuffer* atmosphereHeader = nullptr;
-    const GpuBuffer* atmosphereData = nullptr;
-    const GpuBuffer* cieColourMatching = nullptr;
+    gpu::BufferRef spectralCurves{};
+    gpu::BufferRef complexRefractiveIndex{};
+    gpu::BufferRef solarLut{};
+    gpu::BufferRef atmosphereHeader{};
+    gpu::BufferRef atmosphereData{};
+    gpu::BufferRef cieColourMatching{};
     /// Jakob-Hanika RGB -> spectrum coefficients. Always bound: binding 25 has
     /// no partially-bound flag, and every spectral band that meets an RGB
     /// reflectance without a measured curve reads it.
-    const GpuBuffer* rgbToSpectrum = nullptr;
-    const GpuBuffer* emissiveTriangles = nullptr;
+    gpu::BufferRef rgbToSpectrum{};
+    gpu::BufferRef emissiveTriangles{};
     /// Per-element surface temperatures from the thermal solver. Always bound;
     /// a scene with no solve gets a single zero entry.
-    const GpuBuffer* thermalTemperatures = nullptr;
+    gpu::BufferRef thermalTemperatures{};
     /// How those temperatures respond to the sun: a header record with the
     /// solve's sun direction, then (dT/dv, v_element) per element. Always
     /// bound; one zeroed record when there is no solve, which the header's
     /// w = 0 turns off.
-    const GpuBuffer* thermalSunResponse = nullptr;
-    const GpuBuffer* thermalParameterTangent = nullptr;
-    const GpuImage* cameraMeasurementImage = nullptr; // binding 28
-    const GpuBuffer* cameraResponse = nullptr;        // binding 29
+    gpu::BufferRef thermalSunResponse{};
+    gpu::BufferRef thermalParameterTangent{};
+    gpu::TextureRef cameraMeasurementImage{};  // binding 28
+    gpu::BufferRef cameraResponse{};           // binding 29
 };
 
 /**
  * @brief Build the ray tracing pipeline and bind its resources
  *
- * @param cache Pipeline cache to build against; may be VK_NULL_HANDLE. The caller
+ * @param cache Pipeline cache to build against; may be null. The caller
  *              owns it, because the two front ends keep it for different spans --
  *              the context across scene reloads, the CLI for one run.
  */
 std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
-    VulkanContext& ctx, VkPipelineCache cache, const PipelineBindings& bindings);
+    gpu::Device& device, const gpu::PipelineCache* cache, const PipelineBindings& bindings);
 
 /**
  * @brief How a fused-band render has to be conditioned before the sensor chain
@@ -716,7 +715,7 @@ SensorBandAdjustment SensorAdjustmentForMode(SpectralMode mode, bool hostSetWave
  *       away. A published constant does not need a load path or a file that can go
  *       missing.
  */
-std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx);
+std::unique_ptr<gpu::Buffer> CreateCieColourMatchingBuffer(gpu::Device& device);
 
 /**
  * @brief Fit (or load) the RGB -> spectrum coefficient table and upload it
@@ -727,7 +726,7 @@ std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx);
  * into. See core/RgbToSpectrum.hpp for why the table is built rather than
  * shipped.
  */
-std::unique_ptr<GpuBuffer> CreateRgbToSpectrumBuffer(
-    VulkanContext& ctx, const String& cachePath = {});
+std::unique_ptr<gpu::Buffer> CreateRgbToSpectrumBuffer(
+    gpu::Device& device, const String& cachePath = {});
 
 } // namespace quantiloom::rendercore

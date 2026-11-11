@@ -20,27 +20,15 @@
 
 RaytracingAccelerationStructure sceneTlas : register(t0, space0);
 
-struct PickResultGpu {
-    uint  hit;             // 1 = committed triangle hit
-    uint  instanceIndex;   // TLAS instance index (matches InstanceIndex())
-    uint  primitiveIndex;  // Triangle index within the instance's geometry
-    float hitT;            // Distance along the normalized ray
-    float3 worldPosition;  // origin + direction * hitT
-    uint  _pad;
-};
+// Both structs are shared with renderer/ExternalRenderContext.cpp:
+// ql_shared_compute.hlsli.
+#define QL_SHARED_WANT_PickResultGpu
+#include "ql_shared_compute.hlsli"
 
 RWStructuredBuffer<PickResultGpu> result : register(u1, space0);
 
-struct PickPushConstants {
-    float3 origin;   float fovScale;     // tan(fovY / 2), same as CameraData
-    float3 forward;  float aspectRatio;
-    float3 right;    uint  pixelX;
-    float3 up;       uint  pixelY;
-    uint   width;
-    uint   height;
-    uint   projection;      // CAMERA_PROJECTION_* -- must match raygen
-    float  orthoHeight;
-};
+#define QL_SHARED_WANT_PickPushConstants
+#include "ql_shared_compute.hlsli"
 
 QL_PUSH_CONSTANTS(PickPushConstants, pc);
 

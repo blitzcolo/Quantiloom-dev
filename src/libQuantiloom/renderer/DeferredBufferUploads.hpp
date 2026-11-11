@@ -16,47 +16,48 @@
  * thermal fields, the atmosphere LUT) keep a synchronous upload path and
  * never reach this queue -- see kMaxPayloadBytes.
  *
- * Entries name their destination by VkBuffer handle, so a pending write
- * must be flushed before the GpuBuffer it targets is destroyed; callers
- * replacing a buffer drain the queue first.
+ * Entries name their destination by buffer ref, so a pending write must be
+ * flushed before the buffer it targets is destroyed; callers replacing a
+ * buffer drain the queue first.
  */
 
 #pragma once
 
 #include "core/Types.hpp"
-#include <vulkan/vulkan.h>
+#include "gpu/GpuTypes.hpp"
 #include <vector>
 
-namespace quantiloom {
+namespace quantiloom::gpu {
+class CommandList;
+}
 
-class GpuBuffer;
+namespace quantiloom {
 
 class DeferredBufferUploads {
 public:
     /// Largest payload recorded into a command buffer. Bigger writes keep a
     /// synchronous path in the caller.
-    static constexpr VkDeviceSize kMaxPayloadBytes = 1u << 20;
+    static constexpr u64 kMaxPayloadBytes = 1u << 20;
 
     /// Copy `bytes` of `data` for a deferred write of `dst` at `offset`.
     /// A pending write to the same (dst, offset, bytes) is replaced rather
     /// than appended. Offset and size must be multiples of 4, as
     /// vkCmdUpdateBuffer requires.
-    void Enqueue(const GpuBuffer& dst, VkDeviceSize offset, const void* data,
-                 VkDeviceSize bytes);
+    void Enqueue(gpu::BufferRef dst, u64 offset, const void* data, u64 bytes);
 
-    /// Record all pending uploads into `cmd`: one barrier making the target
+    /// Record all pending uploads into `list`: one barrier making the target
     /// ranges writable by the transfer stage (after earlier shader readers),
     /// the vkCmdUpdateBuffer writes, and one barrier making them visible to
     /// ray tracing and compute shader reads. Clears the queue afterwards.
-    void Record(VkCommandBuffer cmd);
+    void Record(gpu::CommandList& list);
 
     [[nodiscard]] bool Empty() const { return m_pending.empty(); }
     void Clear() { m_pending.clear(); }
 
 private:
     struct Pending {
-        VkBuffer dst;
-        VkDeviceSize offset;
+        gpu::BufferRef dst;
+        u64 offset = 0;
         std::vector<u8> bytes;
     };
     std::vector<Pending> m_pending;

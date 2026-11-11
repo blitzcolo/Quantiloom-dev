@@ -21,32 +21,29 @@
 // Bindings
 // ============================================================================
 
-RWTexture2D<float4> outputImage : register(u0, space0);
+RWTexture2D<float4> outputImage : QL_RT_REGISTER(outputImage);
 // Measurement rate map, one layer per time stratum. Layer 0 is the
 // anchor: it alone feeds the primary-hit depth AOV and the interactive
 // depth blit. The runtime layer count arrives in the push constants; the
 // image is allocated with kCameraTimeStrataMax layers regardless.
-RWTexture2DArray<float4> cameraMeasurementImage : register(u28, space0);
+RWTexture2DArray<float4> cameraMeasurementImage : QL_RT_REGISTER(cameraMeasurementImage);
 // Per-stratum primary-hit depth (RayTCurrent, -1 on miss), same layering as
 // binding 28. Consumed by camera_dynamic.comp for reprojection consistency.
-RWTexture2DArray<float> cameraMeasurementDepthImage : register(u31, space0);
+RWTexture2DArray<float> cameraMeasurementDepthImage : QL_RT_REGISTER(cameraMeasurementDepthImage);
 // 4 x u32 atomic counters accumulated by raygen in camera-measurement mode:
 // slot 0 transparent primary hits, slot 1 specular primary hits (per
 // pixel-sample; the host normalizes by pixels x samples). Zeroed by the host
 // before each acquisition's trace loop.
-RWByteAddressBuffer cameraDynamicCounters : register(u30, space0);
+RWByteAddressBuffer cameraDynamicCounters : QL_RT_REGISTER(cameraDynamicCounters);
 
 // Primary-hit depth AOV: distance along the normalized primary ray, -1 on
 // miss. Overwritten every frame (never accumulated) so it always reflects the
 // current scene; consumed by ExternalRenderContext::BlitDepthTo.
-RWTexture2D<float> depthImage : register(u22, space0);
-struct FusionProbeRay {
-    float3 origin;
-    float wavelength;
-    float3 direction;
-    uint branchMask;
-};
-StructuredBuffer<FusionProbeRay> fusionProbeRays : register(t37, space0);
+RWTexture2D<float> depthImage : QL_RT_REGISTER(depthImage);
+// Shared with RayTracingPipeline::SetFusionProbes: ql_shared_fusion.hlsli.
+#define QL_SHARED_WANT_FusionProbeRay
+#include "ql_shared_fusion.hlsli"
+StructuredBuffer<FusionProbeRay> fusionProbeRays : QL_RT_REGISTER(fusionProbeRays);
 
 // The push-constant block lives in common.hlsli, shared with the closest-hit
 // and miss shaders.

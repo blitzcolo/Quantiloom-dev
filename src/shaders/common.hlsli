@@ -426,13 +426,9 @@ void InheritFusionMedium(inout PathVertex child, PathVertex parent) {
 
 #define MAX_SPECTRAL_SAMPLES 64
 
-struct SpectralCurveGPU {
-    float values[MAX_SPECTRAL_SAMPLES];  // Spectral values (reflectance, emissivity, etc.) [0, 1] or [0, inf]
-    float startWavelength_nm;            // Starting wavelength (nm)
-    float stepSize_nm;                   // Wavelength step size (nm)
-    uint  numSamples;                    // Actual number of valid samples (0 to MAX_SPECTRAL_SAMPLES)
-    uint  nextExactSegment;              // Emission only: next exact segment index+1, 0 ends chain; step=0 packs <=32 (nm,value) pairs
-};
+// Locked to the public struct of the same name: ql_shared_public.hlsli.
+#define QL_SHARED_WANT_SpectralCurveGPU
+#include "ql_shared_public.hlsli"
 
 
 // ============================================================================
@@ -443,12 +439,9 @@ struct SpectralCurveGPU {
 // cumulativePower is for.
 // ============================================================================
 
-struct EmissiveTriangleGPU {
-    float3 v0;        float cumulativePower;
-    float3 edge1;     float area;
-    float3 edge2;     int   emissiveCurveIndex;  // -1 = the RGB triple below
-    float3 emissive;  float _pad1;
-};
+// Shared with the host: ql_shared_scene.hlsli.
+#define QL_SHARED_WANT_EmissiveTriangleGPU
+#include "ql_shared_scene.hlsli"
 
 // The weighting that turns an emissive RGB triple into the single number the
 // sampling density is built from. The host uses the same one to build the CDF;
@@ -472,14 +465,9 @@ struct EmissiveTriangleGPU {
 // Must match CPU-side ComplexRefractiveIndexGPU structure
 // ============================================================================
 
-struct ComplexRefractiveIndexGPU {
-    float n[MAX_SPECTRAL_SAMPLES];       // Refractive index at uniform grid
-    float k[MAX_SPECTRAL_SAMPLES];       // Extinction coefficient at uniform grid
-    float startWavelength_nm;            // Starting wavelength (nm)
-    float stepSize_nm;                   // Wavelength step size (nm)
-    uint  numSamples;                    // Number of valid samples
-    uint  _padding;                      // 16-byte alignment
-};
+// Locked to the public struct of the same name: ql_shared_public.hlsli.
+#define QL_SHARED_WANT_ComplexRefractiveIndexGPU
+#include "ql_shared_public.hlsli"
 
 // ============================================================================
 // Helper: Query Complex Refractive Index at Arbitrary Wavelength
@@ -543,10 +531,9 @@ float2 SampleComplexRefractiveIndex(StructuredBuffer<ComplexRefractiveIndexGPU> 
 // SIZE: 272 + 272 = 544 bytes (must match CPU-side SolarSpectralLUT)
 // ============================================================================
 
-struct SolarSpectralLUT {
-    SpectralCurveGPU sunIrradiance;   // Direct sun spectral irradiance (W·m⁻²·nm⁻¹)
-    SpectralCurveGPU skyIrradiance;   // Diffuse sky spectral irradiance (W·m⁻²·nm⁻¹)
-};
+// Locked to the public struct of the same name: ql_shared_public.hlsli.
+#define QL_SHARED_WANT_SolarSpectralLUT
+#include "ql_shared_public.hlsli"
 
 // ============================================================================
 // Helper: Sample Solar Irradiance at Wavelength
@@ -954,39 +941,9 @@ float CauchyIOR(float ior_d, float dispersion, float wavelength_nm) {
 // - Can be controlled via config: renderer.enable_shadow_rays = true/false
 // ============================================================================
 
-struct LightingParams {
-    float3 sunDirection;         // Normalized sun direction vector (FROM surface TO sun)
-    float  sunRadiance_spectral; // Sun spectral radiance at current λ (W·sr⁻¹·m⁻²·nm⁻¹) - fallback
-
-    float3 sunRadiance_rgb;      // Sun RGB radiance (W·sr⁻¹·m⁻²) for RGB mode - fallback
-    float  skyRadiance_spectral; // Sky spectral radiance at current λ (W·sr⁻¹·m⁻²·nm⁻¹) - fallback
-
-    float3 skyRadiance_rgb;      // Sky RGB radiance (W·sr⁻¹·m⁻²) for RGB mode - fallback
-    // Zenith emissivity of a clear sky, [0, 1]. Zero = the thermal sky is one
-    // isotropic blackbody at atmosphereTemperature_K, which is what it always
-    // was. Above zero the flat-slab law below takes over. Was `transmittance`,
-    // deprecated when the NN atmosphere took the view path.
-    float  skyEmissivityClear;
-
-    float  worldUnitsToMeters;   // Conversion factor: world_units × this = meters
-    float  atmosphereTemperature_K; // Effective atmosphere temperature (K) for IR downwelling radiation
-    float  chromaR_correction;   // VIS_FUSED chromaticity correction for R channel (default: 0.7872)
-    float  chromaB_correction;   // VIS_FUSED chromaticity correction for B channel (default: 1.0437)
-
-    uint   enableShadowRays;     // Shadow ray enable flag: 0 = disabled, 1 = enabled (configurable)
-    uint   enableEnvironmentMap; // IBL from the environment cubemap: 0 = contributes nothing, 1 = lights the scene
-    uint   emissiveTriangleCount;// Entries in emissiveTriangles (binding 23); 0 = no light sampling
-    float  emissiveTotalPower;   // Sum of luminance(emissive) * area; the area-measure sampling
-                                 // density on any emitter is luminance(emissive) / this
-
-    // The visible sky's distribution over direction; see the functions below.
-    uint   skyDistribution;        // SKY_DISTRIBUTION_UNIFORM or SKY_DISTRIBUTION_CLEAR
-    float  skyAerosolOpticalDepth; // at 500 nm, shapes the clear sky
-    float  skyDomeLambdaStart_nm;  // grid of the two tables below, filled by the renderer
-    float  skyDomeLambdaStep_nm;
-    float  skyDomeN[16];           // cosine integral of the unnormalised clear sky
-    float  skyDomeJ[16];           // its multiple-scattering source
-};
+// Locked to the public struct of the same name: ql_shared_public.hlsli.
+#define QL_SHARED_WANT_LightingParams
+#include "ql_shared_public.hlsli"
 
 // ============================================================================
 // The visible sky's distribution (lighting.sky_distribution)
@@ -1162,20 +1119,9 @@ float SkyDomeFactor(StructuredBuffer<LightingParams> lp, StructuredBuffer<SolarS
 // Size: 80 bytes (16-byte aligned)
 // ============================================================================
 
-struct CameraData {
-    float3 origin;         // Camera position (world space)
-    float  fovScale;       // tan(fovY / 2)
-    float3 forward;        // Forward vector (normalized)
-    float  aspectRatio;    // Width / height
-    float3 right;          // Right vector (normalized)
-    float  wavelength_nm;  // Current wavelength (nanometers) for spectral rendering
-    float3 up;             // Up vector (normalized)
-    uint   spectral_mode;  // Spectral rendering mode (see SPECTRAL_MODE_* defines)
-    uint   debug_mode;     // Debug visualization mode (see DEBUG_MODE_* defines)
-    uint   projection;     // CAMERA_PROJECTION_* below
-    float  orthoHeight;    // Film-plane height in world units, orthographic only
-    uint   debugParam;     // One number for a debug view; see Camera.hpp
-};
+// Locked to the public struct of the same name: ql_shared_public.hlsli.
+#define QL_SHARED_WANT_CameraData
+#include "ql_shared_public.hlsli"
 
 // Must match Camera::Projection in scene/Camera.hpp.
 #define CAMERA_PROJECTION_PERSPECTIVE  0u
@@ -1205,19 +1151,9 @@ struct CameraData {
 // coverage hash.
 // ============================================================================
 
-struct PushConstantsRayGen {
-    CameraData camera;
-    uint frameIndex;
-    uint sampleIndex;
-    uint totalSamples;
-    uint randomSeed;
-    uint sequenceSeed;
-    // Temporal stratification of one camera exposure. See the CPU-side
-    // twin in include/quantiloom/scene/Camera.hpp; the two must stay identical.
-    uint timeStratum;         // layer this dispatch writes, 0-based
-    uint timeStratumCount;    // layers in the current exposure, 0/1 = plain
-    uint textureCount;       // actual bound descriptors, including the dummy texture
-};
+// Locked to the public struct of the same name (its first 108 bytes): ql_shared_public.hlsli.
+#define QL_SHARED_WANT_PushConstantsRayGen
+#include "ql_shared_public.hlsli"
 
 QL_PUSH_CONSTANTS(PushConstantsRayGen, pushConsts);
 
@@ -1233,264 +1169,9 @@ QL_PUSH_CONSTANTS(PushConstantsRayGen, pushConsts);
 // - spectralAlbedo: M1 compatibility for single-wavelength rendering
 // ============================================================================
 
-struct MaterialData {
-    // Base color (PBR albedo)
-    float4 baseColorFactor;          // RGBA [0, 1]                          // Offset: 0-16
-    int    baseColorTextureIndex;    // -1 = no texture                      // Offset: 16-20
-    float  metallicFactor;           // [0, 1] (0 = dielectric, 1 = metal)  // Offset: 20-24
-    float  roughnessFactor;          // [0, 1] (0 = smooth, 1 = rough)      // Offset: 24-28
-    int    metallicRoughnessTextureIndex; // -1 = no texture (G=roughness, B=metallic) // Offset: 28-32
-
-    // Normal mapping
-    int    normalTextureIndex;       // -1 = no normal map                   // Offset: 32-36
-    float  normalScale;              // Normal intensity [0, inf]            // Offset: 36-40
-    // NOT READ by any shader: the path tracer shades both sides by design.
-    // A closest-hit shader cannot un-see an intersection traversal already
-    // committed, and the any-hit shader reserves IgnoreHit for alpha coverage,
-    // so single-sided culling has no place to live on this pipeline -- it
-    // would need per-material any-hit programs or geometry/instance flags.
-    // glTF's flag is loaded and uploaded for CPU-side bookkeeping and to keep
-    // the layout in step with the host Material struct; both sides shade
-    // regardless of its value.
-    uint   doubleSided;              // loaded, not read; both sides shade // Offset: 40-44
-    float  fluorescenceYield;        // Fraction of absorbed light re-emitted, 0 = does not fluoresce // Offset: 44-48
-
-    // Emissive (now 16-byte aligned at offset 48)
-    float3 emissiveFactor;           // RGB [0, inf] (HDR allowed)           // Offset: 48-60
-    int    emissiveTextureIndex;     // -1 = no texture                      // Offset: 60-64
-
-    // Alpha blending
-    uint   alphaMode;                // 0=Opaque, 1=Mask, 2=Blend            // Offset: 64-68
-    float  alphaCutoff;              // Threshold for Mask mode [0, 1]      // Offset: 68-72
-
-    // Spectral mode (M1 compatibility and M2+ full spectral)
-    float  spectralAlbedo;           // LEGACY: Scalar reflectance at current λ [0, 1] (M1 fallback) // Offset: 72-76
-    int    spectralReflectanceCurveIndex;  // Index into spectralCurves buffer (-1 = use spectralAlbedo) // Offset: 76-80
-
-    // Infrared material properties (evaluated at current wavelength)
-    // NOTE: Based on energy conservation: α + ρ + τ = 1, and Kirchhoff's law: ε = α
-    // Therefore: ε + ρ + τ = 1  =>  ρ = 1 - ε - τ
-    // We store ε and τ explicitly for flexibility, ρ can be derived if needed
-    float  irEmissivity;             // IR emissivity ε(λ) [0, 1]            // Offset: 80-84
-    float  irTransmittance;          // IR transmittance τ(λ) [0, 1]        // Offset: 84-88
-    float  irTemperature_K;          // IR surface temperature (K) for blackbody emission (0 = no emission) // Offset: 88-92
-
-    // Complex refractive index for specular Fresnel (physical metals)
-    // When >= 0, uses measured n,k data from RefractiveIndex.INFO for accurate Fresnel
-    // When < 0, uses metallicFactor-based F0 approximation (standard PBR)
-    int    complexRefractiveIndexIndex; // Index into complexRefractiveIndex buffer (-1 = use PBR approximation) // Offset: 92-96
-
-    // Temperature texture fields (per-pixel temperature map)
-    int    temperatureTextureIndex;      // Index into texture array (-1 = use scalar irTemperature_K) // Offset: 96-100
-    float  temperatureScale;             // T(K) = tex.r * scale + offset                             // Offset: 100-104
-    float  temperatureOffset;            // Kelvin offset                                              // Offset: 104-108
-    int    irEmissivityCurveIndex;       // Index into spectralCurves (-1 = use scalar/heuristic)      // Offset: 108-112
-
-    // ========================================================================
-    // Transmission Properties (KHR_materials_transmission + KHR_materials_volume)
-    // ========================================================================
-    // Physical transparency for glass, water, and other dielectric materials.
-    //
-    // PHYSICS:
-    // - IOR determines refraction angle (Snell's law) and Fresnel reflection ratio
-    // - Transmission controls how much light passes through (vs absorbed/reflected)
-    // - Attenuation models Beer-Lambert absorption in colored glass/liquids
-    //
-    // ENERGY CONSERVATION:
-    //   F = FresnelDielectric(n1, n2, θ) = reflection ratio
-    //   T = 1 - F = transmission ratio (before volume absorption)
-    //   Final_transmission = T × exp(-σ × distance)
-
-    float  ior;                          // Index of refraction (1.0=air, 1.33=water, 1.5=glass)    // Offset: 112-116
-    float  transmission;                 // Transmission strength [0,1]                              // Offset: 116-120
-    int    transmissionTextureIndex;     // Transmission texture (-1 = no texture)                  // Offset: 120-124
-    int    irTransmittanceCurveIndex;    // Index into spectralCurves (-1 = use scalar)              // Offset: 124-128
-
-    // Volume attenuation (Beer-Lambert absorption)
-    float3 attenuationColor;             // Color at attenuation distance                           // Offset: 128-140
-    float  attenuationDistance;          // Distance for attenuation (m, 0 = no attenuation)   // Offset: 140-144
-
-    // NOT READ by the shaders. KHR_materials_volume's thicknessFactor
-    // approximates the volume path for thin-walled assets that carry no
-    // volume geometry; this renderer traces real geometry and Beer-Lamberts
-    // over the actual path length through the medium (RayTCurrent, converted
-    // to metres by worldUnitsToMeters), which is the quantity thickness
-    // approximates. Overwriting the measured path with an authored thickness
-    // would discard information, so the fields are loaded and validated but
-    // intentionally unused. thicknessTexture would be the G channel per the
-    // extension, if a consumer ever wants it.
-    float  thicknessFactor;              // Thickness for thin-walled approximation                 // Offset: 144-148
-    int    thicknessTextureIndex;        // Thickness texture (-1 = no texture)                     // Offset: 148-152
-    float  dispersion;                   // Abbe number reciprocal (0 = no dispersion)              // Offset: 152-156
-    int    sheenReflectanceCurveIndex;   // Index into spectralCurves (-1 = use sheenColorFactor)   // Offset: 156-160
-
-    // ========================================================================
-    // Participating Media Properties (fog, smoke, SSS)
-    // ========================================================================
-    // For volume rendering with scattering and absorption.
-    //
-    // PHYSICS:
-    //   σ_t = σ_a + σ_s (extinction = absorption + scattering)
-    //   T = exp(-σ_t × d) (Beer-Lambert transmittance)
-
-    float  volumeDensity;                // Medium density multiplier (0 = no volume)               // Offset: 160-164
-    float  scatteringCoeff;              // Scattering coefficient σ_s (m⁻¹)                        // Offset: 164-168
-    float  absorptionCoeff;              // Absorption coefficient σ_a (m⁻¹)                        // Offset: 168-172
-    float  phaseG;                       // Henyey-Greenstein g parameter [-1,1]                    // Offset: 172-176
-
-    // ========================================================================
-    // Endmember Mixing (spatially varying spectral reflectance)
-    // ========================================================================
-    // rho(lambda, uv) = sum_i w_i(uv) * rho_i(lambda)
-    //
-    // Endmember 0 is spectralReflectanceCurveIndex above; 1..3 are here.
-    // The weights come from weightTextureIndex, RGBA channel i holding w_i/2
-    // -- halved because a single-endmember mixture is brightness modulation
-    // and needs w > 1 for texels brighter than the curve's own colour, which
-    // a UNORM texture cannot store otherwise.
-    //
-    // weightTextureIndex < 0 means w = (1, 0, 0, 0): the first curve, flat,
-    // exactly as before this existed.
-
-    int    endmemberCurveIndex1;         // Index into spectralCurves (-1 = unused)                 // Offset: 176-180
-    int    endmemberCurveIndex2;         // Index into spectralCurves (-1 = unused)                 // Offset: 180-184
-    int    endmemberCurveIndex3;         // Index into spectralCurves (-1 = unused)                 // Offset: 184-188
-    int    weightTextureIndex;           // Index into texture array (-1 = single endmember)        // Offset: 188-192
-
-    // ========================================================================
-    // Sheen (KHR_materials_sheen)
-    // ========================================================================
-    // The retroreflective lobe of a microfibre surface -- velvet, felt, cloth.
-    // Fibres standing away from the surface scatter light into a lobe that
-    // peaks at grazing angles instead of around the mirror direction, which no
-    // roughness setting on a GGX lobe reproduces.
-    //
-    // sheenReflectanceCurveIndex is up at offset 156, in what was padding.
-    // Priority, matching how base colour resolves its reflectance:
-    //   curve bound  -> EvaluateSpectralCurve, quantitative, every band
-    //   otherwise    -> sheenColorFactor upsampled, visible bands only
-    // The infrared bands read the curve alone: an RGB factor pushed through the
-    // visible Gaussian basis says nothing past ~1400nm.
-
-    float3 sheenColorFactor;             // RGB [0,1], 0 = no sheen (glTF default)                 // Offset: 192-204
-    float  sheenRoughnessFactor;         // [0,1] (glTF default 0)                                  // Offset: 204-208
-    int    sheenColorTextureIndex;       // RGB channels, sRGB-encoded (-1 = no texture)           // Offset: 208-212
-    int    sheenRoughnessTextureIndex;   // ALPHA channel, linear (-1 = no texture)                // Offset: 212-216
-
-    // ========================================================================
-    // Anisotropy (KHR_materials_anisotropy)
-    // ========================================================================
-    // Stretches the existing GGX lobe along a tangent direction; adds nothing.
-    //   alpha_t = lerp(alpha, 1, strength^2)   along the direction
-    //   alpha_b = alpha                        across it
-    // so alpha_t >= alpha_b always: this only ever roughens one axis.
-    //
-    // The direction is the material tangent rotated by anisotropyRotation, and
-    // rotated again by the texture's RG where one is bound. These two took the
-    // padding that used to sit here, which is why the texture index is further
-    // down at 248 -- every offset before 224 had to stay where it was.
-
-    float  anisotropyStrength;           // [0,1], 0 = isotropic (glTF default)                     // Offset: 216-220
-    float  anisotropyRotation;           // radians, CCW from the tangent                           // Offset: 220-224
-
-    // ========================================================================
-    // Specular (KHR_materials_specular)
-    // ========================================================================
-    // Reshapes the dielectric Fresnel rather than adding a lobe:
-    //   F0  = min(f0_ior * specularColorFactor, 1) * specularFactor
-    //   F90 = specularFactor
-    // with f0_ior = ((ior-1)/(ior+1))^2, which is 0.04 at the default ior of
-    // 1.5 -- the constant that used to be hardcoded. The clamp is applied
-    // before the factor multiply, not after: SpecularSilkPouf authors
-    // specularColorFactor [10, 0.6, 0] and the order is visible there.
-    //
-    // Both defaults are the neutral element, so a material without the
-    // extension yields exactly the F0 and F90 it did before. There is no curve
-    // index because F0/F90 exist only in the bands that split a BRDF into
-    // diffuse and specular; the infrared bands take reflectance directly.
-
-    float3 specularColorFactor;          // linear, may exceed 1 (HDR) (glTF default [1,1,1])       // Offset: 224-236
-    float  specularFactor;               // [0,1] (glTF default 1)                                  // Offset: 236-240
-    int    specularTextureIndex;         // ALPHA channel, linear (-1 = no texture)                // Offset: 240-244
-    int    specularColorTextureIndex;    // RGB channels, sRGB-encoded (-1 = no texture)           // Offset: 244-248
-    int    anisotropyTextureIndex;       // RG = direction (x2-1), B = strength, linear            // Offset: 248-252
-
-    // ========================================================================
-    // Clearcoat (KHR_materials_clearcoat)
-    // ========================================================================
-    // An infinitely thin dielectric coat with its own normal and roughness.
-    // Its Fresnel is taken at N.V, not V.H -- deliberate in the specification,
-    // for energy conservation with the simple layering operator -- and the base
-    // including emission is weighted by 1 - clearcoat * F_c to pay for it.
-    //
-    // clearcoatNormalTextureIndex < 0 means the coat is NOT normal mapped even
-    // where the base is; it then follows the interpolated vertex normal.
-    //
-    // MWIR and LWIR act on clearcoatReflectanceCurveIndex alone: the 0.04 a
-    // dielectric coat reflects in the visible is a fiction at 10 microns. Where
-    // a curve is bound, those bands carve the coat out of the reflectance
-    // already there rather than adding to it -- adding would make an isothermal
-    // cavity emit.
-
-    float  clearcoatFactor;              // [0,1], 0 = no coat (glTF default)                       // Offset: 252-256
-    float  clearcoatRoughnessFactor;     // [0,1] (glTF default 0)                                  // Offset: 256-260
-    float  clearcoatNormalScale;         // normalTextureInfo.scale on the coat                     // Offset: 260-264
-    int    clearcoatTextureIndex;        // R channel, linear (-1 = no texture)                     // Offset: 264-268
-    int    clearcoatRoughnessTextureIndex; // G channel, linear (-1 = no texture)                   // Offset: 268-272
-    int    clearcoatNormalTextureIndex;  // tangent-space normal map (-1 = coat is flat)            // Offset: 272-276
-    int    clearcoatReflectanceCurveIndex; // measured, the only infrared path (-1 = none)          // Offset: 276-280
-
-    // ========================================================================
-    // Diffuse transmission (KHR_materials_diffuse_transmission)
-    // ========================================================================
-    // A Lambertian BTDF on a thin surface. The specification mixes it against
-    // the diffuse BRDF inside the Fresnel mix, so the diffuse reflection is
-    // scaled by (1 - diffuseTransmission) and the specular lobe and its Fresnel
-    // weight are untouched -- energy moves between the two diffuse halves
-    // rather than appearing.
-    //
-    // Not the same quantity as irTransmittance, and not derived from it.
-    // irTransmittance enters Kirchhoff's law as eps = 1 - rho - tau; feeding a
-    // visible-band diffuse transmission into it would give a surface two
-    // transmittances and move its emissivity. MWIR and LWIR ignore these.
-
-    float  diffuseTransmissionFactor;    // [0,1] (glTF default 0)                                  // Offset: 280-284
-    int    diffuseTransmissionTextureIndex; // ALPHA channel, linear (-1 = no texture)              // Offset: 284-288
-    float3 diffuseTransmissionColorFactor;  // [0,1] linear (glTF default [1,1,1])                  // Offset: 288-300
-    int    diffuseTransmissionColorTextureIndex; // RGB, sRGB-encoded (-1 = no texture)             // Offset: 300-304
-    int    diffuseTransmissionColorCurveIndex;   // measured, the NIR/SWIR path (-1 = none)         // Offset: 304-308
-
-    // Spectral self-emission: index into spectralCurves, -1 = expand
-    // emissiveFactor through the RGB->illuminant path instead. Zero outside the
-    // curve's own span, never held flat -- see EvaluateEmissionCurve.
-    int    emissiveRadianceCurveIndex;   // Index into spectralCurves (-1 = RGB expansion)          // Offset: 308-312
-    int    fluorescenceExcitationCurveIndex; // -1 = none; the shape this surface absorbs into the fluorescent channel // Offset: 312-316
-    int    fluorescenceEmissionCurveIndex;   // -1 = none; unit area over the band, so a density per nm // Offset: 316-320
-
-    // ========================================================================
-    // Per-slot UV transforms (KHR_texture_transform)
-    // ========================================================================
-    // Pre-multiplied by ConvertMaterial into a 2x3 affine, applied by
-    // TransformUV in hit_common.hlsli:
-    //
-    //   uv' = float2(m.x * uv.x + m.y * uv.y, m.z * uv.x + m.w * uv.y) + offset
-    //
-    // Indexed by the UV_SLOT_* constants below. Per slot rather than per
-    // material because SheenChair's fabric puts its base colour at scale 7 and
-    // its normal map at scale 2 within one material.
-    //
-    // Two arrays rather than one array of a {float4, float2} pair: that pair is
-    // 24 bytes, so its float4 would lose 16-byte alignment every other element
-    // and HLSL would pad it out of step with the CPU. That alignment is also
-    // what the three padding words above are for -- they carry the array start
-    // from 308 up to 320.
-
-    float4 uvTransformMat[14];           // (m00, m01, m10, m11) per slot                          // Offset: 320-544
-    float2 uvTransformOffset[14];        // translation per slot                                    // Offset: 544-656
-
-    // Note: irReflectance removed - can be computed as: 1.0 - irEmissivity - irTransmittance
-    // For opaque materials: irTransmittance = 0, so irReflectance = 1.0 - irEmissivity
-};
+// Shared with the host, which calls it MaterialDataCPU: ql_shared_scene.hlsli.
+#define QL_SHARED_WANT_MaterialData
+#include "ql_shared_scene.hlsli"
 
 // UV transform slots, mirroring MaterialGpuData.hpp.
 //
@@ -1693,19 +1374,9 @@ bool IsIRMaterialValid(MaterialData mat) {
 // SIZE: 32 bytes (must match CPU-side InstanceGeometryInfo)
 // ============================================================================
 
-struct InstanceGeometryInfo {
-    uint vertexOffset;    // Offset into global vertex buffer (vertex count)
-    uint indexOffset;     // Offset into global index buffer (index count)
-    uint normalOffset;    // Offset into global normal buffer (normal count)
-    uint uvOffset;        // Offset into global UV buffer (UV count)
-    uint tangentOffset;   // Offset into global tangent buffer (tangent count)
-    uint materialId;      // Material index (used instead of InstanceID for material lookup)
-    // First thermal element of this instance, or 0xFFFFFFFF where the solver
-    // did not run. Add PrimitiveIndex() to it and the triangle has the
-    // temperature the surface energy balance gave it.
-    uint thermalElementBase;
-    uint pad;             // Padding for 32-byte alignment
-};
+// Shared with the host: ql_shared_scene.hlsli.
+#define QL_SHARED_WANT_InstanceGeometryInfo
+#include "ql_shared_scene.hlsli"
 
 // ============================================================================
 // Debug Visualization Helper Functions

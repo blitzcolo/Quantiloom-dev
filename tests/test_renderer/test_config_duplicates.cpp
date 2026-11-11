@@ -14,9 +14,8 @@
 #include <gtest/gtest.h>
 
 #include "renderer/ExternalRenderContext.hpp"
-#include "renderer/VulkanContext.hpp"
 #include "support/GpuInteropTestUtils.hpp"
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -27,16 +26,16 @@ namespace {
 
 constexpr u32 kSize = 64;
 
-class ConfigDuplicatesTest : public quantiloom::testing::VulkanDeviceTest {
+class ConfigDuplicatesTest : public quantiloom::testing::GpuDeviceTest {
 protected:
     void SetUp() override {
-        VulkanDeviceTest::SetUp();
+        GpuDeviceTest::SetUp();
         if (::testing::Test::IsSkipped()) return;
 
         testDir = std::filesystem::temp_directory_path() / "quantiloom_config_dup";
         std::filesystem::create_directories(testDir);
 
-        auto* shared = quantiloom::testing::SharedVulkanDevice();
+        auto* shared = quantiloom::testing::SharedGpuDevice(Backend());
         ASSERT_NE(shared, nullptr);
 
         ExternalRenderContext::InitParams params{};
@@ -55,7 +54,7 @@ protected:
         if (!testDir.empty() && std::filesystem::exists(testDir)) {
             std::filesystem::remove_all(testDir);
         }
-        VulkanDeviceTest::TearDown();
+        GpuDeviceTest::TearDown();
     }
 
     /// Same cornell fixture as test_pick.cpp; `extra` is appended verbatim,
@@ -85,6 +84,7 @@ protected:
     std::filesystem::path testDir;
     std::unique_ptr<ExternalRenderContext> context;
 };
+QL_INSTANTIATE_GPU_SUITE(ConfigDuplicatesTest);
 
 bool CornellBoxAvailable() {
     const std::filesystem::path root(QUANTILOOM_SOURCE_ROOT);
@@ -93,7 +93,7 @@ bool CornellBoxAvailable() {
 
 }  // namespace
 
-TEST_F(ConfigDuplicatesTest, DuplicateExistsAndTraces) {
+TEST_P(ConfigDuplicatesTest, DuplicateExistsAndTraces) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     // First pass, no duplicates: learn which node the center ray hits and
@@ -130,7 +130,7 @@ TEST_F(ConfigDuplicatesTest, DuplicateExistsAndTraces) {
     EXPECT_EQ(pick.value().nodeIndex, static_cast<u32>(baseCount));
 }
 
-TEST_F(ConfigDuplicatesTest, ChainsAndNodesOverridesCompose) {
+TEST_P(ConfigDuplicatesTest, ChainsAndNodesOverridesCompose) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     // copyB duplicates copyA (file order), and [[nodes]] -- resolved after
@@ -151,7 +151,7 @@ TEST_F(ConfigDuplicatesTest, ChainsAndNodesOverridesCompose) {
     EXPECT_EQ(glm::vec3(copyB.transform[3]), glm::vec3(123.0f, 0.0f, 0.0f));
 }
 
-TEST_F(ConfigDuplicatesTest, RemovedNodeStopsTracing) {
+TEST_P(ConfigDuplicatesTest, RemovedNodeStopsTracing) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     // Learn which node the center ray hits, then re-apply with that node
@@ -181,7 +181,7 @@ TEST_F(ConfigDuplicatesTest, RemovedNodeStopsTracing) {
     }
 }
 
-TEST_F(ConfigDuplicatesTest, UnknownSourceWarnsWithoutFailing) {
+TEST_P(ConfigDuplicatesTest, UnknownSourceWarnsWithoutFailing) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 
     const auto report = ApplyScene(

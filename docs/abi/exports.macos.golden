@@ -1,0 +1,365 @@
+bool quantiloom::Config::Get<bool>(std::__1::basic_string_view<char, std::__1::char_traits<char>>, bool const&) const
+double quantiloom::Config::Get<double>(std::__1::basic_string_view<char, std::__1::char_traits<char>>, double const&) const
+float quantiloom::Config::Get<float>(std::__1::basic_string_view<char, std::__1::char_traits<char>>, float const&) const
+int quantiloom::Config::Get<int>(std::__1::basic_string_view<char, std::__1::char_traits<char>>, int const&) const
+long long quantiloom::Config::Get<long long>(std::__1::basic_string_view<char, std::__1::char_traits<char>>, long long const&) const
+quantiloom::AtmosphereNNConfig::ApplyPreset(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::AtmosphereNNConfig::BakeHash() const
+quantiloom::BandRadianceDerivativePerK(double, double, double)
+quantiloom::BlackbodyBandRadiance(double, double, double)
+quantiloom::camera::AllCameraPresets()
+quantiloom::camera::CameraAcquisitionIndexAt(double, double, double)
+quantiloom::camera::CameraAcquisitionTimeAt(double, double, unsigned long long)
+quantiloom::camera::CameraPoseAt(quantiloom::camera::CameraMotionConfig const&, double)
+quantiloom::camera::CameraPresetDisplayName(quantiloom::camera::CameraPresetKind)
+quantiloom::camera::CameraPresetFromToken(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::camera::CameraPresetProvenanceNotes(quantiloom::camera::CameraPresetKind)
+quantiloom::camera::CameraPresetToken(quantiloom::camera::CameraPresetKind)
+quantiloom::Camera::FromConfig(quantiloom::Config const&, float)
+quantiloom::Camera::GetCameraData() const
+quantiloom::camera::MakePresetCameraConfig(quantiloom::camera::CameraPresetKind)
+quantiloom::camera::ProjectDirection(quantiloom::camera::CameraProjection const&, glm::vec<3, double, (glm::qualifier)0> const&)
+quantiloom::camera::ProjectionModelName(quantiloom::camera::ProjectionModel)
+quantiloom::camera::ResolveProjection(quantiloom::camera::CameraProjection const&, unsigned int, unsigned int, double, double)
+quantiloom::camera::UnprojectPixel(quantiloom::camera::CameraProjection const&, glm::vec<2, double, (glm::qualifier)0> const&)
+quantiloom::camera::UnprojectPixelV2(quantiloom::camera::CameraProjection const&, glm::vec<2, double, (glm::qualifier)0> const&, unsigned int, unsigned int)
+quantiloom::camera::ValidateCameraMotion(quantiloom::camera::CameraMotionConfig const&)
+quantiloom::camera::ValidateProjection(quantiloom::camera::CameraProjection const&, unsigned int, unsigned int)
+quantiloom::CameraConfigToToml(quantiloom::camera::CameraConfig const&)
+quantiloom::ClearSkyEmissivity(double)
+quantiloom::Config::~Config()
+quantiloom::Config::Config()
+quantiloom::Config::Config(quantiloom::Config const&)
+quantiloom::Config::Config(quantiloom::Config&&)
+quantiloom::Config::Config(std::__1::unique_ptr<quantiloom::Config::Impl, std::__1::default_delete<quantiloom::Config::Impl>>)
+quantiloom::Config::GetBool(std::__1::basic_string_view<char, std::__1::char_traits<char>>, bool) const
+quantiloom::Config::GetDouble(std::__1::basic_string_view<char, std::__1::char_traits<char>>, double) const
+quantiloom::Config::GetDoubleArray(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::GetFloat(std::__1::basic_string_view<char, std::__1::char_traits<char>>, float) const
+quantiloom::Config::GetFloatArray(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::GetInt(std::__1::basic_string_view<char, std::__1::char_traits<char>>, int) const
+quantiloom::Config::GetInt64(std::__1::basic_string_view<char, std::__1::char_traits<char>>, long long) const
+quantiloom::Config::GetIntArray(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::GetNamedTable(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::GetRequiredBool(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::GetRequiredFloat(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::GetRequiredInt(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::GetRequiredString(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::GetSection(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::GetString(std::__1::basic_string_view<char, std::__1::char_traits<char>>, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&) const
+quantiloom::Config::GetStringArray(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::GetSubtableNames(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::GetTable(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::GetTableArray(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::GetUInt(std::__1::basic_string_view<char, std::__1::char_traits<char>>, unsigned int) const
+quantiloom::Config::GetUInt64(std::__1::basic_string_view<char, std::__1::char_traits<char>>, unsigned long long) const
+quantiloom::Config::Has(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::HasSection(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::Load(std::__1::__fs::filesystem::path const&)
+quantiloom::Config::MergedWith(quantiloom::Config const&) const
+quantiloom::Config::operator=(quantiloom::Config const&)
+quantiloom::Config::operator=(quantiloom::Config&&)
+quantiloom::Config::Parse(std::__1::basic_string_view<char, std::__1::char_traits<char>>)
+quantiloom::Config::Print() const
+quantiloom::Config::ToToml() const
+quantiloom::Config::ToToml(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Config::WithoutKeys(std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>>> const&) const
+quantiloom::dataset::ExportSession::~ExportSession()
+quantiloom::dataset::ExportSession::Commit()
+quantiloom::dataset::ExportSession::Create(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, quantiloom::Config const&, quantiloom::dataset::RenderProvenance const&)
+quantiloom::dataset::ExportSession::ExportSession()
+quantiloom::dataset::ExportSession::RecordId() const
+quantiloom::dataset::ExportSession::RegisterFile(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::dataset::ExportSession::SidecarName() const
+quantiloom::dataset::ExportSession::StagingPath(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&) const
+quantiloom::dataset::ExportSession::Verify(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::dataset::ExportSession::WriteImage(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, quantiloom::Image const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::dataset::ExportSession::WriteUIntImage(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, quantiloom::UIntImage const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::dataset::FusionExportJob::Run(quantiloom::Config const&, quantiloom::dataset::RigConfig const&, quantiloom::dataset::FusionExportOptions const&)
+quantiloom::dataset::FusionExportJob::RunFile(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, bool)
+quantiloom::dataset::ParseRigConfig(quantiloom::Config const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::dataset::ProductGeometry::ToJson() const
+quantiloom::dataset::RigCameraScene(quantiloom::Config const&, quantiloom::dataset::RigConfig const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::dataset::RigConfigToToml(quantiloom::dataset::RigConfig const&)
+quantiloom::DewPointC(double, double)
+quantiloom::EffectiveSkyTemperatureK(double, double)
+quantiloom::EmissionSpectrumToRenderedLinearSrgb(quantiloom::SpectralCurve const&)
+quantiloom::ExternalRenderContext::~ExternalRenderContext()
+quantiloom::ExternalRenderContext::AddComplexRefractiveIndex(quantiloom::ComplexRefractiveIndex const&)
+quantiloom::ExternalRenderContext::AddMesh(quantiloom::Mesh const&, glm::mat<4, 4, float, (glm::qualifier)0> const&)
+quantiloom::ExternalRenderContext::AddSpectralCurve(quantiloom::SpectralCurve const&)
+quantiloom::ExternalRenderContext::AdvanceCameraTo(double)
+quantiloom::ExternalRenderContext::ApplyConfig(quantiloom::Config const&, quantiloom::ConfigApplyOptions const&)
+quantiloom::ExternalRenderContext::BlitDepthTo(quantiloom::GpuCommandRecording const&, quantiloom::GpuImageTarget const&)
+quantiloom::ExternalRenderContext::BuildEndmemberWeightTexture(unsigned int, std::__1::vector<glm::vec<3, float, (glm::qualifier)0>, std::__1::allocator<glm::vec<3, float, (glm::qualifier)0>>> const&)
+quantiloom::ExternalRenderContext::CaptureCameraProducts()
+quantiloom::ExternalRenderContext::CaptureDisplayImage()
+quantiloom::ExternalRenderContext::CaptureScreenshot()
+quantiloom::ExternalRenderContext::CheckpointCameraHistory()
+quantiloom::ExternalRenderContext::ClearSolarSpectralLUT()
+quantiloom::ExternalRenderContext::ClearThermalMaterials()
+quantiloom::ExternalRenderContext::CompleteQueuedCameraAcquisition()
+quantiloom::ExternalRenderContext::Create(quantiloom::ExternalRenderContext::InitParams const&)
+quantiloom::ExternalRenderContext::DumpThermalElements(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::ExternalRenderContext::DuplicateNode(unsigned int, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::ExternalRenderContext::ExternalRenderContext()
+quantiloom::ExternalRenderContext::ExternalRenderContext(quantiloom::ExternalRenderContext&&)
+quantiloom::ExternalRenderContext::GetAccumulatedSamples() const
+quantiloom::ExternalRenderContext::GetAtmosphere() const
+quantiloom::ExternalRenderContext::GetCamera() const
+quantiloom::ExternalRenderContext::GetCameraConfig() const
+quantiloom::ExternalRenderContext::GetCameraHistoryStatus() const
+quantiloom::ExternalRenderContext::GetDebugMode() const
+quantiloom::ExternalRenderContext::GetDisplayEnhancementParams() const
+quantiloom::ExternalRenderContext::GetElementTrajectory(unsigned int, double, double, unsigned int)
+quantiloom::ExternalRenderContext::GetGPUSensorParams() const
+quantiloom::ExternalRenderContext::GetLastCameraGpuTimings() const
+quantiloom::ExternalRenderContext::GetLastDynamicExposureReport() const
+quantiloom::ExternalRenderContext::GetLastFrameTimeMs() const
+quantiloom::ExternalRenderContext::GetLightingParams() const
+quantiloom::ExternalRenderContext::GetNodeRestTransform(unsigned int) const
+quantiloom::ExternalRenderContext::GetPipelineCachePath() const
+quantiloom::ExternalRenderContext::GetRenderHeight() const
+quantiloom::ExternalRenderContext::GetRenderScale() const
+quantiloom::ExternalRenderContext::GetRenderWidth() const
+quantiloom::ExternalRenderContext::GetSamplingSeed() const
+quantiloom::ExternalRenderContext::GetScene() const
+quantiloom::ExternalRenderContext::GetSpectralMode() const
+quantiloom::ExternalRenderContext::GetSPP() const
+quantiloom::ExternalRenderContext::GetThermalParameterSensitivity(quantiloom::ThermalSensitivityParameter) const
+quantiloom::ExternalRenderContext::GetThermalSolveStatus() const
+quantiloom::ExternalRenderContext::GetTimelineInfo() const
+quantiloom::ExternalRenderContext::GetWavelength() const
+quantiloom::ExternalRenderContext::HasEnvironmentMap() const
+quantiloom::ExternalRenderContext::HasScene() const
+quantiloom::ExternalRenderContext::HasSolarSpectralLUT() const
+quantiloom::ExternalRenderContext::Impl::AdoptScene(quantiloom::Scene&&, std::__1::vector<quantiloom::rendercore::MaterialGpuIndices, std::__1::allocator<quantiloom::rendercore::MaterialGpuIndices>>)
+quantiloom::ExternalRenderContext::Impl::ApplyInternalExtent(unsigned int, unsigned int)
+quantiloom::ExternalRenderContext::Impl::ApplyTimelinePose(double, bool)
+quantiloom::ExternalRenderContext::Impl::BlitToTarget(quantiloom::gpu::CommandList&, quantiloom::gpu::TextureRef, unsigned long long, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, quantiloom::gpu::Access, quantiloom::GpuTargetFormat)
+quantiloom::ExternalRenderContext::Impl::BuildAccelerationStructures()
+quantiloom::ExternalRenderContext::Impl::CameraAutoControlActive() const
+quantiloom::ExternalRenderContext::Impl::CameraDataForCapture(quantiloom::SpectralMode, double, double) const
+quantiloom::ExternalRenderContext::Impl::ComputeImageMinMax(float&, float&)
+quantiloom::ExternalRenderContext::Impl::CreateBRDFLut()
+quantiloom::ExternalRenderContext::Impl::CreateClaheDisplayImage()
+quantiloom::ExternalRenderContext::Impl::CreateDummyBuffers()
+quantiloom::ExternalRenderContext::Impl::CreateFallbackEnvMap()
+quantiloom::ExternalRenderContext::Impl::CreatePickPipeline()
+quantiloom::ExternalRenderContext::Impl::CreatePipeline()
+quantiloom::ExternalRenderContext::Impl::CurrentDisplaySource() const
+quantiloom::ExternalRenderContext::Impl::EffectiveCameraConfig() const
+quantiloom::ExternalRenderContext::Impl::EnsureCameraResources()
+quantiloom::ExternalRenderContext::Impl::EnsureExtent(unsigned int, unsigned int)
+quantiloom::ExternalRenderContext::Impl::ExecuteCLAHE(quantiloom::gpu::CommandList&, unsigned int, unsigned int)
+quantiloom::ExternalRenderContext::Impl::FlushPendingGpuWork()
+quantiloom::ExternalRenderContext::Impl::Initialize(quantiloom::ExternalRenderContext::InitParams const&)
+quantiloom::ExternalRenderContext::Impl::MaybeRunCameraAutoControl()
+quantiloom::ExternalRenderContext::Impl::RebuildEmissiveGeometry(bool)
+quantiloom::ExternalRenderContext::Impl::RebuildSceneGpuResources()
+quantiloom::ExternalRenderContext::Impl::RecordCameraBaseline(quantiloom::gpu::CommandList&)
+quantiloom::ExternalRenderContext::Impl::RecordCameraDisplayReprocess(quantiloom::gpu::CommandList&)
+quantiloom::ExternalRenderContext::Impl::RecordCameraMeasurement(quantiloom::gpu::CommandList&, quantiloom::ExternalRenderContext::Impl::CameraSampleBudget)
+quantiloom::ExternalRenderContext::Impl::RecordQueuedAcquisition(quantiloom::gpu::CommandList&)
+quantiloom::ExternalRenderContext::Impl::RecordTimelinePose(quantiloom::gpu::CommandList&, double)
+quantiloom::ExternalRenderContext::Impl::RecreateClaheDisplayImage()
+quantiloom::ExternalRenderContext::Impl::RefreshEpochPlan()
+quantiloom::ExternalRenderContext::Impl::RunCameraAutoControl()
+quantiloom::ExternalRenderContext::Impl::StepCameraAcquisition(quantiloom::gpu::CommandList&)
+quantiloom::ExternalRenderContext::Impl::TimelineEpochHost::ApplyEpoch(double)
+quantiloom::ExternalRenderContext::Impl::TimelineEpochHost::Restore()
+quantiloom::ExternalRenderContext::Impl::TransitionImageLayoutImmediate(quantiloom::gpu::TextureRef)
+quantiloom::ExternalRenderContext::Impl::UpdateAtmosphereNN()
+quantiloom::ExternalRenderContext::Impl::UpdateCameraAtmosphere()
+quantiloom::ExternalRenderContext::Impl::UpdateGpuResources(bool)
+quantiloom::ExternalRenderContext::Impl::UpdateMaterial(unsigned int, quantiloom::Material const&, quantiloom::ExternalRenderContext&)
+quantiloom::ExternalRenderContext::Impl::UploadDeferred(quantiloom::gpu::Buffer&, unsigned long long, void const*, unsigned long long)
+quantiloom::ExternalRenderContext::Impl::UploadLightingParams()
+quantiloom::ExternalRenderContext::Impl::UploadSolarLut(quantiloom::SolarSpectralLUT const&)
+quantiloom::ExternalRenderContext::Impl::UploadThermalSunResponse(std::__1::vector<float, std::__1::allocator<float>> const&, std::__1::vector<float, std::__1::allocator<float>> const&, glm::vec<3, float, (glm::qualifier)0> const&, std::__1::vector<float, std::__1::allocator<float>> const&, std::__1::vector<float, std::__1::allocator<float>> const&, std::__1::vector<glm::vec<3, float, (glm::qualifier)0>, std::__1::allocator<glm::vec<3, float, (glm::qualifier)0>>> const&)
+quantiloom::ExternalRenderContext::Impl::UploadThermalTangent(std::__1::vector<float, std::__1::allocator<float>> const&, float)
+quantiloom::ExternalRenderContext::IsGPUSensorEnabled() const
+quantiloom::ExternalRenderContext::IsReady() const
+quantiloom::ExternalRenderContext::LoadEnvironmentMap(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::ExternalRenderContext::LoadScene(quantiloom::Config const&)
+quantiloom::ExternalRenderContext::LoadSceneFromConfig(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::ExternalRenderContext::LoadSceneFromGltf(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, quantiloom::GltfSceneOptions const&)
+quantiloom::ExternalRenderContext::LoadSceneFromGltf(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::ExternalRenderContext::LoadSceneFromUsd(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, quantiloom::UsdSceneOptions const&)
+quantiloom::ExternalRenderContext::LoadSceneFromUsd(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::ExternalRenderContext::operator=(quantiloom::ExternalRenderContext&&)
+quantiloom::ExternalRenderContext::Pick(unsigned int, unsigned int)
+quantiloom::ExternalRenderContext::PollPixelValue()
+quantiloom::ExternalRenderContext::PresentAccumulated(quantiloom::GpuCommandRecording const&, quantiloom::GpuImageTarget const&)
+quantiloom::ExternalRenderContext::QueueCameraAcquisition(unsigned long long, double)
+quantiloom::ExternalRenderContext::ReadPixelValue(unsigned int, unsigned int)
+quantiloom::ExternalRenderContext::RebuildAccelerationStructure()
+quantiloom::ExternalRenderContext::RecordCameraBaseline(quantiloom::GpuCommandRecording const&)
+quantiloom::ExternalRenderContext::RecordQueuedCameraAcquisition(quantiloom::GpuCommandRecording const&)
+quantiloom::ExternalRenderContext::RefitAccelerationStructure()
+quantiloom::ExternalRenderContext::RemoveNode(unsigned int)
+quantiloom::ExternalRenderContext::RenderFrame(quantiloom::GpuCommandRecording const&, quantiloom::GpuImageTarget const&)
+quantiloom::ExternalRenderContext::ReprocessAccumulated(quantiloom::GpuCommandRecording const&, quantiloom::GpuImageTarget const&)
+quantiloom::ExternalRenderContext::ReprocessCameraDisplay()
+quantiloom::ExternalRenderContext::RequestPixelValue(unsigned int, unsigned int, unsigned long long)
+quantiloom::ExternalRenderContext::ResetAccumulation()
+quantiloom::ExternalRenderContext::ResetCameraHistory()
+quantiloom::ExternalRenderContext::Resize(unsigned int, unsigned int)
+quantiloom::ExternalRenderContext::RestoreCameraHistoryCheckpoint()
+quantiloom::ExternalRenderContext::RestoreNode(unsigned int)
+quantiloom::ExternalRenderContext::SetAtmosphere(quantiloom::AtmosphereNNConfig const&)
+quantiloom::ExternalRenderContext::SetCameraConfig(quantiloom::camera::CameraConfig const&)
+quantiloom::ExternalRenderContext::SetCameraFOV(float)
+quantiloom::ExternalRenderContext::SetCameraLookAt(glm::vec<3, float, (glm::qualifier)0> const&, glm::vec<3, float, (glm::qualifier)0> const&, glm::vec<3, float, (glm::qualifier)0> const&, glm::vec<3, float, (glm::qualifier)0> const&)
+quantiloom::ExternalRenderContext::SetCameraLookAt(glm::vec<3, float, (glm::qualifier)0> const&, glm::vec<3, float, (glm::qualifier)0> const&, glm::vec<3, float, (glm::qualifier)0> const&)
+quantiloom::ExternalRenderContext::SetCameraProjection(quantiloom::CameraProjection, float)
+quantiloom::ExternalRenderContext::SetCameraViewMatrix(glm::mat<4, 4, float, (glm::qualifier)0> const&)
+quantiloom::ExternalRenderContext::SetDebugMode(quantiloom::DebugVisualizationMode)
+quantiloom::ExternalRenderContext::SetDebugParameter(unsigned int)
+quantiloom::ExternalRenderContext::SetDisplayEnhancementParams(quantiloom::DisplayEnhancementParams const&)
+quantiloom::ExternalRenderContext::SetGPUSensorEnabled(bool)
+quantiloom::ExternalRenderContext::SetGPUSensorParams(quantiloom::SensorParams const&)
+quantiloom::ExternalRenderContext::SetLightingParams(quantiloom::LightingParams const&)
+quantiloom::ExternalRenderContext::SetMaterialEmissionSpectrum(unsigned int, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::ExternalRenderContext::SetNodeTransform(unsigned int, glm::mat<4, 4, float, (glm::qualifier)0> const&)
+quantiloom::ExternalRenderContext::SetRenderScale(float)
+quantiloom::ExternalRenderContext::SetSamplingSeed(unsigned int)
+quantiloom::ExternalRenderContext::SetSkyRadiance(glm::vec<3, float, (glm::qualifier)0> const&)
+quantiloom::ExternalRenderContext::SetSolarSpectralLUT(quantiloom::SpectralCurve const&, quantiloom::SpectralCurve const&)
+quantiloom::ExternalRenderContext::SetSolarSpectralLUTFromSpec(quantiloom::SolarLutSpec const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::ExternalRenderContext::SetSpectralMode(quantiloom::SpectralMode)
+quantiloom::ExternalRenderContext::SetSPP(unsigned int)
+quantiloom::ExternalRenderContext::SetSunDirection(glm::vec<3, float, (glm::qualifier)0> const&)
+quantiloom::ExternalRenderContext::SetSunRadiance(glm::vec<3, float, (glm::qualifier)0> const&)
+quantiloom::ExternalRenderContext::SetThermalEpochProgressCallback(std::__1::function<void (unsigned int, unsigned int)>)
+quantiloom::ExternalRenderContext::SetThermalMaterial(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, quantiloom::ThermalMaterialParams const&)
+quantiloom::ExternalRenderContext::SetThermalSolveEnabled(bool)
+quantiloom::ExternalRenderContext::SetThermalSolveParams(quantiloom::ThermalSolveParams const&)
+quantiloom::ExternalRenderContext::SetThermalTime(double)
+quantiloom::ExternalRenderContext::SetThermalWhatIf(quantiloom::ThermalSensitivityParameter, double)
+quantiloom::ExternalRenderContext::SetTimelineThermalMapping(double, double)
+quantiloom::ExternalRenderContext::SetTimelineTime(double)
+quantiloom::ExternalRenderContext::SetViewportSampleBatch(unsigned int)
+quantiloom::ExternalRenderContext::SetWavelength(float)
+quantiloom::ExternalRenderContext::ThermalElementAt(quantiloom::PickResult const&) const
+quantiloom::ExternalRenderContext::TryUpdateCameraReadoutConfig(quantiloom::camera::CameraConfig const&)
+quantiloom::ExternalRenderContext::UpdateCameraDisplayConfig(quantiloom::camera::CameraConfig const&)
+quantiloom::ExternalRenderContext::UpdateMaterial(unsigned int, quantiloom::Material const&)
+quantiloom::ExternalRenderContext::WarmUpCamera(double)
+quantiloom::GenericSensor::~GenericSensor()
+quantiloom::GenericSensor::Apply(quantiloom::Image const&, quantiloom::SensorParams const&)
+quantiloom::GenericSensor::GenericSensor()
+quantiloom::GetResourceRoot()
+quantiloom::ImageIO::FileExists(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::ImageIO::GetDimensions(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::ImageIO::ReadEXR(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::ImageIO::ReadImage(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::ImageIO::ReadUIntEXR(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::ImageIO::WriteEXR(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, quantiloom::Image const&)
+quantiloom::ImageIO::WritePNG(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, quantiloom::Image const&)
+quantiloom::ImageIO::WriteUIntEXR(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, quantiloom::UIntImage const&)
+quantiloom::InvertApparentTemperatureK(double, double, double)
+quantiloom::InvertSurfaceTemperatureK(double, double, double, quantiloom::ThermographyParams const&)
+quantiloom::Log::Flush()
+quantiloom::Log::GetLevel()
+quantiloom::Log::Init(char const*, quantiloom::Log::Level)
+quantiloom::Log::LogMessage(quantiloom::Log::Level, std::__1::basic_string_view<char, std::__1::char_traits<char>>)
+quantiloom::Log::s_CurrentLevel
+quantiloom::Log::SetLevel(quantiloom::Log::Level)
+quantiloom::Log::Shutdown()
+quantiloom::MakeEqualEnergyIlluminant(float, float)
+quantiloom::Material::ValidateIRKirchhoffLaw() const
+quantiloom::mcp::EncodeImageContent(quantiloom::Image const&, unsigned int)
+quantiloom::mcp::Server::~Server()
+quantiloom::mcp::Server::Create(quantiloom::mcp::ServerOptions const&)
+quantiloom::mcp::Server::PendingCommands() const
+quantiloom::mcp::Server::Port() const
+quantiloom::mcp::Server::Pump()
+quantiloom::mcp::Server::RegisterTool(quantiloom::mcp::ToolDef const&)
+quantiloom::mcp::Server::Server()
+quantiloom::mcp::Server::Stop()
+quantiloom::NoiseEquivalentTemperatureDifferenceK(quantiloom::SensorParams const&, double, double, double)
+quantiloom::OfflineRenderer::~OfflineRenderer()
+quantiloom::OfflineRenderer::AdvanceCameraState(quantiloom::camera::CaptureState&, double)
+quantiloom::OfflineRenderer::CaptureCamera(quantiloom::camera::CaptureState&, double)
+quantiloom::OfflineRenderer::CaptureCameraInternal(quantiloom::camera::CaptureState&, double, bool)
+quantiloom::OfflineRenderer::CaptureFusionV2(quantiloom::camera::CaptureState&, double, quantiloom::dataset::FusionCaptureOptionsV2 const&)
+quantiloom::OfflineRenderer::CaptureGeometry(double, quantiloom::camera::CameraProjection const*)
+quantiloom::OfflineRenderer::CheckpointCamera(quantiloom::camera::CaptureState const&)
+quantiloom::OfflineRenderer::Create(quantiloom::Config const&, quantiloom::OfflineRenderer::InitParams const&)
+quantiloom::OfflineRenderer::GetCameraConfig() const
+quantiloom::OfflineRenderer::GetTimelineInfo() const
+quantiloom::OfflineRenderer::Impl::BuildIlluminants()
+quantiloom::OfflineRenderer::Impl::BuildPipeline()
+quantiloom::OfflineRenderer::Impl::BuildScene()
+quantiloom::OfflineRenderer::Impl::BuildThermalSession()
+quantiloom::OfflineRenderer::Impl::CameraDataAt(double, quantiloom::SpectralMode, double, bool) const
+quantiloom::OfflineRenderer::Impl::OfflineEpochHost::ApplyEpoch(double)
+quantiloom::OfflineRenderer::Impl::OfflineEpochHost::Restore()
+quantiloom::OfflineRenderer::Impl::RenderCameraWavelength(double, unsigned long long, unsigned int, double)
+quantiloom::OfflineRenderer::Impl::RenderHyperspectral()
+quantiloom::OfflineRenderer::Impl::RenderSingleFrame()
+quantiloom::OfflineRenderer::Impl::ThermalHourNow() const
+quantiloom::OfflineRenderer::Impl::UploadThermalFieldAt(double)
+quantiloom::OfflineRenderer::Impl::UploadThermalResult(quantiloom::thermal::ThermalResult const&)
+quantiloom::OfflineRenderer::OfflineRenderer()
+quantiloom::OfflineRenderer::Params() const
+quantiloom::OfflineRenderer::QueryOpticalPaths(std::__1::vector<quantiloom::dataset::OpticalProbe, std::__1::allocator<quantiloom::dataset::OpticalProbe>> const&, double)
+quantiloom::OfflineRenderer::QuerySurfaces(std::__1::vector<glm::vec<2, float, (glm::qualifier)0>, std::__1::allocator<glm::vec<2, float, (glm::qualifier)0>>> const&, double)
+quantiloom::OfflineRenderer::Render()
+quantiloom::OfflineRenderer::RestoreCamera(quantiloom::camera::CaptureState&, quantiloom::camera::CaptureCheckpoint const&)
+quantiloom::OfflineRenderer::SetTimelineTime(double)
+quantiloom::OfflineRenderer::WarmUpCamera(quantiloom::camera::CaptureState&, double, double)
+quantiloom::ParseCameraConfig(quantiloom::Config const&, quantiloom::SpectralMode, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::ReflectanceToLinearSrgbD65(quantiloom::SpectralCurve const&)
+quantiloom::RenderDevice::~RenderDevice()
+quantiloom::RenderDevice::Create(quantiloom::RenderDevice::InitParams const&)
+quantiloom::RenderDevice::Impl::~Impl()
+quantiloom::RenderDevice::RenderDevice()
+quantiloom::Result<bool, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>> quantiloom::Config::GetRequired<bool>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Result<double, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>> quantiloom::Config::GetRequired<double>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Result<float, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>> quantiloom::Config::GetRequired<float>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Result<int, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>> quantiloom::Config::GetRequired<int>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Result<long long, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>> quantiloom::Config::GetRequired<long long>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Result<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>> quantiloom::Config::GetRequired<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Result<unsigned int, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>> quantiloom::Config::GetRequired<unsigned int>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Result<unsigned long long, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>> quantiloom::Config::GetRequired<unsigned long long>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+quantiloom::Scene::FromConfig(quantiloom::Config const&)
+quantiloom::Scene::GetBoundingBoxSize() const
+quantiloom::Scene::GetTotalTriangleCount() const
+quantiloom::Scene::GetTotalVertexCount() const
+quantiloom::Scene::IsValid() const
+quantiloom::Scene::PrintSummary() const
+quantiloom::SetResourceRoot(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::SpectralIO::BuiltinEmissionSpectra()
+quantiloom::SpectralIO::LoadASTMG173(std::__1::__fs::filesystem::path const&, unsigned int)
+quantiloom::SpectralIO::LoadASTMG173SunAndSky(std::__1::__fs::filesystem::path const&)
+quantiloom::SpectralIO::LoadEmissionSpectrum(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, std::__1::__fs::filesystem::path const&, unsigned int)
+quantiloom::SpectralIO::LoadLibRadtranSunAndSky(std::__1::__fs::filesystem::path const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, unsigned int, unsigned int, bool)
+quantiloom::SpectralIO::LoadLibRadtranUvspec(std::__1::__fs::filesystem::path const&, unsigned int, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::SpectralIO::LoadRefractiveIndexYAML(std::__1::__fs::filesystem::path const&)
+quantiloom::SpectralIO::LoadSpectralCurveCSV(std::__1::__fs::filesystem::path const&)
+quantiloom::SpectralIO::LoadUSGS(std::__1::__fs::filesystem::path const&, std::__1::__fs::filesystem::path const&)
+quantiloom::SpectralIO::LoadUSGSAuto(std::__1::__fs::filesystem::path const&)
+quantiloom::SpectralIO::ReconstructBasisCurve(std::__1::__fs::filesystem::path const&, std::__1::__fs::filesystem::path const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+quantiloom::SpectralIrradianceToLinearSrgb(quantiloom::SpectralCurve const&)
+std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> quantiloom::Config::Get<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>>(std::__1::basic_string_view<char, std::__1::char_traits<char>>, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&) const
+std::__1::vector<bool, std::__1::allocator<bool>> quantiloom::Config::GetArray<bool>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+std::__1::vector<double, std::__1::allocator<double>> quantiloom::Config::GetArray<double>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+std::__1::vector<float, std::__1::allocator<float>> quantiloom::Config::GetArray<float>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+std::__1::vector<int, std::__1::allocator<int>> quantiloom::Config::GetArray<int>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+std::__1::vector<long long, std::__1::allocator<long long>> quantiloom::Config::GetArray<long long>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>>> quantiloom::Config::GetArray<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+std::__1::vector<unsigned int, std::__1::allocator<unsigned int>> quantiloom::Config::GetArray<unsigned int>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+std::__1::vector<unsigned long long, std::__1::allocator<unsigned long long>> quantiloom::Config::GetArray<unsigned long long>(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+typeinfo for quantiloom::ExternalRenderContext::Impl::TimelineEpochHost
+typeinfo for quantiloom::GenericSensor
+typeinfo for quantiloom::OfflineRenderer::Impl::OfflineEpochHost
+typeinfo name for quantiloom::ExternalRenderContext::Impl::TimelineEpochHost
+typeinfo name for quantiloom::GenericSensor
+typeinfo name for quantiloom::OfflineRenderer::Impl::OfflineEpochHost
+unsigned int quantiloom::Config::Get<unsigned int>(std::__1::basic_string_view<char, std::__1::char_traits<char>>, unsigned int const&) const
+unsigned long long quantiloom::Config::Get<unsigned long long>(std::__1::basic_string_view<char, std::__1::char_traits<char>>, unsigned long long const&) const
+vtable for quantiloom::ExternalRenderContext::Impl::TimelineEpochHost
+vtable for quantiloom::GenericSensor
+vtable for quantiloom::OfflineRenderer::Impl::OfflineEpochHost

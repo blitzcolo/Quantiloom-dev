@@ -14,29 +14,16 @@
 #include <utility>
 #include <vector>
 
+// CameraPush, defined once for camera_common.hlsli and this file. By a path
+// relative to this file, as RtBindings.hpp includes its manifest.
+#include "../../shaders/ql_shared_compute.hlsli"
+
 
 namespace quantiloom::rendercore {
 namespace {
 
 
-struct CameraPush {
-    u32 width = 0, height = 0, physicalWidth = 0, physicalHeight = 0;
-    u32 channelCount = 1, cfa = 0, detector = 0, flags = 0;
-    u32 seed = 0, acquisitionLo = 0, acquisitionHi = 0, adcBits = 0;
-    f32 frameTimeSeconds = 0.0f, deltaSeconds = 0.0f;
-    u32 firstThermal = 1, direction = 0;
-    f32 sigmaR = 0.0f, sigmaG = 0.0f, sigmaB = 0.0f;
-    f32 sigmaRy = 0.0f, sigmaGy = 0.0f, sigmaBy = 0.0f;
-    u32 rngNoiseClass = 0, rngCounter = 0;
-    // Dynamic compositor scalars; per-stratum camera frames ride in the
-    // binding-10 buffer. Must match CameraPush in camera_common.hlsli.
-    u32 timeStratumCount = 1, rollingShutter = 0;
-    f32 exposureSeconds = 0.0f, rowDelaySeconds = 0.0f;
-    f32 firstRowMidSeconds = 0.0f;
-    // Multi-phase camera passes (camera_stats) select their stage here.
-    u32 ispPhase = 0;
-};
-static_assert(sizeof(CameraPush) == 120);
+using CameraPush = shader::CameraPush;
 
 // DisplayToneMode / DisplayPalette orders must match DisplayControl.hpp and
 // the shader constants.

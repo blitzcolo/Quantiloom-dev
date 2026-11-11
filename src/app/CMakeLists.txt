@@ -17,12 +17,17 @@ configure_file(
 # four lines of it, which meant a bump touched five files across this repo and
 # nothing failed when one was missed -- a stale FILEVERSION is only visible in
 # Explorer's Details tab. @ONLY because a .rc is full of ${...} belonging to
-# the resource compiler.
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/Quantiloom.rc.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/Quantiloom.rc"
-    @ONLY
-)
+# the resource compiler. Windows-only: no other platform has a resource
+# compiler.
+set(quantiloom_rc "")
+if(WIN32)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Quantiloom.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/Quantiloom.rc"
+        @ONLY
+    )
+    set(quantiloom_rc "${CMAKE_CURRENT_BINARY_DIR}/Quantiloom.rc")
+endif()
 
 # Enable warnings
 if(MSVC)
@@ -43,7 +48,7 @@ add_executable(Quantiloom
     RenderJob.hpp
     McpServe.cpp
     McpServe.hpp
-    ${CMAKE_CURRENT_BINARY_DIR}/Quantiloom.rc
+    ${quantiloom_rc}
     ${CMAKE_CURRENT_BINARY_DIR}/Version.hpp
 )
 

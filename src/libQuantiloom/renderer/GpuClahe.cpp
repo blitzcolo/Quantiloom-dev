@@ -12,30 +12,20 @@
 #include <algorithm>
 #include <vector>
 
+// CLAHEPushConstants, defined once for clahe.comp.hlsl and this file. By a path
+// relative to this file, as RtBindings.hpp includes its manifest.
+#include "../../shaders/ql_shared_compute.hlsli"
+
 
 namespace quantiloom::rendercore {
 
 namespace {
 
-/// Push constants (must match CLAHEPushConstants in clahe.comp.hlsl). The
-/// pipeline-layout range and the record-time payload share this one 48-byte
-/// block; the words past passIndex are padding in the layout range and the
-/// tone/palette selectors at record time.
-struct CLAHEPushConstants {
-    u32 imageWidth;
-    u32 imageHeight;
-    u32 tileCountX;
-    u32 tileCountY;
-    f32 clipLimit;
-    u32 luminanceOnly;
-    f32 inputMin;
-    f32 inputMax;
-    u32 passIndex;
-    u32 toneMode;
-    u32 palette;
-    u32 padding;
-};
-static_assert(sizeof(CLAHEPushConstants) == 48);
+/// Push constants of all three passes. The pipeline-layout range and the
+/// record-time payload share this one 48-byte block; the words past passIndex
+/// are padding in the layout range and the tone/palette selectors at record
+/// time.
+using CLAHEPushConstants = shader::CLAHEPushConstants;
 
 }  // namespace
 

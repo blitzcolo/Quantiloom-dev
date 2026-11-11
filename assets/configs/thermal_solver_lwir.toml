@@ -29,7 +29,7 @@ mode = "lwir_fused"
 band = "LWIR"
 
 [scene]
-gltf = "H:/Quantiloom-dev/assets/models/endmember_checker.glb"
+gltf = "assets/models/endmember_checker.glb"
 world_units_to_meters = 1.0
 # Only a starting point: the solver overwrites it for every surface it owns.
 default_temperature_k = 288.15

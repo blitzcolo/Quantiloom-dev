@@ -2,42 +2,9 @@
 // five folds identical to postprocess/CameraPhysics.cpp::CounterRandomU32.
 #include "ql_bind.hlsli"
 
-struct CameraPush {
-    uint width;
-    uint height;
-    uint physicalWidth;
-    uint physicalHeight;
-    uint channelCount;
-    uint cfa;
-    uint detector;
-    uint flags;
-    uint seed;
-    uint acquisitionLo;
-    uint acquisitionHi;
-    uint adcBits;
-    float frameTimeSeconds;
-    float deltaSeconds;
-    uint firstThermal;
-    uint direction;
-    float sigmaR;
-    float sigmaG;
-    float sigmaB;
-    float sigmaRy;
-    float sigmaGy;
-    float sigmaBy;
-    uint rngNoiseClass;
-    uint rngCounter;
-    // Dynamic-exposure compositor (camera_dynamic.comp). The per-stratum
-    // camera frames ride in binding 10; these scalars describe the exposure.
-    uint timeStratumCount;      // T; 0/1 = plain copy of layer 0
-    uint rollingShutter;        // 0/1: rows integrate at firstRowMid + y*rowDelay
-    float exposureSeconds;      // E: integration window each row integrates over
-    float rowDelaySeconds;      // rolling-shutter per-row offset
-    float firstRowMidSeconds;   // t0: midpoint of row 0's exposure. Absolute, so f32-coarse; nothing may subtract with it
-    // Multi-phase camera passes (camera_stats) select their stage here; 0 for
-    // every other pass. Must match CameraPush in GpuCameraPipeline.cpp.
-    uint ispPhase;
-};
+// Shared with renderer/GpuCameraPipeline.cpp: ql_shared_compute.hlsli.
+#define QL_SHARED_WANT_CameraPush
+#include "ql_shared_compute.hlsli"
 QL_PUSH_CONSTANTS(CameraPush, cameraPush);
 
 // bit 0 noiseFree, 1 shot, 2 dark current, 3 dark shot, 4 read,

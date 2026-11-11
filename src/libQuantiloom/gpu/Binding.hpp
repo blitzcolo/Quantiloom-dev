@@ -23,7 +23,7 @@ enum class BindingKind : u8 {
     SampledTexture,         // (t) Texture2D / TextureCube                  -> SAMPLED_IMAGE
     Sampler,                // (s) SamplerState                             -> SAMPLER
     ConstantBuffer,         // (b) ConstantBuffer<T>                        -> UNIFORM_BUFFER
-    AccelerationStructure,  // (t) reserved                                 -> ACCELERATION_STRUCTURE_KHR
+    AccelerationStructure,  // (t) RaytracingAccelerationStructure          -> ACCELERATION_STRUCTURE_KHR
 };
 
 inline constexpr u32 kUnboundedCount = ~u32{0};  // reserved: bindless arrays in space 1
@@ -33,6 +33,9 @@ struct BindingSlot {
     BindingKind kind{};
     u32 count = 1;
     bool partiallyBound = false;
+    /// Vulkan stageFlags; Metal ignores it. Trailing, so `{slot, kind, count, partial}` still
+    /// means a compute-only binding.
+    ShaderStages visibility = ShaderStages::Compute;
 };
 
 struct BindingLayoutDesc {
@@ -63,6 +66,9 @@ public:
     virtual void Reset() = 0;
 };
 
+/// One descriptor write. A SampledTexture or Sampler write with a non-empty span is one
+/// array write of span.size() descriptors starting at arrayElement; the span must outlive
+/// the WriteBindGroup call.
 struct BindingWrite {
     u32 slot = 0;
     BindingKind kind{};
@@ -70,6 +76,11 @@ struct BindingWrite {
     u64 offset = 0;
     u64 range = kWholeSize;
     TextureRef texture{};
+    u32 arrayElement = 0;
+    SamplerRef sampler{};
+    RtSceneRef scene{};
+    std::span<const TextureRef> textures{};
+    std::span<const SamplerRef> samplers{};
 
     static BindingWrite Buffer(u32 slot, BindingKind kind, BufferRef b, u64 offset = 0,
                                u64 range = kWholeSize) {
@@ -86,6 +97,44 @@ struct BindingWrite {
         w.slot = slot;
         w.kind = BindingKind::StorageTexture;
         w.texture = t;
+        return w;
+    }
+    /// Vulkan layout from the policy: GENERAL under General, SHADER_READ_ONLY_OPTIMAL under Optimal.
+    static BindingWrite SampledTexture(u32 slot, TextureRef t) {
+        BindingWrite w;
+        w.slot = slot;
+        w.kind = BindingKind::SampledTexture;
+        w.texture = t;
+        return w;
+    }
+    static BindingWrite Sampler(u32 slot, SamplerRef s) {
+        BindingWrite w;
+        w.slot = slot;
+        w.kind = BindingKind::Sampler;
+        w.sampler = s;
+        return w;
+    }
+    static BindingWrite Scene(u32 slot, RtSceneRef s) {
+        BindingWrite w;
+        w.slot = slot;
+        w.kind = BindingKind::AccelerationStructure;
+        w.scene = s;
+        return w;
+    }
+    static BindingWrite SampledTextures(u32 slot, std::span<const TextureRef> t, u32 first = 0) {
+        BindingWrite w;
+        w.slot = slot;
+        w.kind = BindingKind::SampledTexture;
+        w.textures = t;
+        w.arrayElement = first;
+        return w;
+    }
+    static BindingWrite Samplers(u32 slot, std::span<const SamplerRef> s, u32 first = 0) {
+        BindingWrite w;
+        w.slot = slot;
+        w.kind = BindingKind::Sampler;
+        w.samplers = s;
+        w.arrayElement = first;
         return w;
     }
 };

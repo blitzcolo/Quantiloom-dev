@@ -7,7 +7,7 @@
 #include "core/Log.hpp"
 #include "renderer/ExternalRenderContext.hpp"
 #include "renderer/interop/VulkanInterop.hpp"
-#include "renderer/VulkanContext.hpp"
+#include "gpu/vulkan/VulkanContext.hpp"
 
 #include <vulkan/vulkan.h>
 

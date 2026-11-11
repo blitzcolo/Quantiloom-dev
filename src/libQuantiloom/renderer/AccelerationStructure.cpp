@@ -1,40 +1,80 @@
 #include "AccelerationStructure.hpp"
 #include "core/Log.hpp"
+#include "gpu/Device.hpp"
+#include "renderer/GpuAlloc.hpp"
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
+#include <cstddef>
+#include <span>
 #include <stdexcept>
 #include <memory>
+#include <utility>
 
 namespace quantiloom {
 
 namespace {
 
-// VUID-VkAccelerationStructureBuildGeometryInfoKHR-scratchData-03710: the
-// scratch device address must be a multiple of
+// The Vulkan spec's scratch-address rule (build geometry info, scratchData-03710):
+// the scratch device address must be a multiple of
 // minAccelerationStructureScratchOffsetAlignment (128 on NVIDIA). Nothing in
-// the scratch buffer's usage flags implies that, so VMA is free to suballocate
-// at a 16-byte boundary and the build reads and writes off its own scratch --
-// which surfaces as a GPU hang and VK_ERROR_DEVICE_LOST, not as an error.
-VkDeviceSize ScratchAlignment(const VulkanContext& context) {
-    const VkDeviceSize reported =
-        context.GetAccelerationStructureProperties().minAccelerationStructureScratchOffsetAlignment;
+// the scratch buffer's usage flags implies that, so the allocator is free to
+// suballocate at a 16-byte boundary and the build reads and writes off its own
+// scratch -- which surfaces as a GPU hang and a lost device, not as an error.
+u64 ScratchAlignment(const gpu::DeviceInfo& info) {
+    const u64 reported = info.rtScratchAlignment;
     // A zero here would mean the property was never queried; 128 covers every
     // desktop driver we target and costs nothing when the real value is lower.
     return reported > 0 ? reported : 128;
 }
 
-// VUID-VkAccelerationStructureGeometryInstancesDataKHR-arrayOfPointers-03779.
-constexpr VkDeviceSize kInstanceDataAlignment = 16;
-constexpr VkDeviceSize kMaxCmdUpdateBytes = 65536;
+// The instance data address rule (instances data, arrayOfPointers-03779).
+constexpr u64 kInstanceDataAlignment = 16;
+constexpr u64 kMaxCmdUpdateBytes = 65536;
 
 // The failure mode this guards against has no error code -- an unaligned build
 // input hangs the GPU and the device-lost surfaces later, at whatever the next
 // queue wait happens to be. Say it out loud here instead.
-void WarnIfMisaligned(const char* what, VkDeviceAddress address, VkDeviceSize alignment) {
+void WarnIfMisaligned(const char* what, u64 address, u64 alignment) {
     if (alignment > 0 && (address % alignment) != 0) {
         QL_LOG_ERROR("  {} device address 0x{:x} is not {}-byte aligned -- "
                      "the acceleration structure build will corrupt memory",
                      what, address, alignment);
+    }
+}
+
+// Device-local storage with a device address, at the scratch offset alignment.
+// Allocated through CreateBufferOrThrow, whose exception carries the backend's
+// allocation text unprefixed, as the scratch allocation always threw it.
+gpu::BufferDesc ScratchDesc(u64 bytes, u64 alignment) {
+    gpu::BufferDesc desc;
+    desc.size = bytes;
+    desc.usage = gpu::BufferUsage::Storage | gpu::BufferUsage::DeviceAddress;
+    desc.memory = gpu::MemoryClass::DeviceLocal;
+    desc.minAlignment = alignment;
+    return desc;
+}
+
+// The one geometry of a Top level: `count` packed instance records from the
+// start of `instances`. Its own geometry flag stays 0 (see the backend).
+gpu::RtGeometry TopLevelGeometry(const gpu::Buffer& instances, u32 count) {
+    gpu::RtGeometry geometry;
+    geometry.level = gpu::RtLevel::Top;
+    // ALLOW_UPDATE so Update() can refit transforms in place during drags
+    geometry.flags = gpu::RtBuildFlags::PreferFastTrace | gpu::RtBuildFlags::AllowUpdate;
+    geometry.instances.buffer = instances.Ref();
+    geometry.instances.offset = 0;
+    geometry.instances.count = count;
+    return geometry;
+}
+
+// An instance transform is the top three rows of the object-to-world matrix,
+// row-major; glm stores the matrix column-major, hence the transpose.
+void ToInstanceTransform(const glm::mat4& transform, f32 (&out)[3][4]) {
+    const f32* mat = glm::value_ptr(transform);
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            out[row][col] = mat[col * 4 + row];  // transpose
+        }
     }
 }
 
@@ -44,12 +84,12 @@ void WarnIfMisaligned(const char* what, VkDeviceAddress address, VkDeviceSize al
 // BLAS Implementation
 // ============================================================================
 
-BLAS::BLAS(VulkanContext& context, GeometrySlice geometry, bool opaque)
-    : m_context(context)
+BLAS::BLAS(gpu::Device& device, GeometrySlice geometry, bool opaque)
+    : m_device(device)
     , m_opaque(opaque)
     , m_geometry(geometry)
 {
-    if (!geometry.vertices || !geometry.indices || geometry.vertexCount == 0 ||
+    if (!geometry.vertices.IsValid() || !geometry.indices.IsValid() || geometry.vertexCount == 0 ||
         geometry.indexCount == 0) {
         throw std::runtime_error("Cannot create BLAS from an empty geometry slice");
     }
@@ -58,200 +98,97 @@ BLAS::BLAS(VulkanContext& context, GeometrySlice geometry, bool opaque)
                 geometry.vertexCount, geometry.indexCount / 3);
 }
 
-BLAS::~BLAS() {
-    if (m_as != VK_NULL_HANDLE) {
-        const auto vkDestroyAccelerationStructureKHR = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(vkGetDeviceProcAddr(
-            m_context.GetDevice(), "vkDestroyAccelerationStructureKHR"));
-
-        if (vkDestroyAccelerationStructureKHR) {
-            vkDestroyAccelerationStructureKHR(m_context.GetDevice(), m_as, nullptr);
-        }
-    }
-}
+// The structure is destroyed first, then its storage, then the scratch.
+BLAS::~BLAS() = default;
 
 BLAS::BLAS(BLAS&& other) noexcept
-    : m_context(other.m_context)
-    , m_as(other.m_as)
-    , m_asBuffer(std::move(other.m_asBuffer))
+    : m_device(other.m_device)
     , m_scratchBuffer(std::move(other.m_scratchBuffer))
-    , m_deviceAddress(other.m_deviceAddress)
+    , m_structure(std::move(other.m_structure))
     , m_built(other.m_built)
     , m_opaque(other.m_opaque)
     , m_geometry(other.m_geometry)
 {
-    other.m_as = VK_NULL_HANDLE;
-    other.m_deviceAddress = 0;
     other.m_built = false;
 }
 
 BLAS& BLAS::operator=(BLAS&& other) noexcept {
     if (this != &other) {
-        // Destroy current resources
-        if (m_as != VK_NULL_HANDLE) {
-            const auto vkDestroyAccelerationStructureKHR = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(vkGetDeviceProcAddr(
-                m_context.GetDevice(), "vkDestroyAccelerationStructureKHR"));
-
-            if (vkDestroyAccelerationStructureKHR) {
-                vkDestroyAccelerationStructureKHR(m_context.GetDevice(), m_as, nullptr);
-            }
-        }
-
-        // Move from other
-        m_as = other.m_as;
-        m_asBuffer = std::move(other.m_asBuffer);
+        // Destroys the current structure, then its storage, then the old
+        // scratch. m_device stays: a move assignment does not change the
+        // device either.
+        m_structure = std::move(other.m_structure);
         m_scratchBuffer = std::move(other.m_scratchBuffer);
-        m_deviceAddress = other.m_deviceAddress;
         m_built = other.m_built;
         m_opaque = other.m_opaque;
         m_geometry = other.m_geometry;
 
         // Nullify source
-        other.m_as = VK_NULL_HANDLE;
-        other.m_deviceAddress = 0;
         other.m_built = false;
     }
     return *this;
 }
 
-void BLAS::Build(VkCommandBuffer cmd) {
-    VkDevice device = m_context.GetDevice();
-    VmaAllocator allocator = m_context.GetAllocator();
+gpu::RtSceneRef BLAS::Ref() const {
+    return m_structure ? m_structure->Ref() : gpu::RtSceneRef{};
+}
 
-    if (!m_geometry.vertices || !m_geometry.indices) {
+void BLAS::Build(gpu::CommandList& list) {
+    if (!m_geometry.vertices.IsValid() || !m_geometry.indices.IsValid()) {
         throw std::runtime_error("BLAS geometry slice is invalid");
     }
 
-    // Get function pointers
-    auto vkGetAccelerationStructureBuildSizesKHR = reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(
-        vkGetDeviceProcAddr(device, "vkGetAccelerationStructureBuildSizesKHR"));
-    auto vkCreateAccelerationStructureKHR = reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(
-        vkGetDeviceProcAddr(device, "vkCreateAccelerationStructureKHR"));
-    auto vkGetAccelerationStructureDeviceAddressKHR = reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
-        vkGetDeviceProcAddr(device, "vkGetAccelerationStructureDeviceAddressKHR"));
-    auto vkCmdBuildAccelerationStructuresKHR = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(
-        vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR"));
-
-    if (!vkGetAccelerationStructureBuildSizesKHR || !vkCreateAccelerationStructureKHR ||
-        !vkGetAccelerationStructureDeviceAddressKHR || !vkCmdBuildAccelerationStructuresKHR) {
-        throw std::runtime_error("Failed to load acceleration structure functions");
-    }
-
-    // Define geometry (triangles)
-    VkAccelerationStructureGeometryKHR geometry{};
-    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
-    geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    // Define geometry (triangles): RGB32Float positions with a 12-byte stride,
+    // u32 indices, offsets in bytes into the merged buffers.
+    gpu::RtGeometry geometry;
+    geometry.level = gpu::RtLevel::Bottom;
+    geometry.flags = gpu::RtBuildFlags::PreferFastTrace;  // M1: static geometry
+    geometry.triangles.vertices = m_geometry.vertices;
+    geometry.triangles.vertexOffset =
+        static_cast<u64>(m_geometry.vertexOffset) * sizeof(glm::vec3);
+    geometry.triangles.vertexCount = m_geometry.vertexCount;
+    geometry.triangles.indices = m_geometry.indices;
+    geometry.triangles.indexOffset =
+        static_cast<u64>(m_geometry.indexOffset) * sizeof(u32);
+    geometry.triangles.triangleCount = m_geometry.indexCount / 3;
     // The one flag that decides whether an any-hit shader runs at all: set, the
     // traversal is free to skip the stage entirely -- which is what we want for
     // the overwhelming majority of geometry and what would silently disable
     // alpha coverage on the rest.
-    geometry.flags = m_opaque ? VK_GEOMETRY_OPAQUE_BIT_KHR : 0;
-
-    geometry.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-    geometry.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-    geometry.geometry.triangles.vertexData.deviceAddress =
-        m_geometry.vertices->GetDeviceAddress(device) +
-        static_cast<VkDeviceSize>(m_geometry.vertexOffset) * sizeof(glm::vec3);
-    geometry.geometry.triangles.vertexStride = sizeof(glm::vec3);
-    geometry.geometry.triangles.maxVertex = m_geometry.vertexCount - 1;
-    geometry.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
-    geometry.geometry.triangles.indexData.deviceAddress =
-        m_geometry.indices->GetDeviceAddress(device) +
-        static_cast<VkDeviceSize>(m_geometry.indexOffset) * sizeof(u32);
-
-    // Build info
-    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
-    buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
-    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;  // M1: static geometry
-    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-    buildInfo.geometryCount = 1;
-    buildInfo.pGeometries = &geometry;
+    geometry.triangles.opaque = m_opaque;
 
     // Query build sizes
-    u32 primitiveCount = m_geometry.indexCount / 3;
-    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
-    sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-
-    vkGetAccelerationStructureBuildSizesKHR(
-        device,
-        VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-        &buildInfo,
-        &primitiveCount,
-        &sizeInfo
-    );
+    const gpu::RtBuildSizes sizes = m_device.GetRtBuildSizes(geometry);
 
     QL_LOG_INFO("  BLAS build sizes: AS={} bytes, scratch={} bytes",
-                sizeInfo.accelerationStructureSize, sizeInfo.buildScratchSize);
+                sizes.structure, sizes.buildScratch);
 
-    // Create AS buffer
-    m_asBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        sizeInfo.accelerationStructureSize,
-        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
-
-    // Create acceleration structure
-    VkAccelerationStructureCreateInfoKHR createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
-    createInfo.buffer = m_asBuffer->GetHandle();
-    createInfo.size = sizeInfo.accelerationStructureSize;
-    createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-
-    if (VkResult result = vkCreateAccelerationStructureKHR(device, &createInfo, nullptr, &m_as);
-        result != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create BLAS");
-    }
-
-    // Get device address
-    VkAccelerationStructureDeviceAddressInfoKHR addressInfo{};
-    addressInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
-    addressInfo.accelerationStructure = m_as;
-    m_deviceAddress = vkGetAccelerationStructureDeviceAddressKHR(device, &addressInfo);
+    // Create the AS buffer, the acceleration structure on it, and its device address
+    m_structure = ValueOrThrow(
+        m_device.CreateRtAccelerationStructure(gpu::RtLevel::Bottom, sizes.structure));
 
     // Create scratch buffer
-    m_scratchBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        sizeInfo.buildScratchSize,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY,
-        ScratchAlignment(m_context)
-    );
+    const u64 scratchAlignment = ScratchAlignment(m_device.Info());
+    m_scratchBuffer = CreateBufferOrThrow(m_device, ScratchDesc(sizes.buildScratch, scratchAlignment));
+    WarnIfMisaligned("BLAS scratch", m_device.BufferDeviceAddress(m_scratchBuffer->Ref()),
+                     scratchAlignment);
 
     // Build acceleration structure
-    buildInfo.dstAccelerationStructure = m_as;
-    buildInfo.scratchData.deviceAddress = m_scratchBuffer->GetDeviceAddress(device);
-    WarnIfMisaligned("BLAS scratch", buildInfo.scratchData.deviceAddress, ScratchAlignment(m_context));
+    gpu::RtBuild build;
+    build.geometry = geometry;
+    build.mode = gpu::RtBuildMode::Build;
+    build.dst = m_structure->Ref();
+    build.scratch = m_scratchBuffer->Ref();
 
-    VkAccelerationStructureBuildRangeInfoKHR buildRange{};
-    buildRange.primitiveCount = primitiveCount;
-    buildRange.primitiveOffset = 0;
-    buildRange.firstVertex = 0;
-    buildRange.transformOffset = 0;
-
-    const VkAccelerationStructureBuildRangeInfoKHR* pBuildRange = &buildRange;
-
-    vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pBuildRange);
+    list.BuildRtAccelerationStructure(build);
 
     // CRITICAL: Insert memory barrier to ensure BLAS build completes before TLAS reads it
     // Without this barrier, TLAS may reference incomplete BLAS data
-    VkMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-        0,
-        1, &barrier,
-        0, nullptr,
-        0, nullptr
-    );
+    list.Barrier(gpu::GlobalBarrier{gpu::Access::AccelerationStructureWrite,
+                                    gpu::Access::AccelerationStructureRead});
 
     m_built = true;
-    QL_LOG_INFO("  BLAS built successfully (device address: 0x{:x})", m_deviceAddress);
+    QL_LOG_INFO("  BLAS built successfully (device address: 0x{:x})", m_structure->Ref().address);
 }
 
 void BLAS::ReleaseBuildScratch() {
@@ -262,61 +199,50 @@ void BLAS::ReleaseBuildScratch() {
 // TLAS Implementation
 // ============================================================================
 
-TLAS::TLAS(VulkanContext& context)
-    : m_context(context)
+TLAS::TLAS(gpu::Device& device)
+    : m_device(device)
 {
     QL_LOG_INFO("Creating TLAS...");
 }
 
-TLAS::~TLAS() {
-    if (m_as != VK_NULL_HANDLE) {
-        const auto vkDestroyAccelerationStructureKHR = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(
-            vkGetDeviceProcAddr(m_context.GetDevice(), "vkDestroyAccelerationStructureKHR"));
-
-        if (vkDestroyAccelerationStructureKHR) {
-            vkDestroyAccelerationStructureKHR(m_context.GetDevice(), m_as, nullptr);
-        }
-    }
-}
+// The structure is destroyed first, then its storage, then scratch and instances.
+TLAS::~TLAS() = default;
 
 TLAS::TLAS(TLAS&& other) noexcept
-    : m_context(other.m_context)
-    , m_as(other.m_as)
-    , m_asBuffer(std::move(other.m_asBuffer))
+    : m_device(other.m_device)
     , m_instanceBuffer(std::move(other.m_instanceBuffer))
     , m_scratchBuffer(std::move(other.m_scratchBuffer))
+    , m_structure(std::move(other.m_structure))
     , m_built(other.m_built)
     , m_instances(std::move(other.m_instances))
 {
-    other.m_as = VK_NULL_HANDLE;
     other.m_built = false;
 }
 
 TLAS& TLAS::operator=(TLAS&& other) noexcept {
     if (this != &other) {
-        // Destroy current resources
-        if (m_as != VK_NULL_HANDLE) {
-            const auto vkDestroyAccelerationStructureKHR = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(
-                vkGetDeviceProcAddr(m_context.GetDevice(), "vkDestroyAccelerationStructureKHR"));
-
-            if (vkDestroyAccelerationStructureKHR) {
-                vkDestroyAccelerationStructureKHR(m_context.GetDevice(), m_as, nullptr);
-            }
-        }
-
-        // Move from other
-        m_as = other.m_as;
-        m_asBuffer = std::move(other.m_asBuffer);
+        // Destroys the current structure, then its storage, then the old
+        // instance and scratch buffers. m_device stays, as for the BLAS.
+        m_structure = std::move(other.m_structure);
         m_instanceBuffer = std::move(other.m_instanceBuffer);
         m_scratchBuffer = std::move(other.m_scratchBuffer);
         m_built = other.m_built;
         m_instances = std::move(other.m_instances);
 
         // Nullify source
-        other.m_as = VK_NULL_HANDLE;
         other.m_built = false;
     }
     return *this;
+}
+
+gpu::RtSceneRef TLAS::Ref() const {
+    return m_structure ? m_structure->Ref() : gpu::RtSceneRef{};
+}
+
+std::vector<std::byte> TLAS::PackedInstances() const {
+    std::vector<std::byte> packed(m_instances.size() * m_device.RtInstanceStride());
+    m_device.PackRtInstances(m_instances, packed);
+    return packed;
 }
 
 void TLAS::AddInstance(const BLAS& blas, u32 materialId, const glm::mat4& transform, bool doubleSided) {
@@ -324,180 +250,83 @@ void TLAS::AddInstance(const BLAS& blas, u32 materialId, const glm::mat4& transf
         throw std::runtime_error("Cannot add instance to already-built TLAS");
     }
 
-    // Convert glm::mat4 to VkTransformMatrixKHR (row-major 3x4)
-    VkTransformMatrixKHR vkTransform{};
-    const f32* mat = glm::value_ptr(transform);
-    for (int row = 0; row < 3; ++row) {
-        for (int col = 0; col < 4; ++col) {
-            vkTransform.matrix[row][col] = mat[col * 4 + row];  // transpose
-        }
-    }
-
-    VkAccelerationStructureInstanceKHR instance{};
-    instance.transform = vkTransform;
-    instance.instanceCustomIndex = materialId;  // Material ID accessible in shader via InstanceID()
-    instance.mask = 0xFF;  // Visible to all rays
-    instance.instanceShaderBindingTableRecordOffset = 0;  // Single hit group
+    gpu::RtInstance instance;
+    ToInstanceTransform(transform, instance.transform);  // row-major 3x4
+    instance.userId = materialId;  // Material ID accessible in shader via InstanceID()
+    instance.mask = 0xFF;  // Visible to all rays; the one hit group is implied
 
     // Set backface culling based on material's doubleSided property
     // - doubleSided=true: Disable culling, backfaces will be shaded (normal flipped in shader)
     // - doubleSided=false: Enable culling, rays pass through backfaces (no hit)
-    if (doubleSided) {
-        instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-    } else {
-        instance.flags = 0;  // Enable backface culling (default Vulkan behavior)
-    }
+    instance.cullDisable = doubleSided;
 
-    instance.accelerationStructureReference = blas.GetDeviceAddress();
+    instance.bottomLevel = blas.Ref();
 
     m_instances.push_back(instance);
 
     QL_LOG_INFO("  Added instance {} to TLAS (material {}, doubleSided={}, BLAS addr: 0x{:x})",
-                m_instances.size() - 1, materialId, doubleSided, blas.GetDeviceAddress());
+                m_instances.size() - 1, materialId, doubleSided, blas.Ref().address);
 }
 
-void TLAS::Build(VkCommandBuffer cmd) {
+void TLAS::Build(gpu::CommandList& list) {
     if (m_instances.empty()) {
         throw std::runtime_error("Cannot build TLAS with no instances");
     }
 
-    VkDevice device = m_context.GetDevice();
-    VmaAllocator allocator = m_context.GetAllocator();
+    // Upload instances to GPU, packed into the native records
+    const std::vector<std::byte> packed = PackedInstances();
+    const u64 instanceBufferSize = packed.size();
 
-    // Get function pointers
-    auto vkGetAccelerationStructureBuildSizesKHR = reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(
-        vkGetDeviceProcAddr(device, "vkGetAccelerationStructureBuildSizesKHR"));
-    auto vkCreateAccelerationStructureKHR = reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(
-        vkGetDeviceProcAddr(device, "vkCreateAccelerationStructureKHR"));
-    auto vkCmdBuildAccelerationStructuresKHR = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(
-        vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR"));
+    gpu::BufferDesc instanceDesc;
+    instanceDesc.size = instanceBufferSize;
+    instanceDesc.usage = gpu::BufferUsage::AccelerationStructureInput |
+                         gpu::BufferUsage::DeviceAddress |
+                         gpu::BufferUsage::TransferDst |
+                         gpu::BufferUsage::TransferSrc;
+    instanceDesc.memory = gpu::MemoryClass::Upload;
+    instanceDesc.minAlignment = kInstanceDataAlignment;
+    m_instanceBuffer = CreateBufferOrThrow(m_device, instanceDesc);
 
-    if (!vkGetAccelerationStructureBuildSizesKHR || !vkCreateAccelerationStructureKHR ||
-        !vkCmdBuildAccelerationStructuresKHR) {
-        throw std::runtime_error("Failed to load acceleration structure functions");
-    }
+    m_instanceBuffer->Upload(packed.data(), instanceBufferSize);
 
-    // Upload instances to GPU
-    const VkDeviceSize instanceBufferSize = m_instances.size() * sizeof(VkAccelerationStructureInstanceKHR);
-
-    m_instanceBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        instanceBufferSize,
-        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU,
-        kInstanceDataAlignment
-    );
-
-    m_instanceBuffer->Upload(m_instances.data(), instanceBufferSize);
-
-    // Define geometry (instances)
-    VkAccelerationStructureGeometryKHR geometry{};
-    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
-    geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
-    // Deliberately not set. Opacity is decided by the BLAS triangle geometry,
-    // then the instance flags, then the ray flags; a top-level geometry of type
-    // INSTANCES is not a thing that can be hit, so its own flag plays no part.
-    // It was set here inertly, and is cleared rather than left because the risk
-    // is asymmetric: clearing it cannot make opaque geometry non-opaque, while
-    // leaving it could silently disable alpha coverage on a driver that reads
-    // it.
-    geometry.flags = 0;
-
-    geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
-    geometry.geometry.instances.arrayOfPointers = VK_FALSE;
-    geometry.geometry.instances.data.deviceAddress = m_instanceBuffer->GetDeviceAddress(device);
-    WarnIfMisaligned("TLAS instance data", geometry.geometry.instances.data.deviceAddress,
+    WarnIfMisaligned("TLAS instance data", m_device.BufferDeviceAddress(m_instanceBuffer->Ref()),
                      kInstanceDataAlignment);
 
-    // Build info
-    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
-    buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
-    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    // ALLOW_UPDATE so Update() can refit transforms in place during drags
-    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
-                      VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
-    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-    buildInfo.geometryCount = 1;
-    buildInfo.pGeometries = &geometry;
+    // Define geometry (instances)
+    const u32 instanceCount = static_cast<u32>(m_instances.size());
+    const gpu::RtGeometry geometry = TopLevelGeometry(*m_instanceBuffer, instanceCount);
 
     // Query build sizes
-    u32 instanceCount = static_cast<u32>(m_instances.size());
-    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
-    sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-
-    vkGetAccelerationStructureBuildSizesKHR(
-        device,
-        VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-        &buildInfo,
-        &instanceCount,
-        &sizeInfo
-    );
+    const gpu::RtBuildSizes sizes = m_device.GetRtBuildSizes(geometry);
 
     QL_LOG_INFO("  TLAS build sizes: AS={} bytes, scratch={} bytes",
-                sizeInfo.accelerationStructureSize, sizeInfo.buildScratchSize);
+                sizes.structure, sizes.buildScratch);
 
-    // Create AS buffer
-    m_asBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        sizeInfo.accelerationStructureSize,
-        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
-
-    // Create acceleration structure
-    VkAccelerationStructureCreateInfoKHR createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
-    createInfo.buffer = m_asBuffer->GetHandle();
-    createInfo.size = sizeInfo.accelerationStructureSize;
-    createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-
-    if (VkResult result = vkCreateAccelerationStructureKHR(device, &createInfo, nullptr, &m_as); result != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create TLAS");
-    }
+    // Create the AS buffer and the acceleration structure on it
+    m_structure = ValueOrThrow(
+        m_device.CreateRtAccelerationStructure(gpu::RtLevel::Top, sizes.structure));
 
     // Create scratch buffer, sized for both the build and later refits
-    m_scratchBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        std::max(sizeInfo.buildScratchSize, sizeInfo.updateScratchSize),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY,
-        ScratchAlignment(m_context)
-    );
+    const u64 scratchAlignment = ScratchAlignment(m_device.Info());
+    m_scratchBuffer = CreateBufferOrThrow(
+        m_device, ScratchDesc(std::max(sizes.buildScratch, sizes.updateScratch), scratchAlignment));
+    WarnIfMisaligned("TLAS scratch", m_device.BufferDeviceAddress(m_scratchBuffer->Ref()),
+                     scratchAlignment);
 
     // Build acceleration structure
-    buildInfo.dstAccelerationStructure = m_as;
-    buildInfo.scratchData.deviceAddress = m_scratchBuffer->GetDeviceAddress(device);
-    WarnIfMisaligned("TLAS scratch", buildInfo.scratchData.deviceAddress, ScratchAlignment(m_context));
+    gpu::RtBuild build;
+    build.geometry = geometry;
+    build.mode = gpu::RtBuildMode::Build;
+    build.dst = m_structure->Ref();
+    build.scratch = m_scratchBuffer->Ref();
 
-    VkAccelerationStructureBuildRangeInfoKHR buildRange{};
-    buildRange.primitiveCount = instanceCount;
-    buildRange.primitiveOffset = 0;
-    buildRange.firstVertex = 0;
-    buildRange.transformOffset = 0;
-
-    const VkAccelerationStructureBuildRangeInfoKHR* pBuildRange = &buildRange;
-
-    vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pBuildRange);
+    list.BuildRtAccelerationStructure(build);
 
     // CRITICAL: Insert memory barrier to ensure TLAS build completes before ray tracing shaders use it
-    // Without this barrier, vkCmdTraceRaysKHR may read incomplete TLAS data
-    VkMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,  // TLAS is read by ray tracing shaders
-        0,
-        1, &barrier,
-        0, nullptr,
-        0, nullptr
-    );
+    // Without this barrier, a trace may read incomplete TLAS data.
+    // TLAS is read by ray tracing shaders.
+    list.Barrier(gpu::GlobalBarrier{gpu::Access::AccelerationStructureWrite,
+                                    gpu::Access::RayTraceSceneRead});
 
     m_built = true;
     QL_LOG_INFO("  TLAS built successfully with {} instance(s)", m_instances.size());
@@ -510,123 +339,53 @@ void TLAS::SetInstanceTransform(size_t index, const glm::mat4& transform) {
         return;
     }
 
-    VkTransformMatrixKHR vkTransform{};
-    const f32* mat = glm::value_ptr(transform);
-    for (int row = 0; row < 3; ++row) {
-        for (int col = 0; col < 4; ++col) {
-            vkTransform.matrix[row][col] = mat[col * 4 + row];  // transpose
-        }
-    }
-    m_instances[index].transform = vkTransform;
+    ToInstanceTransform(transform, m_instances[index].transform);
 }
 
-void TLAS::Update(VkCommandBuffer cmd) {
+void TLAS::Update(gpu::CommandList& list) {
     if (!m_built) {
         throw std::runtime_error("TLAS::Update called before Build");
     }
 
-    VkDevice device = m_context.GetDevice();
-
-    auto vkCmdBuildAccelerationStructuresKHR = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(
-        vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR"));
-    if (!vkCmdBuildAccelerationStructuresKHR) {
-        throw std::runtime_error("Failed to load acceleration structure functions");
-    }
+    // The list comes from a device: the refit below needs its ray tracing entry points.
+    const gpu::BufferRef instanceInput = m_instanceBuffer->Ref();
 
     // Reuse one device-address-stable input buffer. Recording the bytes into
     // the command buffer avoids a host write racing a previous frame's AS
     // update. vkCmdUpdateBuffer is limited to 64 KiB per call, so large scenes
     // are split on the 64-byte instance boundary.
-    VkBufferMemoryBarrier inputWritable{};
-    inputWritable.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    inputWritable.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
-                                  VK_ACCESS_TRANSFER_READ_BIT;
-    inputWritable.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    inputWritable.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    inputWritable.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    inputWritable.buffer = m_instanceBuffer->GetHandle();
-    inputWritable.offset = 0;
-    inputWritable.size = VK_WHOLE_SIZE;
-    vkCmdPipelineBarrier(cmd,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
-                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 1, &inputWritable, 0, nullptr);
+    list.Barrier(gpu::BufferBarrier{instanceInput,
+                                    gpu::Access::AccelerationStructureRead | gpu::Access::TransferRead,
+                                    gpu::Access::TransferWrite});
 
-    const VkDeviceSize instanceBytes =
-        m_instances.size() * sizeof(VkAccelerationStructureInstanceKHR);
-    const auto* source = reinterpret_cast<const u8*>(m_instances.data());
-    for (VkDeviceSize offset = 0; offset < instanceBytes; offset += kMaxCmdUpdateBytes) {
-        const VkDeviceSize bytes = std::min(kMaxCmdUpdateBytes, instanceBytes - offset);
-        vkCmdUpdateBuffer(cmd, m_instanceBuffer->GetHandle(), offset, bytes, source + offset);
+    // The update copies the bytes into the command when it is recorded, so the
+    // packed records need only live until the loop ends.
+    const std::vector<std::byte> packed = PackedInstances();
+    const u64 instanceBytes = packed.size();
+    for (u64 offset = 0; offset < instanceBytes; offset += kMaxCmdUpdateBytes) {
+        const u64 bytes = std::min(kMaxCmdUpdateBytes, instanceBytes - offset);
+        list.UpdateBuffer(instanceInput, offset,
+                          std::span<const std::byte>(packed.data() + offset, static_cast<std::size_t>(bytes)));
     }
 
-    VkBufferMemoryBarrier inputReady{};
-    inputReady.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    inputReady.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    inputReady.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    inputReady.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    inputReady.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    inputReady.buffer = m_instanceBuffer->GetHandle();
-    inputReady.offset = 0;
-    inputReady.size = VK_WHOLE_SIZE;
-    vkCmdPipelineBarrier(cmd,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         0, 0, nullptr, 1, &inputReady, 0, nullptr);
+    list.Barrier(gpu::BufferBarrier{instanceInput, gpu::Access::TransferWrite,
+                                    gpu::Access::AccelerationStructureRead});
 
-    VkAccelerationStructureGeometryKHR geometry{};
-    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
-    geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
-    // Deliberately not set. Opacity is decided by the BLAS triangle geometry,
-    // then the instance flags, then the ray flags; a top-level geometry of type
-    // INSTANCES is not a thing that can be hit, so its own flag plays no part.
-    // It was set here inertly, and is cleared rather than left because the risk
-    // is asymmetric: clearing it cannot make opaque geometry non-opaque, while
-    // leaving it could silently disable alpha coverage on a driver that reads
-    // it.
-    geometry.flags = 0;
-    geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
-    geometry.geometry.instances.arrayOfPointers = VK_FALSE;
-    geometry.geometry.instances.data.deviceAddress = m_instanceBuffer->GetDeviceAddress(device);
-
-    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
-    buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
-    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
-                      VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
-    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
-    buildInfo.srcAccelerationStructure = m_as;
-    buildInfo.dstAccelerationStructure = m_as;
-    buildInfo.geometryCount = 1;
-    buildInfo.pGeometries = &geometry;
-    buildInfo.scratchData.deviceAddress = m_scratchBuffer->GetDeviceAddress(device);
+    // Refit in place: src == dst == this AS, with the scratch sized for it at Build.
+    gpu::RtBuild build;
+    build.geometry = TopLevelGeometry(*m_instanceBuffer, static_cast<u32>(m_instances.size()));
+    build.mode = gpu::RtBuildMode::Update;
+    build.src = m_structure->Ref();
+    build.dst = m_structure->Ref();
+    build.scratch = m_scratchBuffer->Ref();
 
     // In-flight frames may still be reading this AS: order the refit after them
-    VkMemoryBarrier preBarrier{};
-    preBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    preBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    preBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    vkCmdPipelineBarrier(cmd,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         0, 1, &preBarrier, 0, nullptr, 0, nullptr);
+    constexpr gpu::Access kSceneReaders = gpu::Access::RayTraceSceneRead | gpu::Access::ComputeSceneRead;
+    list.Barrier(gpu::GlobalBarrier{kSceneReaders, gpu::Access::AccelerationStructureWrite});
 
-    VkAccelerationStructureBuildRangeInfoKHR buildRange{};
-    buildRange.primitiveCount = static_cast<u32>(m_instances.size());
-    const VkAccelerationStructureBuildRangeInfoKHR* pBuildRange = &buildRange;
-    vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pBuildRange);
+    list.BuildRtAccelerationStructure(build);
 
-    VkMemoryBarrier postBarrier{};
-    postBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    postBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    postBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-    vkCmdPipelineBarrier(cmd,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 1, &postBarrier, 0, nullptr, 0, nullptr);
+    list.Barrier(gpu::GlobalBarrier{gpu::Access::AccelerationStructureWrite, kSceneReaders});
 }
 
 } // namespace quantiloom

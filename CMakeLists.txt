@@ -81,6 +81,25 @@ endif()
 
 include("${CMAKE_BINARY_DIR}/cmake/CPM.cmake")
 
+# The Metal backend is Objective-C++, and its residency sets need macOS 15.
+# Symbols are hidden by default, the dependencies' included: the static
+# OpenEXR, Imath and spdlog linked into the dylib otherwise land in its export
+# table, which is the SDK's contract (docs/abi/exports.macos.golden) -- MSVC
+# exports only what QL_API marks, and this makes the Mac table mean the same.
+if(APPLE)
+    set(CMAKE_C_VISIBILITY_PRESET hidden)
+    set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+    set(CMAKE_OBJCXX_VISIBILITY_PRESET hidden)
+    set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+    # Installed binaries find the SDK's dylibs, OpenUSD's among them, beside
+    # themselves (lib/) or in ../lib (bin/).
+    set(CMAKE_INSTALL_RPATH "@loader_path;@loader_path/../lib")
+    if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum macOS" FORCE)
+    endif()
+    enable_language(OBJCXX)
+endif()
+
 # ============================================================================
 # Platform Detection & Cross-Platform Macros
 # ============================================================================
@@ -130,6 +149,11 @@ if(MSVC)
         $<$<CONFIG:Release>:/OPT:ICF>
     )
 else()
+    # No floating-point contraction. Clang on arm64 and GCC fuse a*b+c into one
+    # FMA by default; MSVC does not, and the shaders mark the expressions the
+    # host must reproduce bit for bit `precise` (display_range.comp.hlsl), so a
+    # contracting host disagreed with its own GPU by an ulp.
+    add_compile_options(-ffp-contract=off)
     # GCC/Clang: Enable comprehensive warnings
     add_compile_options(
         -Wall
@@ -169,6 +193,14 @@ CPMAddPackage(
         "SPDLOG_FMT_EXTERNAL OFF"  # Use bundled fmt
         "CMAKE_POSITION_INDEPENDENT_CODE ON"  # Enable -fPIC for static library
 )
+
+# Apple Clang 21 rejects the FMT_STRING checks of the fmt 10 that spdlog 1.14
+# bundles ("call to consteval function ... is not a constant expression"), in
+# spdlog's own sources. Nothing here calls fmt:: -- core/Log formats with
+# <format> -- so on Apple spdlog formats with std::format instead.
+if(APPLE AND TARGET spdlog)
+    target_compile_definitions(spdlog PUBLIC SPDLOG_USE_STD_FORMAT)
+endif()
 
 # Ensure spdlog is built with PIC
 if(TARGET spdlog)
@@ -244,8 +276,32 @@ unset(_ql_fetch_base)
 # If needed in future, re-add with proper static linking configuration
 
 # ============================================================================
+# GPU backends
+# ============================================================================
+# gpu/vulkan/ and gpu/metal/ implement the same internal RHI (gpu/AGENTS.md).
+# A Mac builds Metal only: neither MoltenVK nor KosmicKrisp implements a ray
+# tracing extension, so a Vulkan backend there could create a device and
+# never render, and the .app would carry a Vulkan loader for nothing.
+if(APPLE)
+    set(_ql_default_vulkan OFF)
+else()
+    set(_ql_default_vulkan ON)
+endif()
+option(QUANTILOOM_BACKEND_VULKAN "Compile the Vulkan backend (gpu/vulkan/)" ${_ql_default_vulkan})
+option(QUANTILOOM_BACKEND_METAL "Compile the Metal backend (gpu/metal/)" ${APPLE})
+unset(_ql_default_vulkan)
+if(QUANTILOOM_BACKEND_METAL AND NOT APPLE)
+    message(FATAL_ERROR "QUANTILOOM_BACKEND_METAL needs an Apple platform.")
+endif()
+if(NOT QUANTILOOM_BACKEND_VULKAN AND NOT QUANTILOOM_BACKEND_METAL)
+    message(WARNING "No GPU backend: this build can create no device, so it cannot render.")
+endif()
+message(STATUS "GPU backends: Vulkan=${QUANTILOOM_BACKEND_VULKAN} Metal=${QUANTILOOM_BACKEND_METAL}")
+
+# ============================================================================
 # Vulkan SDK
 # ============================================================================
+if(QUANTILOOM_BACKEND_VULKAN)
 find_package(Vulkan REQUIRED)
 
 if(Vulkan_FOUND)
@@ -263,9 +319,10 @@ CPMAddPackage(
     GITHUB_REPOSITORY GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
     DOWNLOAD_ONLY YES
 )
+endif()
 
 # VMA is header-only, create interface library
-if(VulkanMemoryAllocator_ADDED)
+if(QUANTILOOM_BACKEND_VULKAN AND VulkanMemoryAllocator_ADDED)
     add_library(VMA INTERFACE)
     target_include_directories(VMA INTERFACE
         ${VulkanMemoryAllocator_SOURCE_DIR}/include
@@ -415,7 +472,7 @@ if(USD_ROOT)
                 )
             else()
                 set_target_properties(TBB::tbb PROPERTIES
-                    IMPORTED_LOCATION "${USD_ROOT}/lib/libtbb.so"
+                    IMPORTED_LOCATION "${USD_ROOT}/lib/libtbb${CMAKE_SHARED_LIBRARY_SUFFIX}"
                 )
             endif()
             set(TBB_FOUND TRUE)

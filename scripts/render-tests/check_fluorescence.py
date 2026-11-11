@@ -42,6 +42,7 @@ D. ENERGY. A surface that absorbs everything and gives it all back, spread
 
 Exit code 0 = pass, 1 = fail, 2 = no CLI, 3 = no usable GPU.
 """
+import os
 import math
 import pathlib
 import re
@@ -53,7 +54,7 @@ import numpy as np
 import OpenEXR
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-CLI = ROOT / "build/src/app/Release/Quantiloom.exe"
+CLI = pathlib.Path(os.environ.get("CLI", str(ROOT / "build/src/app/Release/Quantiloom.exe")))
 BASE_CFG = ROOT / "assets/configs/fluorescence_plate.toml"
 TMP_CFG = ROOT / "assets/configs/_fluorescence_tmp.toml"
 

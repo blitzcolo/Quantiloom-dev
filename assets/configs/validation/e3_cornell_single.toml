@@ -15,7 +15,7 @@ mode = "single"
 wavelength_nm = 550.0
 
 [scene]
-gltf = "H:/Quantiloom-dev/assets/models/cornell_box/cornell_box.gltf"
+gltf = "assets/models/cornell_box/cornell_box.gltf"
 world_units_to_meters = 0.001
 default_temperature_k = 300.0
 
@@ -40,11 +40,11 @@ enabled = false
 log_material_sources = true
 
 [spectral_curves]
-"Construction Concrete" = "H:/Quantiloom-dev/build/validation/cornell_m3/concrete_visible.csv"
-"Red Brick" = "H:/Quantiloom-dev/build/validation/cornell_m3/brick_visible.csv"
-"Olive Green Paint" = "H:/Quantiloom-dev/build/validation/cornell_m3/paint_visible.csv"
-"White Marble" = "H:/Quantiloom-dev/build/validation/cornell_m3/marble_visible.csv"
-"Asphalt" = "H:/Quantiloom-dev/build/validation/cornell_m3/asphalt_visible.csv"
+"Construction Concrete" = "build/validation/cornell_m3/concrete_visible.csv"
+"Red Brick" = "build/validation/cornell_m3/brick_visible.csv"
+"Olive Green Paint" = "build/validation/cornell_m3/paint_visible.csv"
+"White Marble" = "build/validation/cornell_m3/marble_visible.csv"
+"Asphalt" = "build/validation/cornell_m3/asphalt_visible.csv"
 
 [material_overrides."Construction Concrete"]
 specular = 0.0

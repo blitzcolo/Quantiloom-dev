@@ -13,11 +13,9 @@
 
 #include "renderer/RenderDevice.hpp"
 
-#include "renderer/GpuBuffer.hpp"
+#include "gpu/Device.hpp"
+#include "gpu/Trace.hpp"
 #include "renderer/RenderCore.hpp"
-#include "renderer/VulkanContext.hpp"
-
-#include <vulkan/vulkan.h>
 
 #include <memory>
 
@@ -27,19 +25,19 @@ namespace quantiloom {
  * @brief The shared half of an offline render: device, cache, and two LUTs
  *
  * DECLARATION ORDER IS DESTRUCTION ORDER, for the reason spelled out in
- * OfflineRenderer.cpp: the context is declared first so it dies last, after every
+ * OfflineRenderer.cpp: the device is declared first so it dies last, after every
  * resource allocated from it.
  */
 struct RenderDevice::Impl {
     RenderDevice::InitParams init;
 
-    std::unique_ptr<VulkanContext> context;
+    std::unique_ptr<gpu::Device> gpuDevice;
     rendercore::BrdfLut brdfLut;
-    std::unique_ptr<GpuBuffer> cieCMF_LUTBuffer;
-    std::unique_ptr<GpuBuffer> rgbToSpectrumBuffer;
+    std::unique_ptr<gpu::Buffer> cieCMF_LUTBuffer;
+    std::unique_ptr<gpu::Buffer> rgbToSpectrumBuffer;
     /// Bound when a scene names no environment map, which is most of them.
     rendercore::EnvironmentCubemap fallbackEnvMap;
-    VkPipelineCache pipelineCache = VK_NULL_HANDLE;
+    std::unique_ptr<gpu::PipelineCache> pipelineCache;
 
     ~Impl();
 };

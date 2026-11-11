@@ -1,29 +1,49 @@
 #include "renderer/AsyncPixelReadback.hpp"
 
+#include "gpu/Device.hpp"
+
 #include <cstring>
+#include <span>
 #include <stdexcept>
+#include <utility>
 
 namespace quantiloom::rendercore {
 
-AsyncPixelReadback::AsyncPixelReadback(const VulkanContext& context) : m_context(context) {
+namespace {
+
+// The Err of a failed gpu/Sync.hpp call is the backend's result code as a
+// decimal, so the message still names the code.
+[[noreturn]] void ThrowReadbackError(const String& code) {
+    throw std::runtime_error("asynchronous pixel readback Vulkan error " + code);
+}
+
+void Check(const Result<void, String>& result) {
+    if (!result) ThrowReadbackError(result.error());
+}
+
+template <class T>
+T Take(Result<T, String>&& result) {
+    if (!result) ThrowReadbackError(result.error());
+    return std::move(result).value();
+}
+
+} // namespace
+
+AsyncPixelReadback::AsyncPixelReadback(gpu::Device& device) : m_device(device) {
     try {
-        VkCommandPoolCreateInfo pool{};
-        pool.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        pool.queueFamilyIndex = context.GetGraphicsQueueFamily();
-        pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        Check(vkCreateCommandPool(context.GetDevice(), &pool, nullptr, &m_pool));
+        gpu::CommandPoolDesc pool;
+        pool.resettable = true;
+        m_pool = Take(device.CreateCommandPool(pool));
         for (auto& slot : m_slots) {
-            slot.buffer = std::make_unique<GpuBuffer>(context.GetAllocator(), sizeof(glm::vec4),
-                VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
-            VkFenceCreateInfo fence{};
-            fence.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-            Check(vkCreateFence(context.GetDevice(), &fence, nullptr, &slot.fence));
-            VkCommandBufferAllocateInfo command{};
-            command.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-            command.commandPool = m_pool;
-            command.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            command.commandBufferCount = 1;
-            Check(vkAllocateCommandBuffers(context.GetDevice(), &command, &slot.command));
+            gpu::BufferDesc buffer;
+            buffer.size = sizeof(glm::vec4);
+            buffer.usage = gpu::BufferUsage::TransferDst;
+            buffer.memory = gpu::MemoryClass::Readback;
+            auto created = device.CreateBuffer(buffer);
+            if (!created) throw std::runtime_error(created.error());
+            slot.buffer = std::move(created).value();
+            slot.fence = Take(device.CreateFence());
+            slot.command = Take(m_pool->Allocate());
         }
     } catch (...) {
         Cleanup();
@@ -33,62 +53,42 @@ AsyncPixelReadback::AsyncPixelReadback(const VulkanContext& context) : m_context
 
 AsyncPixelReadback::~AsyncPixelReadback() { Cleanup(); }
 
-bool AsyncPixelReadback::Submit(VkImage image, u32 renderX, u32 renderY,
+bool AsyncPixelReadback::Submit(gpu::TextureRef image, u32 renderX, u32 renderY,
                                 const PixelReading& reading) {
+    // The accumulation image: GENERAL, one mip, one layer.
+    const gpu::TextureRef target = image;
     for (auto& slot : m_slots) {
         if (slot.pending) continue;
-        Check(vkResetCommandBuffer(slot.command, 0));
-        VkCommandBufferBeginInfo begin{};
-        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        Check(vkBeginCommandBuffer(slot.command, &begin));
+        Check(slot.command->Reset());
+        gpu::CommandList& list = *Take(slot.command->Begin());
 
         // Keep GENERAL so the copy does not change the accumulation's
         // layout contract. Both prior shader writes and subsequent
         // shader accesses are ordered against this read.
-        VkImageMemoryBarrier imageBarrier{};
-        imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        imageBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        imageBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        imageBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        imageBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        imageBarrier.image = image;
-        imageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        imageBarrier.subresourceRange.levelCount = 1;
-        imageBarrier.subresourceRange.layerCount = 1;
-        vkCmdPipelineBarrier(slot.command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &imageBarrier);
+        const gpu::TextureBarrier toCopy{target, gpu::Access::ComputeWrite, gpu::Access::TransferRead};
+        gpu::BarrierBatch before;
+        before.textures = std::span<const gpu::TextureBarrier>(&toCopy, 1);
+        before.srcStages = gpu::PipelineStage::AllCommands;
+        list.Barrier(before);
 
-        VkBufferImageCopy copy{};
-        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy.imageSubresource.layerCount = 1;
-        copy.imageOffset = {static_cast<i32>(renderX), static_cast<i32>(renderY), 0};
-        copy.imageExtent = {1, 1, 1};
-        vkCmdCopyImageToBuffer(slot.command, image, VK_IMAGE_LAYOUT_GENERAL,
-                              slot.buffer->GetHandle(), 1, &copy);
+        gpu::BufferTextureCopy copy;
+        copy.x = static_cast<i32>(renderX);
+        copy.y = static_cast<i32>(renderY);
+        copy.width = 1;
+        copy.height = 1;
+        list.CopyTextureToBuffer(target, slot.buffer->Ref(), copy);
 
-        imageBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        imageBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        VkBufferMemoryBarrier host{};
-        host.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-        host.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        host.buffer = slot.buffer->GetHandle();
-        host.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(slot.command, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-            0, 0, nullptr, 1, &host, 1, &imageBarrier);
-        Check(vkEndCommandBuffer(slot.command));
-        Check(vkResetFences(m_context.GetDevice(), 1, &slot.fence));
-        VkSubmitInfo submit{};
-        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &slot.command;
-        Check(vkQueueSubmit(m_context.GetGraphicsQueue(), 1, &submit, slot.fence));
+        const gpu::BufferBarrier host{slot.buffer->Ref(), gpu::Access::TransferWrite, gpu::Access::HostRead};
+        const gpu::TextureBarrier fromCopy{target, gpu::Access::TransferRead,
+                                           gpu::Access::ComputeRead | gpu::Access::ComputeWrite};
+        gpu::BarrierBatch after;
+        after.buffers = std::span<const gpu::BufferBarrier>(&host, 1);
+        after.textures = std::span<const gpu::TextureBarrier>(&fromCopy, 1);
+        after.dstStages = gpu::PipelineStage::AllCommands | gpu::PipelineStage::Host;
+        list.Barrier(after);
+        Check(slot.command->End());
+        Check(slot.fence->Reset());
+        Check(m_device.Submit(*slot.command, slot.fence.get()));
         slot.reading = reading;
         slot.serial = ++m_serial;
         slot.pending = true;
@@ -102,9 +102,7 @@ Optional<PixelReading> AsyncPixelReadback::Poll(u64 generation, u64 acquisition)
     u64 newest = 0;
     for (auto& slot : m_slots) {
         if (!slot.pending) continue;
-        const auto status = vkGetFenceStatus(m_context.GetDevice(), slot.fence);
-        if (status == VK_NOT_READY) continue;
-        Check(status);
+        if (Take(slot.fence->Status()) == gpu::FenceStatus::NotReady) continue;
         slot.pending = false;
         if (slot.reading.imageGeneration != generation ||
             slot.reading.acquisitionIndex != acquisition || slot.serial <= newest) continue;
@@ -118,21 +116,15 @@ Optional<PixelReading> AsyncPixelReadback::Poll(u64 generation, u64 acquisition)
     return result;
 }
 
-void AsyncPixelReadback::Check(VkResult result) {
-    if (result != VK_SUCCESS)
-        throw std::runtime_error("asynchronous pixel readback Vulkan error " + std::to_string(result));
-}
-
 void AsyncPixelReadback::Cleanup() noexcept {
     for (auto& slot : m_slots) {
-        if (slot.pending) vkWaitForFences(m_context.GetDevice(), 1, &slot.fence, VK_TRUE, UINT64_MAX);
-        if (slot.fence) vkDestroyFence(m_context.GetDevice(), slot.fence, nullptr);
-        slot.fence = VK_NULL_HANDLE;
+        if (slot.pending) static_cast<void>(slot.fence->Wait());
+        slot.fence.reset();
         slot.pending = false;
         slot.buffer.reset();
     }
-    if (m_pool) vkDestroyCommandPool(m_context.GetDevice(), m_pool, nullptr);
-    m_pool = VK_NULL_HANDLE;
+    for (auto& slot : m_slots) slot.command.reset();
+    m_pool.reset();
 }
 
 } // namespace quantiloom::rendercore

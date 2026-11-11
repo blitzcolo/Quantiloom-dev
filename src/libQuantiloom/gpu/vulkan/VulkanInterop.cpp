@@ -1,7 +1,7 @@
 #include "renderer/interop/VulkanInterop.hpp"
 
 #include "core/Log.hpp"
-#include "renderer/VulkanDeviceRequirements.hpp"
+#include "gpu/vulkan/VulkanDeviceRequirements.hpp"
 
 #include <set>
 #include <string>

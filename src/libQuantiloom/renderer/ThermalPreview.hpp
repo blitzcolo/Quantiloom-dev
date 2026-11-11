@@ -15,18 +15,22 @@
 
 #pragma once
 
+#include "core/Types.hpp"
+#include "gpu/GpuTypes.hpp"
 #include "renderer/ThermalControl.hpp"
-#include "renderer/VulkanContext.hpp"
 #include "thermal/ThermalTypes.hpp"
 
 #include <functional>
 #include <memory>
 #include <unordered_map>
-#include <vulkan/vulkan.h>
 
 namespace quantiloom {
 
 class Scene;
+
+namespace gpu {
+class Device;
+}  // namespace gpu
 
 namespace thermal {
 class ThermalTimeline;
@@ -39,7 +43,8 @@ class EpochGeometryHost;
 
 class ThermalPreview {
 public:
-    explicit ThermalPreview(VulkanContext& context);
+    /// `device` must outlive the preview: its stepper and every precompute use it.
+    explicit ThermalPreview(gpu::Device& device);
     ~ThermalPreview();
 
     ThermalPreview(const ThermalPreview&) = delete;
@@ -111,7 +116,8 @@ public:
         String error;
     };
 
-    SolveResult SolveAt(f64 time_h, const Scene& scene, VkAccelerationStructureKHR tlas);
+    /// `tlas` empty means no acceleration structure: the open-sky exchange.
+    SolveResult SolveAt(f64 time_h, const Scene& scene, gpu::RtSceneRef tlas);
 
     /// Write the solve at the instant last shown, one row per element. Empty
     /// takes the path from the parameters. Returns the file written.

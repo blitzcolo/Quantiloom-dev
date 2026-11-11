@@ -56,6 +56,16 @@ Promoting something to public is three coupled steps, and the third is reviewed:
 Skip step 1 and Quantiloom-Qt cannot include it. Skip step 3 and `./build_wsl.sh`
 stops at the ABI gate before installing.
 
+**Each platform has its own baseline, and only that platform can write it.** The
+gate reads the DLL with `dumpbin` on Windows and the dylib with `nm -gU` on macOS,
+compared against `exports.golden` and `exports.macos.golden` (and their
+`spectraforge-` twins). A symbol added on Windows therefore leaves the Mac gate red
+until someone runs `--update` on a Mac, and the other way round. An export change is
+finished when both baselines are committed; say in the commit which one is still
+owed if you could only produce one. The two files are not expected to match line for
+line -- the toolchains decorate and inline differently -- so review each against its
+own previous version, not against the other.
+
 Prefer a free function over a class where it fits: `QL_API` on a class exports every
 member, private ones included. Anything with private state belongs behind a pimpl —
 private data in a public header puts `sizeof` into the ABI, which has silently broken
@@ -64,7 +74,8 @@ a Quantiloom-Qt build before (see `GenericSensor`).
 ## The consumer is the installed SDK, not this build tree
 
 Quantiloom-Qt links the installed SDK at `../Quantiloom-SDK/windows_amd64` (currently
-`H:/Quantiloom-SDK/windows_amd64`). After changing public headers
+`H:/Quantiloom-SDK/windows_amd64`), or `../Quantiloom-SDK/macos_arm64` on a Mac, which
+`./build_macos.sh` installs. After changing public headers
 or exported symbols, run `./build_wsl.sh` to reinstall — otherwise a correct core fix
 appears to have no effect in the GUI.
 

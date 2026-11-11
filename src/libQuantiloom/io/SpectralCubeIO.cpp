@@ -1172,11 +1172,17 @@ std::optional<f32> ChannelNameToWavelength(
     String number = body.substr(0, unitStart);
     std::replace(number.begin(), number.end(), ',', '.');
 
-    f32 value = 0.0f;
-    const char* first = number.data();
-    const char* last = first + number.size();
-    const auto [ptr, ec] = std::from_chars(first, last, value);
-    if (ec != std::errc{} || ptr != last) return std::nullopt;
+    // strtof rather than from_chars, as in SpectralIO.cpp: Apple's libc++ has
+    // floating-point from_chars only from macOS 26. The leading-character check
+    // keeps what from_chars rejected rejected (whitespace, '+', a hex prefix).
+    if (number.empty() || std::isspace(static_cast<unsigned char>(number.front())) != 0 ||
+        number.front() == '+' || number.find_first_of("xX") != String::npos) {
+        return std::nullopt;
+    }
+    const char* first = number.c_str();
+    char* end = nullptr;
+    const f32 value = std::strtof(first, &end);
+    if (end != first + number.size()) return std::nullopt;
 
     return value * scale;
 }

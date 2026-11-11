@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 #include "postprocess/SensorModel.hpp"
+#include "core/BesselJ.hpp"
 #include "postprocess/GenericSensor.hpp"
 #include "core/Image.hpp"
 #include <algorithm>  // std::clamp -- used to arrive via GenericSensor.hpp
@@ -71,7 +72,7 @@ protected:
 // maximum, then convert x back to a radius.
 static auto AiryHWHM_LambdaN() -> f64 {
     const auto airyIntensity = [](f64 x) {
-        const f64 t = 2.0 * std::cyl_bessel_j(1, x) / x;
+        const f64 t = 2.0 * quantiloom::core::CylBesselJ(1, x) / x;
         return t * t;
     };
     // The central lobe falls from 1 at x -> 0 to its first zero at x = 3.8317.

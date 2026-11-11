@@ -28,11 +28,11 @@
 // Bindings
 // ============================================================================
 
-StructuredBuffer<uint> indexBuffer : register(t4, space0);       // Triangle indices
-StructuredBuffer<MaterialData> materials : register(t5, space0); // Material properties
-QL_VK_BINDING(6, 0) Texture2D textures[] : register(t0, space1);                     // Bindless texture array
-QL_VK_BINDING(7, 0) SamplerState samplers[] : register(s0, space1);                  // Bindless sampler array
-StructuredBuffer<float2> uvBuffer : register(t8, space0);        // UV coordinates (optional)
+StructuredBuffer<uint> indexBuffer : QL_RT_REGISTER(indexBuffer);                              // Triangle indices
+StructuredBuffer<MaterialData> materials : QL_RT_REGISTER(materials);                          // Material properties
+QL_RT_BINDLESS_BINDING(textures) Texture2D textures[] : QL_RT_BINDLESS_REGISTER(textures);     // Bindless texture array
+QL_RT_BINDLESS_BINDING(samplers) SamplerState samplers[] : QL_RT_BINDLESS_REGISTER(samplers);  // Bindless sampler array
+StructuredBuffer<float2> uvBuffer : QL_RT_REGISTER(uvBuffer);                                  // UV coordinates (optional)
 
 // ============================================================================
 // Instance Geometry Info Buffer (Binding 18)
@@ -49,7 +49,7 @@ StructuredBuffer<float2> uvBuffer : register(t8, space0);        // UV coordinat
 //   float3 nrm = normalBuffer[geo.normalOffset + idx];
 // ============================================================================
 
-StructuredBuffer<InstanceGeometryInfo> instanceGeometryInfo : register(t18, space0);
+StructuredBuffer<InstanceGeometryInfo> instanceGeometryInfo : QL_RT_REGISTER(instanceGeometryInfo);
 
 // ============================================================================
 // Hit Attributes

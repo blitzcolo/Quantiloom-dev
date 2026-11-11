@@ -5,9 +5,8 @@
 #include <gtest/gtest.h>
 
 #include "renderer/ExternalRenderContext.hpp"
-#include "renderer/VulkanContext.hpp"
 #include "support/GpuInteropTestUtils.hpp"
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -20,13 +19,13 @@ namespace {
 #define QUANTILOOM_SOURCE_ROOT "."
 #endif
 
-class ThermalPreviewTest : public quantiloom::testing::VulkanDeviceTest {
+class ThermalPreviewTest : public quantiloom::testing::GpuDeviceTest {
 protected:
     void SetUp() override {
-        VulkanDeviceTest::SetUp();
+        GpuDeviceTest::SetUp();
         if (::testing::Test::IsSkipped()) return;
 
-        auto* shared = quantiloom::testing::SharedVulkanDevice();
+        auto* shared = quantiloom::testing::SharedGpuDevice(Backend());
         ASSERT_NE(shared, nullptr);
 
         testDir = std::filesystem::temp_directory_path() / "quantiloom_thermal_preview";
@@ -48,7 +47,7 @@ protected:
         if (!testDir.empty() && std::filesystem::exists(testDir)) {
             std::filesystem::remove_all(testDir);
         }
-        VulkanDeviceTest::TearDown();
+        GpuDeviceTest::TearDown();
     }
 
     Config MakeThermalConfig() const {
@@ -216,28 +215,29 @@ enabled = false
     std::unique_ptr<ExternalRenderContext> context;
     std::filesystem::path testDir;
 };
+QL_INSTANTIATE_GPU_SUITE(ThermalPreviewTest);
 
 }  // namespace
 
-TEST_F(ThermalPreviewTest, ApplyConfigReportsTheThermalMaterials) {
+TEST_P(ThermalPreviewTest, ApplyConfigReportsTheThermalMaterials) {
     const Config config = MakeThermalConfig();
     const auto report = context->ApplyConfig(config);
     EXPECT_TRUE(report.ok()) << report.FirstError();
     EXPECT_GT(report.thermalMaterialsApplied, 0u);
 }
 
-TEST_F(ThermalPreviewTest, DisableRestoresTheDummyAndTheContextStaysReady) {
+TEST_P(ThermalPreviewTest, DisableRestoresTheDummyAndTheContextStaysReady) {
     context->ApplyConfig(MakeThermalConfig());
     context->SetThermalSolveEnabled(false);
     EXPECT_TRUE(context->IsReady());
 }
 
-TEST_F(ThermalPreviewTest, SetThermalTimeReturnsAnErrorWhenNoMaterialsAreSet) {
+TEST_P(ThermalPreviewTest, SetThermalTimeReturnsAnErrorWhenNoMaterialsAreSet) {
     auto result = context->SetThermalTime(12.0);
     EXPECT_FALSE(result.has_value());
 }
 
-TEST_F(ThermalPreviewTest, TheStatusSaysWhyTheSolveDidNotRun) {
+TEST_P(ThermalPreviewTest, TheStatusSaysWhyTheSolveDidNotRun) {
     // A panel that can only say "no result" leaves the user guessing between a
     // scene with no geometry and a scene with no thermal properties.
     auto result = context->SetThermalTime(12.0);
@@ -245,7 +245,7 @@ TEST_F(ThermalPreviewTest, TheStatusSaysWhyTheSolveDidNotRun) {
     EXPECT_FALSE(context->GetThermalSolveStatus().error.empty());
 }
 
-TEST_F(ThermalPreviewTest, AForcingFileGivesTheTrajectoryOneSunColumnPerRow) {
+TEST_P(ThermalPreviewTest, AForcingFileGivesTheTrajectoryOneSunColumnPerRow) {
     // Constant forcing is one column -- one sun position for the whole run,
     // which is right when the sun does not move. A forcing file has to give
     // the interactive path what the offline one gets: a column per row, so the
@@ -287,7 +287,7 @@ TEST_F(ThermalPreviewTest, AForcingFileGivesTheTrajectoryOneSunColumnPerRow) {
     EXPECT_DOUBLE_EQ(diurnal.sliderEndTime_h, 18.0);
 }
 
-TEST_F(ThermalPreviewTest, AWetMaterialCoolsTheInteractiveSolve) {
+TEST_P(ThermalPreviewTest, AWetMaterialCoolsTheInteractiveSolve) {
     // The whole point of the wetness factor reaching the facade: a material
     // edit has to move the temperatures the viewport is showing.
     ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
@@ -309,7 +309,7 @@ TEST_F(ThermalPreviewTest, AWetMaterialCoolsTheInteractiveSolve) {
     EXPECT_LT(context->GetThermalSolveStatus().meanTemperature_K, dry - 5.0);
 }
 
-TEST_F(ThermalPreviewTest, AForcingFileWithoutHumidityUsesTheRunsHumidity) {
+TEST_P(ThermalPreviewTest, AForcingFileWithoutHumidityUsesTheRunsHumidity) {
     // The file has no eighth column, so the latent term of a wet material
     // must follow ThermalSolveParams::relativeHumidity, as the offline solve does.
     ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
@@ -354,7 +354,7 @@ TEST_F(ThermalPreviewTest, AForcingFileWithoutHumidityUsesTheRunsHumidity) {
     EXPECT_LT(arid, humid - 1.0);
 }
 
-TEST_F(ThermalPreviewTest, DiffuseIrradianceWarmsASceneWithNoDirectSun) {
+TEST_P(ThermalPreviewTest, DiffuseIrradianceWarmsASceneWithNoDirectSun) {
     // Overcast: no disc at all. Before the diffuse term this scene had no
     // solar input and settled on the air temperature.
     ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
@@ -378,7 +378,7 @@ TEST_F(ThermalPreviewTest, DiffuseIrradianceWarmsASceneWithNoDirectSun) {
               overcastWithoutDiffuse + 5.0);
 }
 
-TEST_F(ThermalPreviewTest, AskingForAMaterialTangentChangesNoTemperature) {
+TEST_P(ThermalPreviewTest, AskingForAMaterialTangentChangesNoTemperature) {
     // A derivative is carried beside the trajectory, not inside it. If asking
     // for one moved the temperatures, every number the viewport showed would
     // depend on what the panel happened to have selected -- and the fit these
@@ -411,7 +411,7 @@ TEST_F(ThermalPreviewTest, AskingForAMaterialTangentChangesNoTemperature) {
         << "carrying a second tangent perturbed the trajectory both are tangents of";
 }
 
-TEST_F(ThermalPreviewTest, ASolveThatCannotCarryATangentDoesNotRun) {
+TEST_P(ThermalPreviewTest, ASolveThatCannotCarryATangentDoesNotRun) {
     // The bug this pins: the state is sized by the descriptor, so a stepper
     // that does not integrate the material tangents still receives the vectors
     // and hands them back at zero. A zero derivative reads as "no parameter
@@ -439,7 +439,7 @@ TEST_F(ThermalPreviewTest, ASolveThatCannotCarryATangentDoesNotRun) {
         << "more convection cools a surface the sun is heating, so dT/dh is negative";
 }
 
-TEST_F(ThermalPreviewTest, AnElementTrajectoryReplaysWithoutMovingTheViewport) {
+TEST_P(ThermalPreviewTest, AnElementTrajectoryReplaysWithoutMovingTheViewport) {
     ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
 
     ThermalSolveParams params;
@@ -471,7 +471,7 @@ TEST_F(ThermalPreviewTest, AnElementTrajectoryReplaysWithoutMovingTheViewport) {
     EXPECT_DOUBLE_EQ(context->GetThermalSolveStatus().meanTemperature_K, shown);
 }
 
-TEST_F(ThermalPreviewTest, TheSixFluxesSumToWhatTheSurfaceIsStoring) {
+TEST_P(ThermalPreviewTest, TheSixFluxesSumToWhatTheSurfaceIsStoring) {
     // The claim that makes the decomposition readable rather than six
     // unrelated numbers: they are the whole balance, so their sum is the rate
     // the surface half-cell is storing heat. Checked against a finite
@@ -525,7 +525,7 @@ TEST_F(ThermalPreviewTest, TheSixFluxesSumToWhatTheSurfaceIsStoring) {
     EXPECT_LT(f.conduction_W_m2, 0.0);
 }
 
-TEST_F(ThermalPreviewTest, AProbeSaysWhenItCannotAnswer) {
+TEST_P(ThermalPreviewTest, AProbeSaysWhenItCannotAnswer) {
     ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
     ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
 
@@ -541,7 +541,7 @@ TEST_F(ThermalPreviewTest, AProbeSaysWhenItCannotAnswer) {
     EXPECT_DOUBLE_EQ(reversed.value().time_h.back(), 18.0);
 }
 
-TEST_F(ThermalPreviewTest, APickNamesTheElementAProbeAsksAbout) {
+TEST_P(ThermalPreviewTest, APickNamesTheElementAProbeAsksAbout) {
     // The path from a click in the viewport to a chart of that surface's day:
     // a pick reports an instance and a triangle within it, the solve indexes
     // its elements flat, and without this map a host holding a PickResult has
@@ -569,7 +569,7 @@ TEST_F(ThermalPreviewTest, APickNamesTheElementAProbeAsksAbout) {
     EXPECT_FALSE(context->ThermalElementAt(offMesh).has_value());
 }
 
-TEST_F(ThermalPreviewTest, TheWhatIfPreviewMatchesASolveToFirstOrder) {
+TEST_P(ThermalPreviewTest, TheWhatIfPreviewMatchesASolveToFirstOrder) {
     // What the preview claims: T + dT/dp * step is what a re-solve at p + step
     // would produce, in the limit of a small step. The claim is checkable
     // without the GPU at all -- the trajectory carries the tangent and the
@@ -640,7 +640,7 @@ TEST_F(ThermalPreviewTest, TheWhatIfPreviewMatchesASolveToFirstOrder) {
         << solvedElement << " from " << baseElement;
 }
 
-TEST_F(ThermalPreviewTest, AWhatIfForAParameterNobodyAskedForIsRefused) {
+TEST_P(ThermalPreviewTest, AWhatIfForAParameterNobodyAskedForIsRefused) {
     // The tangent is sized into the state, so previewing a parameter the solve
     // does not carry cannot be answered by looking harder -- it needs a
     // different solve. Said, rather than shown as a preview of zero.
@@ -672,7 +672,7 @@ TEST_F(ThermalPreviewTest, AWhatIfForAParameterNobodyAskedForIsRefused) {
 // measuring is the expensive part -- so the thing to pin is that it happens
 // when the trajectory changes and not when the clock merely moves.
 
-TEST_F(ThermalPreviewTest, AMovingModelCutsTheSolveIntoEpochs) {
+TEST_P(ThermalPreviewTest, AMovingModelCutsTheSolveIntoEpochs) {
     const auto report = context->ApplyConfig(MakeMovingThermalConfig());
     ASSERT_TRUE(report.ok()) << report.FirstError();
     ASSERT_TRUE(report.timelinePresent);
@@ -683,7 +683,7 @@ TEST_F(ThermalPreviewTest, AMovingModelCutsTheSolveIntoEpochs) {
     EXPECT_EQ(report.thermalEpochs, status.thermalEpochCount);
 }
 
-TEST_F(ThermalPreviewTest, ScrubbingTheClockCostsNoExchangePrecompute) {
+TEST_P(ThermalPreviewTest, ScrubbingTheClockCostsNoExchangePrecompute) {
     ASSERT_TRUE(context->ApplyConfig(MakeMovingThermalConfig()).ok());
 
     const u32 before = context->GetThermalSolveStatus().exchangeRunCount;
@@ -697,7 +697,7 @@ TEST_F(ThermalPreviewTest, ScrubbingTheClockCostsNoExchangePrecompute) {
         << "moving the clock re-measured the world";
 }
 
-TEST_F(ThermalPreviewTest, TheHostIsToldWhichEpochIsBeingMeasured) {
+TEST_P(ThermalPreviewTest, TheHostIsToldWhichEpochIsBeingMeasured) {
     // The build is synchronous on the caller's thread, so this callback is
     // the only way a window can say "building epoch 3 of 24" rather than
     // freezing. Registered before the config so the very first plan reports.
@@ -729,7 +729,7 @@ TEST_F(ThermalPreviewTest, TheHostIsToldWhichEpochIsBeingMeasured) {
     EXPECT_TRUE(calls.empty());
 }
 
-TEST_F(ThermalPreviewTest, TheHourFollowsTheClock) {
+TEST_P(ThermalPreviewTest, TheHourFollowsTheClock) {
     ASSERT_TRUE(context->ApplyConfig(MakeMovingThermalConfig()).ok());
 
     // thermal_time_scale = 3600, so one timeline second is one simulated hour,
@@ -742,7 +742,7 @@ TEST_F(ThermalPreviewTest, TheHourFollowsTheClock) {
     EXPECT_NEAR(context->GetThermalSolveStatus().currentTime_h, 15.0, 1e-9);
 }
 
-TEST_F(ThermalPreviewTest, TheEpochPlanStartsAtTheMappedHour) {
+TEST_P(ThermalPreviewTest, TheEpochPlanStartsAtTheMappedHour) {
     // The epoch plan converts every planned start through HourAt, so it has
     // to be built after the thermal mapping exists. It once was not: every
     // epoch's from_h sat thermal.time_h earlier, and the hour the config
@@ -773,7 +773,7 @@ TEST_F(ThermalPreviewTest, TheEpochPlanStartsAtTheMappedHour) {
     EXPECT_EQ(context->GetThermalSolveStatus().currentThermalEpoch, 1u);
 }
 
-TEST_F(ThermalPreviewTest, AStaticSceneStillHasExactlyOneEpoch) {
+TEST_P(ThermalPreviewTest, AStaticSceneStillHasExactlyOneEpoch) {
     ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
     EXPECT_EQ(context->GetThermalSolveStatus().thermalEpochCount, 1u);
 }

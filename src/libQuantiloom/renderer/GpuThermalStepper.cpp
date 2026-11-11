@@ -14,57 +14,18 @@
 #include <stdexcept>
 #include <type_traits>
 
+// The structs thermal_step.comp.hlsl reads, defined once for the shader and this
+// file. By a path relative to this file, as RtBindings.hpp includes its manifest.
+#include "../../shaders/ql_shared_thermal.hlsli"
+
 
 namespace quantiloom::rendercore {
 
 namespace {
 
-struct ThermalElementGpu {
-    glm::vec3 centre;
-    f32 area;
-    glm::vec3 normal;
-    u32 materialId;
-};
-static_assert(sizeof(ThermalElementGpu) == 32);
-
-struct ThermalMaterialGpu {
-    f32 conductivity;
-    f32 density;
-    f32 specificHeat;
-    f32 thickness;
-    f32 convection;
-    f32 shortwaveAbsorptivity;
-    f32 longwaveEmissivity;
-    u32 interiorBcFixed;
-    f32 interiorTemperature;
-    f32 wetnessFactor;
-};
-static_assert(sizeof(ThermalMaterialGpu) == 40);
-
-struct StepPushConstants {
-    glm::vec3 sunDirection;
-    f32 dt_s;
-    f32 airTemperature_K;
-    f32 sunIrradiance;
-    f32 skyTemperature_K;
-    f32 sunBlend;
-    u32 elementCount;
-    u32 nodeCount;
-    u32 parity;
-    u32 sunSampleA;
-    u32 sunSampleB;
-    f32 diffuseIrradiance;
-    f32 relativeHumidity;
-    /// The forcing's convective coefficient, or 0 to mean the material's own.
-    /// Mirrors ThermalForcing::convection_W_m2K so that a trajectory stepped
-    /// on the GPU matches one stepped on the CPU; test_thermal_step_gpu
-    /// compares them over 24 h and would otherwise start disagreeing the
-    /// moment a forcing file carried a ninth column.
-    f32 convection_W_m2K;
-    u32 hasReflectedGain;
-    u32 carryTangent;
-};
-static_assert(sizeof(StepPushConstants) == 72);
+using ThermalElementGpu = shader::ThermalElementGpu;
+using ThermalMaterialGpu = shader::ThermalMaterialGpu;
+using StepPushConstants = shader::StepPushConstants;
 
 /// Bindings the compute shader declares. Buffers 9 and 10 are the baked
 /// short-wave gains and 11 is the tangent dT/dv; all three are always bound,

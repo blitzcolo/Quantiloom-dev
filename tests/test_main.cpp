@@ -7,7 +7,7 @@
 
 #include <gtest/gtest.h>
 #include "core/Log.hpp"
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
 
 using namespace quantiloom;
 
@@ -30,15 +30,15 @@ public:
     }
 };
 
-// Owns nothing at start-up: the shared Vulkan device is created on first use, so a
-// run that touches no GPU test never pays for it. This exists only to destroy it
+// Owns nothing at start-up: each backend's shared device is created on first use, so
+// a run that touches no GPU test never pays for it. This exists only to destroy them
 // while the logger is still alive -- VulkanContext's destructor logs, and gtest tears
 // environments down in reverse registration order, so registering this one after
 // QuantiloomTestEnvironment puts it ahead of Log::Shutdown.
-class VulkanDeviceEnvironment final : public ::testing::Environment {
+class GpuDeviceEnvironment final : public ::testing::Environment {
 public:
     void TearDown() override {
-        ::quantiloom::testing::ReleaseSharedVulkanDevice();
+        ::quantiloom::testing::ReleaseSharedGpuDevices();
     }
 };
 
@@ -51,9 +51,9 @@ int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
 
     // Register global test environments. Order matters: teardown runs in reverse,
-    // so the Vulkan device is destroyed while the logger it writes to still exists.
+    // so the GPU devices are destroyed while the logger they write to still exists.
     ::testing::AddGlobalTestEnvironment(new QuantiloomTestEnvironment());
-    ::testing::AddGlobalTestEnvironment(new VulkanDeviceEnvironment());
+    ::testing::AddGlobalTestEnvironment(new GpuDeviceEnvironment());
 
     // Run all tests
     return RUN_ALL_TESTS();

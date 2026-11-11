@@ -54,6 +54,11 @@ endif()
 # ----------------------------------------------------------------------------
 option(QUANTILOOM_SHADER_PORTABILITY_CHECK
        "Also compile every shader to DXIL, and to a metallib when Metal Shader Converter is found" ON)
+# A Metal build compiles every shader through DXIL and MSC for real, so the
+# check would only do the same work twice.
+if(QUANTILOOM_BACKEND_METAL)
+    set(QUANTILOOM_SHADER_PORTABILITY_CHECK OFF)
+endif()
 
 find_program(QUANTILOOM_MSC_EXECUTABLE
     NAMES metal-shaderconverter metal-shaderconverter.exe
@@ -131,12 +136,93 @@ file(CONFIGURE OUTPUT "${SHADER_FLAGS_STAMP}"
 
 set(COMPILED_SHADERS)
 
-# Compile one HLSL source to one .spv. Several compute sources produce more
-# than one output, differing only by a -D, so the output name is a parameter
-# rather than derived from the source.
-function(quantiloom_compile_hlsl OUT_NAME SRC_NAME)
-    set(SHADER_OUTPUT "${SHADER_OUTPUT_DIR}/${OUT_NAME}.spv")
+# ----------------------------------------------------------------------------
+# The shader format this build ships. A Vulkan build ships SPIR-V; a Metal
+# build (a Mac: see QUANTILOOM_BACKEND_METAL) ships, per shader, the metallib
+# Metal Shader Converter makes from DXIL plus the reflection JSON it writes
+# beside it, which is where the Metal backend reads its top-level argument
+# buffer layout and threadgroup size from. Both sit next to their sources, as
+# the .spv do, so the working-directory development fallback finds either.
+#
+# Specialisation on Metal: raygen is the one stage the Metal backend runs that
+# the host specialises, so it alone is compiled with the two QL_SPEC_CONSTANTs
+# as Metal function constants (ql_bind.hlsli); everything else keeps the
+# compiled-in defaults, as DXIL always has.
+# ----------------------------------------------------------------------------
+if(QUANTILOOM_BACKEND_METAL AND QUANTILOOM_BACKEND_VULKAN)
+    message(FATAL_ERROR "A build ships one shader format: enable the Vulkan or the Metal backend, not both.")
+endif()
+if(QUANTILOOM_BACKEND_METAL)
+    set(QL_SHADER_FORMAT metallib)
+    set(QL_SHADER_PROBE raygen.metallib)
+    if(NOT QUANTILOOM_MSC_EXECUTABLE)
+        message(FATAL_ERROR "The Metal backend needs Metal Shader Converter (metal-shaderconverter); "
+                            "install it from developer.apple.com or set METAL_SHADER_CONVERTER_DIR.")
+    endif()
+else()
+    set(QL_SHADER_FORMAT spirv)
+    set(QL_SHADER_PROBE raygen.spv)
+endif()
+set(QL_METAL_FUNCTION_CONSTANT_SPACE 2147420894)  # ql_bind.hlsli repeats it
+set(QL_METAL_DIR "${CMAKE_CURRENT_BINARY_DIR}/metal")
+file(MAKE_DIRECTORY "${QL_METAL_DIR}")
+
+# The Metal build's rule: DXIL, then Metal Shader Converter to the metallib and
+# its reflection. Flags are the SPIR-V ones minus the SPIR-V switches, as for
+# the portability check.
+function(quantiloom_compile_hlsl_metal OUT_NAME SRC_NAME)
     set(SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/${SRC_NAME}")
+    if(${SRC_NAME} MATCHES "\\.rayq\\.hlsl$")
+        set(FLAGS ${DXC_RQ_FLAGS} -rootsig-define QL_ROOT_SIGNATURE)
+    elseif(${SRC_NAME} MATCHES "\\.comp\\.hlsl$")
+        set(FLAGS ${DXC_COMP_FLAGS})
+    elseif(${SRC_NAME} STREQUAL "raygen.rgen")
+        set(FLAGS ${DXC_RTQ_FLAGS})
+    else()
+        set(FLAGS ${DXC_RT_FLAGS})
+    endif()
+    list(REMOVE_ITEM FLAGS -spirv -fspv-target-env=vulkan1.2)
+    set(MSC_STAGE_FLAGS)
+    if(${SRC_NAME} STREQUAL "raygen.rgen")
+        list(APPEND FLAGS -D QL_METAL_FUNCTION_CONSTANT_SPACE=${QL_METAL_FUNCTION_CONSTANT_SPACE})
+        set(MSC_STAGE_FLAGS --rt-ray-generation-compilation=kernel
+                            --function-constant-register-space=${QL_METAL_FUNCTION_CONSTANT_SPACE})
+    endif()
+    set(DXIL_OUTPUT "${QL_METAL_DIR}/${OUT_NAME}.dxil")
+    set(METALLIB_OUTPUT "${SHADER_OUTPUT_DIR}/${OUT_NAME}.metallib")
+    set(REFLECTION_OUTPUT "${SHADER_OUTPUT_DIR}/${OUT_NAME}.reflection.json")
+    add_custom_command(
+        OUTPUT ${DXIL_OUTPUT}
+        COMMAND ${DXC_EXECUTABLE} ${FLAGS} ${ARGN} -Fo ${DXIL_OUTPUT} ${SHADER_SOURCE}
+        DEPENDS ${SHADER_SOURCE} ${SHADER_HEADERS} ${SHADER_FLAGS_STAMP}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Compiling shader (DXIL): ${OUT_NAME}"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT ${METALLIB_OUTPUT} ${REFLECTION_OUTPUT}
+        COMMAND ${QUANTILOOM_MSC_EXECUTABLE} --disableNanInfOptimization
+                ${MSC_STAGE_FLAGS} ${QUANTILOOM_MSC_FLAG_LIST}
+                ${DXIL_OUTPUT} -o=${METALLIB_OUTPUT}
+                --output-reflection-file=${REFLECTION_OUTPUT}
+        DEPENDS ${DXIL_OUTPUT} ${SHADER_FLAGS_STAMP}
+        COMMENT "Compiling shader (metallib): ${OUT_NAME}"
+        VERBATIM
+    )
+    set(COMPILED_SHADERS ${COMPILED_SHADERS} ${METALLIB_OUTPUT} ${REFLECTION_OUTPUT} PARENT_SCOPE)
+endfunction()
+
+# Compile one HLSL source to one .spv (or metallib). Several compute sources
+# produce more than one output, differing only by a -D, so the output name is
+# a parameter rather than derived from the source.
+function(quantiloom_compile_hlsl OUT_NAME SRC_NAME)
+    set(SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/${SRC_NAME}")
+    if(QL_SHADER_FORMAT STREQUAL "metallib")
+        quantiloom_compile_hlsl_metal(${OUT_NAME} ${SRC_NAME} ${ARGN})
+        set(COMPILED_SHADERS ${COMPILED_SHADERS} PARENT_SCOPE)
+        return()
+    endif()
+    set(SHADER_OUTPUT "${SHADER_OUTPUT_DIR}/${OUT_NAME}.spv")
     if(${SRC_NAME} MATCHES "\\.rayq\\.hlsl$")
         set(FLAGS ${DXC_RQ_FLAGS})
     elseif(${SRC_NAME} MATCHES "\\.comp\\.hlsl$")
@@ -250,7 +336,9 @@ set(QL_SHADER_SET_DIGEST_HEADER "${CMAKE_CURRENT_BINARY_DIR}/core/ShaderSetDiges
 # custom command below replaces it before the library is compiled.
 if(NOT EXISTS "${QL_SHADER_SET_DIGEST_HEADER}")
     file(WRITE "${QL_SHADER_SET_DIGEST_HEADER}"
-         "#pragma once\nnamespace quantiloom::core { inline constexpr const char* kShaderSetDigest = \"\"; }\n")
+         "#pragma once\nnamespace quantiloom::core { inline constexpr const char* kShaderSetDigest = \"\"; "
+         "inline constexpr const char* kShaderSubdir = \"${QL_SHADER_FORMAT}\"; "
+         "inline constexpr const char* kShaderProbe = \"${QL_SHADER_PROBE}\"; }\n")
 endif()
 list(JOIN QL_SHADER_SET_NAMES ";" QL_SHADER_SET_NAME_LIST)
 add_custom_command(
@@ -260,6 +348,8 @@ add_custom_command(
         "-DNAMES=${QL_SHADER_SET_NAME_LIST}"
         -DSTAMP=${QL_SHADER_SET_STAMP}
         -DHEADER=${QL_SHADER_SET_DIGEST_HEADER}
+        -DSUBDIR=${QL_SHADER_FORMAT}
+        -DPROBE=${QL_SHADER_PROBE}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/ShaderSetStamp.cmake
     DEPENDS ${COMPILED_SHADERS} ${CMAKE_CURRENT_SOURCE_DIR}/ShaderSetStamp.cmake
     COMMENT "Stamping the shader set (SHADERSET)"
@@ -284,6 +374,7 @@ add_custom_target(ShaderSetStamp)
 add_dependencies(ShaderSetStamp CompileShaders)
 set(QL_SHADER_SET_STAMP "${QL_SHADER_SET_STAMP}" PARENT_SCOPE)
 set(QL_SHADER_SET_DIGEST_HEADER "${QL_SHADER_SET_DIGEST_HEADER}" PARENT_SCOPE)
+set(QL_SHADER_FORMAT "${QL_SHADER_FORMAT}" PARENT_SCOPE)
 
 # Portability check target, plus a manifest the build scripts read to report
 # it: which shaders were checked, and whether the metallib half ran. A failed

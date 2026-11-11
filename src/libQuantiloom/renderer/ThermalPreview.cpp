@@ -6,7 +6,7 @@
 #include "renderer/ThermalPreview.hpp"
 
 #include "core/Log.hpp"
-#include "gpu/vulkan/VulkanBridge.hpp"
+#include "gpu/Device.hpp"
 #include "renderer/GpuThermalStepper.hpp"
 #include "renderer/ThermalEpochBuilder.hpp"
 #include "renderer/ThermalExchangePrecompute.hpp"
@@ -41,7 +41,8 @@ f32 EmissivityOf(const Material& material) {
 }  // namespace
 
 struct ThermalPreview::Impl {
-    VulkanContext& context;
+    /// The caller's device; it outlives every gpu:: object the stepper holds.
+    gpu::Device& device;
     ThermalSolveParams params;
     std::unordered_map<String, ThermalMaterialParams> materialParams;
     bool enabled = false;
@@ -77,7 +78,6 @@ struct ThermalPreview::Impl {
     thermal::ThermalForcing constantForcing;
 
     // Steppers
-    std::unique_ptr<gpu::Device> gpuDevice;
     std::unique_ptr<GpuThermalStepper> gpuStepper;
     thermal::CpuCrankNicolsonStepper cpuStepper;
 
@@ -90,11 +90,8 @@ struct ThermalPreview::Impl {
     f64 lastMeanT = 0.0;
     String lastError;
 
-    explicit Impl(VulkanContext& ctx) : context(ctx) {
-        // gpuDevice is declared above gpuStepper so it outlives every gpu::
-        // object the stepper holds.
-        gpuDevice = gpu::vulkan::AdoptContext(ctx);
-        gpuStepper = std::make_unique<GpuThermalStepper>(*gpuDevice);
+    explicit Impl(gpu::Device& gpuDevice) : device(gpuDevice) {
+        gpuStepper = std::make_unique<GpuThermalStepper>(device);
         schedule = thermal::ThermalGeometrySchedule::Single({}, {});
     }
 
@@ -288,7 +285,7 @@ struct ThermalPreview::Impl {
     /// host and more than one epoch the shared builder walks the scene through
     /// them; otherwise this is what it always was -- one exchange and one sun
     /// table, computed where the scene stands.
-    void RebuildSchedule(const Scene& scene, VkAccelerationStructureKHR tlas) {
+    void RebuildSchedule(const Scene& scene, gpu::RtSceneRef tlas) {
         // A file without the humidity column means the run's humidity, as it
         // does offline, not the parser's default of 50%.
         forcingSeries = thermal::LoadForcingCsv(params.forcingFile, params.relativeHumidity);
@@ -315,7 +312,7 @@ struct ThermalPreview::Impl {
 
             thermal::ThermalMesh epoch0;
             thermal::ThermalGeometrySchedule built =
-                BuildThermalGeometrySchedule(context, *epochHost, scene, input, &epoch0);
+                BuildThermalGeometrySchedule(device, *epochHost, scene, input, &epoch0);
             if (!built.Empty()) {
                 schedule = std::move(built);
                 // Epoch zero's mesh is the one that carries the topology: the
@@ -338,9 +335,9 @@ struct ThermalPreview::Impl {
     /// One exchange and one sun table, computed where the scene stands. What
     /// every scene did before there was a timeline, and what a scene with
     /// nothing moving still does.
-    void RebuildSingleGeometry(VkAccelerationStructureKHR tlas) {
+    void RebuildSingleGeometry(gpu::RtSceneRef tlas) {
         thermal::ExchangeGeometry exchange;
-        ThermalExchangePrecompute precompute(context);
+        ThermalExchangePrecompute precompute(device);
         precompute.SetMaterialCoverage(materialCoverage);
 
         bool sunColumnStale = false;
@@ -357,7 +354,7 @@ struct ThermalPreview::Impl {
             // below re-traces it for the current one.
             exchange = std::move(schedule.epochs.front().exchange);
             sunColumnStale = true;
-        } else if (precompute.IsValid() && tlas != VK_NULL_HANDLE && !mesh.elements.empty()) {
+        } else if (precompute.IsValid() && tlas.IsValid() && !mesh.elements.empty()) {
             ThermalExchangePrecompute::Params ep;
             ep.hemisphereRays = params.exchangeRays;
             ep.topK = params.exchangeTopK;
@@ -373,7 +370,7 @@ struct ThermalPreview::Impl {
         // day the way they do offline; a run with constant forcing gets the
         // single column the exchange already computed.
         thermal::SunVisibilityTable sunTable;
-        if (forcingSeries.size() > 1 && tlas != VK_NULL_HANDLE) {
+        if (forcingSeries.size() > 1 && tlas.IsValid()) {
             Vector<glm::vec3> directions;
             directions.reserve(forcingSeries.size());
             sunTable.sampleTime_h.reserve(forcingSeries.size());
@@ -393,7 +390,7 @@ struct ThermalPreview::Impl {
             }
         }
         if (sunTable.SampleCount() == 0 && sunColumnStale && precompute.IsValid() &&
-            tlas != VK_NULL_HANDLE) {
+            tlas.IsValid()) {
             // The kept exchange's column points at the old fallback direction;
             // a cosine for the new one against that shadow is half an update.
             const glm::vec3 direction = fallbackSunDirection;
@@ -488,8 +485,8 @@ struct ThermalPreview::Impl {
     }
 };
 
-ThermalPreview::ThermalPreview(VulkanContext& context)
-    : m_impl(std::make_unique<Impl>(context)) {}
+ThermalPreview::ThermalPreview(gpu::Device& device)
+    : m_impl(std::make_unique<Impl>(device)) {}
 
 ThermalPreview::~ThermalPreview() = default;
 
@@ -587,7 +584,7 @@ void ThermalPreview::InvalidateMaterialEmissivity() {
 }
 
 ThermalPreview::SolveResult ThermalPreview::SolveAt(
-    const f64 time_h, const Scene& scene, const VkAccelerationStructureKHR tlas) {
+    const f64 time_h, const Scene& scene, const gpu::RtSceneRef tlas) {
     SolveResult result;
 
     // Whatever stops the solve is what Status() reports, so the panel says why

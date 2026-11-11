@@ -1,8 +1,10 @@
 #ifndef QL_CAMERA_PROJECTION_HLSLI
 #define QL_CAMERA_PROJECTION_HLSLI
 
+#include "ql_bind.hlsli"
+
 // Layout matches RayTracingPipeline::SetCameraProjection, float4 x 4.
-StructuredBuffer<float4> projectionConfig : register(t32, space0);
+StructuredBuffer<float4> projectionConfig : QL_RT_REGISTER(projectionConfig);
 
 float2 BrownProjection(float2 v, float4 k, float k3, out float3 j) {
     float r2 = dot(v, v);

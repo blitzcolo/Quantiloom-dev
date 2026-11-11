@@ -19,12 +19,10 @@
 #include <gtest/gtest.h>
 
 #include "renderer/ExternalRenderContext.hpp"
-#include "renderer/VulkanContext.hpp"
-#include "renderer/CommandHelper.hpp"
-#include "renderer/GpuImage.hpp"
+#include "gpu/Device.hpp"
 #include "core/Config.hpp"
 #include "support/GpuInteropTestUtils.hpp"
-#include "support/VulkanTestDevice.hpp"
+#include "support/GpuTestDevice.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -155,16 +153,16 @@ std::optional<Config> LoadDesertConfig(const std::filesystem::path& tempDir,
     return parsed.value();
 }
 
-class InteractiveBench : public quantiloom::testing::VulkanDeviceTest {
+class InteractiveBench : public quantiloom::testing::GpuDeviceTest {
 protected:
     void SetUp() override {
-        VulkanDeviceTest::SetUp();
+        GpuDeviceTest::SetUp();
         if (::testing::Test::IsSkipped()) return;
 
         tempDir = std::filesystem::temp_directory_path() / "quantiloom_bench";
         std::filesystem::create_directories(tempDir);
 
-        auto* shared = quantiloom::testing::SharedVulkanDevice();
+        auto* shared = quantiloom::testing::SharedGpuDevice(Backend());
         ASSERT_NE(shared, nullptr);
 
         ExternalRenderContext::InitParams params{};
@@ -177,10 +175,14 @@ protected:
         ASSERT_TRUE(created.has_value()) << created.error();
         context = std::move(created.value());
 
-        target = std::make_unique<GpuImage>(
-            shared->GetAllocator(), shared->GetDevice(), kBenchSize, kBenchSize,
-            VK_FORMAT_B8G8R8A8_SRGB,
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        gpu::TextureDesc targetDesc;
+        targetDesc.width = kBenchSize;
+        targetDesc.height = kBenchSize;
+        targetDesc.format = gpu::Format::BGRA8Srgb;
+        targetDesc.usage = gpu::TextureUsage::TransferDst | gpu::TextureUsage::Sampled;
+        auto texture = shared->CreateTexture(targetDesc);
+        ASSERT_TRUE(texture.has_value()) << texture.error();
+        target = std::move(texture.value());
     }
 
     void TearDown() override {
@@ -194,10 +196,11 @@ protected:
     // and blocks, so the clock around this call measures a frame that finished
     // rather than one that was queued.
     void DrawOneFrame() {
-        CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-            context->RenderFrame(vk::Commands(cmd),
-                                 vk::Target(target->GetImage(), GpuTargetFormat::Bgra8Srgb, kBenchSize, kBenchSize,
-                                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
+        Gpu().ExecuteImmediate([&](gpu::CommandList& list) {
+            context->RenderFrame(quantiloom::testing::GpuRecording(list),
+                                 quantiloom::testing::GpuTarget(Backend(), target->Ref(), GpuTargetFormat::Bgra8Srgb,
+                                                                quantiloom::testing::kHostLayoutUndefined,
+                                                                quantiloom::testing::kHostLayoutGeneral));
         });
     }
 
@@ -224,8 +227,9 @@ protected:
 
     std::filesystem::path tempDir;
     std::unique_ptr<ExternalRenderContext> context;
-    std::unique_ptr<GpuImage> target;
+    std::unique_ptr<gpu::Texture> target;
 };
+QL_INSTANTIATE_GPU_SUITE(InteractiveBench);
 
 }  // namespace
 
@@ -233,7 +237,7 @@ protected:
 // progressive frame. The target is 0.5 s. Reported alongside the full rebuild,
 // which is what a drag release costs and is the number that scales with the
 // instance count rather than with the transform.
-TEST_F(InteractiveBench, DISABLED_GeometryEditToFirstFrame) {
+TEST_P(InteractiveBench, DISABLED_GeometryEditToFirstFrame) {
     ASSERT_TRUE(LoadDesert({201, 1.0, 0.0, false}))
         << "desert scene or config missing";
     const auto node = SphereNode();
@@ -292,7 +296,7 @@ TEST_F(InteractiveBench, DISABLED_GeometryEditToFirstFrame) {
 
 // T1 again, across the four tessellations, so the refit cost can be read
 // against instance and triangle count rather than asserted to be O(1).
-TEST_F(InteractiveBench, DISABLED_GeometryEditAcrossTessellations) {
+TEST_P(InteractiveBench, DISABLED_GeometryEditAcrossTessellations) {
     for (const u32 divisions : {51u, 101u, 201u, 401u}) {
         if (!LoadDesert({divisions, 1.0, 0.0, false})) {
             std::printf("  [BENCH] desert_%u missing, skipped\n", divisions);
@@ -329,7 +333,7 @@ TEST_F(InteractiveBench, DISABLED_GeometryEditAcrossTessellations) {
 //
 // ApplyConfig already calls SetThermalTime once, which is what builds the
 // exchange matrix; every seek timed here is therefore a pure scrub.
-TEST_F(InteractiveBench, DISABLED_ThermalTimelineBackwardSeek) {
+TEST_P(InteractiveBench, DISABLED_ThermalTimelineBackwardSeek) {
     // The tessellation is a parameter of this case, not a constant, because the
     // first attempt at it ran the stride sweep on the 201^2 scene and did not
     // finish: 82,208 elements checkpointed every 0.25 h across 48 h is 192
@@ -466,7 +470,7 @@ TEST_F(InteractiveBench, DISABLED_ThermalTimelineBackwardSeek) {
 // target in Section VIII-G is actually about. One stride rather than four,
 // because the sweep above is what characterises the dial and this is what
 // characterises the scene.
-TEST_F(InteractiveBench, DISABLED_ThermalSeekOnReferenceScene) {
+TEST_P(InteractiveBench, DISABLED_ThermalSeekOnReferenceScene) {
     for (const u32 divisions : {51u, 101u, 201u}) {
         const auto setupStart = std::chrono::steady_clock::now();
         if (!LoadDesert({divisions, 1.0, 0.0, true, 0.0})) {
@@ -515,7 +519,7 @@ TEST_F(InteractiveBench, DISABLED_ThermalSeekOnReferenceScene) {
 // material does not re-solve; it sets a flag, and the whole timeline is rebuilt
 // on the next seek. That first seek is the number a user actually waits for
 // after letting go of a slider, and it is not the steady-state seek above.
-TEST_F(InteractiveBench, DISABLED_ThermalLazyInvalidationRecovery) {
+TEST_P(InteractiveBench, DISABLED_ThermalLazyInvalidationRecovery) {
     // On the sweep scene, for the same reason the stride sweep is: each run
     // re-solves the trajectory from its steady initial condition, so this is
     // the most expensive measurement per sample in the file.

@@ -1,4 +1,4 @@
-#include "renderer/VulkanDeviceRequirements.hpp"
+#include "gpu/vulkan/VulkanDeviceRequirements.hpp"
 
 #include "core/Log.hpp"
 

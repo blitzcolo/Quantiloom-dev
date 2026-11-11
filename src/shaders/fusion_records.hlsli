@@ -1,11 +1,13 @@
 #ifndef QL_FUSION_RECORDS_HLSLI
 #define QL_FUSION_RECORDS_HLSLI
 
+#include "ql_bind.hlsli"
+
 // Byte-addressed fusion record buffer. The host side of this layout lives in
 // src/libQuantiloom/renderer/FusionRecordLayout.hpp and carries the same
 // names and values -- change one side, change both. All Load/Store offsets
 // below are bytes; the host indexes the same fields in u32 words.
-RWByteAddressBuffer fusionRecords : register(u36, space0);
+RWByteAddressBuffer fusionRecords : QL_RT_REGISTER(fusionRecords);
 
 // Header words (byte offset = word * 4).
 static const uint kFusionEnabledWord = 0;          // recording armed

@@ -3,27 +3,27 @@
  * @brief GPU texture upload and bindless descriptor array management
  *
  * Provides TextureManager class for batch texture upload to GPU:
- * - Uploads multiple CPU Texture objects to GPU VkImage resources
- * - Creates VkSampler for each texture based on filter/wrap settings
+ * - Uploads multiple CPU Texture objects to gpu::Texture resources
+ * - Creates a gpu::Sampler for each texture based on filter/wrap settings
  * - Manages lifetime of all texture images and samplers (RAII)
- * - Provides VkImageView and VkSampler arrays for bindless descriptor sets
+ * - Provides TextureRef and SamplerRef arrays for bindless descriptor sets
  *
  * Texture format conversion:
- * - All textures uploaded as RGBA8_UNORM (32 bpp)
+ * - All textures uploaded as RGBA8 (32 bpp), sRGB or UNORM, or as BC7
  * - Source formats (1-4 channels) expanded to RGBA automatically
- * - Image layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL (after upload)
+ * - Ready for shader reads after upload (shader-read-only layout on Vulkan)
  *
  * Bindless descriptor indexing:
  * - Each texture gets a unique index (matches Material texture indices)
  * - Shader access via: texture2DArray[textureIndex]
- * - Requires VK_EXT_descriptor_indexing extension
+ * - Up to DeviceInfo::maxBindlessTextures entries (descriptor indexing on Vulkan)
  *
  * Fallback behavior:
  * - If no textures provided, creates 1x1 white dummy texture
  * - Prevents null descriptor access in shaders
  *
  * @note All textures uploaded during UploadTextures() call (batch operation)
- * @note Samplers destroyed manually in destructor (GpuImage handles images via RAII)
+ * @note Samplers are owned gpu::Sampler objects, destroyed before the images (RAII)
  * @note Texture indices are immutable after upload
  *
  * @author blitzcolo
@@ -35,9 +35,7 @@
 #include "core/Platform.hpp"
 #include "scene/Texture.hpp"
 #include "TextureCompressor.hpp"
-#include "VulkanContext.hpp"
-#include "GpuImage.hpp"
-#include <vulkan/vulkan.h>
+#include "gpu/Device.hpp"
 #include <vector>
 #include <memory>
 
@@ -52,30 +50,30 @@ namespace quantiloom {
  * @brief Manages batch upload of textures to GPU with bindless descriptor arrays
  *
  * Central texture management system for Quantiloom renderer.
- * Handles conversion from CPU Texture data to GPU VkImage resources.
+ * Handles conversion from CPU Texture data to gpu::Texture resources.
  *
  * Upload workflow:
  * 1. Constructor creates TextureManager (no textures uploaded yet)
  * 2. UploadTextures() converts all CPU textures to GPU images
  * 3. For each texture:
- *    - Create VkImage (RGBA8_UNORM format)
+ *    - Create a gpu::Texture (RGBA8 format)
  *    - Upload pixel data via staging buffer
- *    - Transition layout to SHADER_READ_ONLY_OPTIMAL
- *    - Create VkSampler with specified filter/wrap modes
- * 4. GetImageViews()/GetSamplers() return arrays for descriptor binding
+ *    - Make it readable by the shaders
+ *    - Create a gpu::Sampler with specified filter/wrap modes
+ * 4. TextureRefs()/SamplerRefs() return arrays for descriptor binding
  *
  * Usage example:
  * @code
  * // Create manager
- * TextureManager texMgr(context);
+ * TextureManager texMgr(device);
  *
  * // Upload all scene textures
  * texMgr.UploadTextures(scene.textures);
  *
  * // Bind to pipeline descriptor set
- * const auto& views = texMgr.GetImageViews();
- * const auto& samplers = texMgr.GetSamplers();
- * pipeline.BindTextures(views, samplers);  // Binding 6-7
+ * const auto& textures = texMgr.TextureRefs();
+ * const auto& samplers = texMgr.SamplerRefs();
+ * pipeline.BindTextures(textures, samplers);  // Binding 6-7
  *
  * // Shader access (HLSL):
  * // [[vk::binding(6, 0)]] Texture2D textures[];
@@ -85,16 +83,16 @@ namespace quantiloom {
  * @endcode
  *
  * @note Empty texture list triggers creation of 1x1 white dummy texture
- * @note All textures converted to RGBA8_UNORM regardless of source format
+ * @note All textures converted to RGBA8 regardless of source format
  * @note Texture indices must match Material texture index references
  *
  * @see Texture for CPU-side texture data structure
- * @see GpuImage for GPU image resource management
+ * @see gpu::Texture for GPU image resource management
  * @see Material for texture index references
  */
 class TextureManager {
 public:
-    static constexpr VkDeviceSize kDefaultUploadBatchBytes = 64ull * 1024ull * 1024ull;
+    static constexpr u64 kDefaultUploadBatchBytes = 64ull * 1024ull * 1024ull;
     // ========================================================================
     // Construction / Destruction
     // ========================================================================
@@ -102,11 +100,11 @@ public:
     // Create texture manager
     // Note: Does not upload any textures yet (call UploadTextures)
     explicit TextureManager(
-        VulkanContext& context,
-        VkDeviceSize uploadBatchBytes = kDefaultUploadBatchBytes);
+        gpu::Device& device,
+        u64 uploadBatchBytes = kDefaultUploadBatchBytes);
 
-    // Destructor: automatically destroys all VkSampler objects
-    // (GpuImage handles VkImage/VkImageView destruction via RAII)
+    // Destructor: the gpu::Sampler owners destroy every sampler, then every
+    // gpu::Texture destroys its image and view (RAII)
     ~TextureManager();
 
     // Non-copyable (contains unique_ptr members)
@@ -122,10 +120,10 @@ public:
     // ========================================================================
 
     // Upload all textures from CPU to GPU
-    // - Creates VkImage + VkImageView for each texture (RGBA8_UNORM)
-    // - Creates VkSampler based on TextureSampler settings
+    // - Creates a gpu::Texture for each texture (RGBA8, or BC7)
+    // - Creates a gpu::Sampler based on TextureSampler settings
     // - Uploads pixel data via staging buffer
-    // - Transitions layout to SHADER_READ_ONLY_OPTIMAL
+    // - Leaves it in the shader-read layout
     // - RELEASES CPU MEMORY: texture.pixels is cleared after upload to free ~8GB RAM
     //
     // Note: If textures vector is empty, creates a single 1x1 white dummy texture
@@ -139,20 +137,20 @@ public:
     // Get number of textures
     [[nodiscard]] u32 GetTextureCount() const { return static_cast<u32>(m_images.size()); }
 
-    // Get array of VkImageView handles (for descriptor set binding)
+    // The textures, for descriptor set binding (sampled, shader-read layout)
     // Index matches original texture index from scene
-    [[nodiscard]] const std::vector<VkImageView>& GetImageViews() const { return m_imageViews; }
+    [[nodiscard]] const std::vector<gpu::TextureRef>& TextureRefs() const { return m_textureRefs; }
 
-    // Get array of VkSampler handles (for descriptor set binding)
+    // Their samplers, for descriptor set binding
     // Index matches original texture index from scene
-    [[nodiscard]] const std::vector<VkSampler>& GetSamplers() const { return m_samplers; }
+    [[nodiscard]] const std::vector<gpu::SamplerRef>& SamplerRefs() const { return m_samplerRefs; }
 
     /// Number of queue submissions used by the most recent UploadTextures().
     /// Exposed for load-path regression tests and diagnostics.
     [[nodiscard]] u32 GetLastUploadBatchCount() const { return m_lastUploadBatchCount; }
 
     /// Internal diagnostic access for byte/mip/format GPU upload tests.
-    [[nodiscard]] const GpuImage& GetImageForDiagnostics(u32 index) const {
+    [[nodiscard]] const gpu::Texture& GetImageForDiagnostics(u32 index) const {
         return *m_images.at(index);
     }
 
@@ -184,25 +182,25 @@ private:
         const Texture& texture) const;
     [[nodiscard]] std::unique_ptr<PendingUpload> PrepareBC7Texture(
         const Texture& texture, const BC7CompressedData& compressed) const;
-    void RecordTextureUpload(VkCommandBuffer cmd, const PendingUpload& upload) const;
+    void RecordTextureUpload(gpu::CommandList& list, const PendingUpload& upload) const;
 
     // Upload a single texture to GPU
-    // Returns GpuImage containing VkImage + VkImageView
-    [[nodiscard]] std::unique_ptr<GpuImage> UploadTexture(const Texture& texture) const;
+    // Returns the gpu::Texture holding its image and view
+    [[nodiscard]] std::unique_ptr<gpu::Texture> UploadTexture(const Texture& texture) const;
 
-    // Generate mipmaps for an uncompressed texture using vkCmdBlitImage
-    void GenerateMipmaps(VkCommandBuffer cmd, GpuImage* gpuImage,
-                          VkFormat format, u32 texWidth, u32 texHeight,
+    // Generate mipmaps for an uncompressed texture by blitting each level from the last
+    void GenerateMipmaps(gpu::CommandList& list, const gpu::Texture& image,
+                          gpu::Format format, u32 texWidth, u32 texHeight,
                           u32 mipLevels) const;
 
-    // Create VkSampler based on TextureSampler settings
-    [[nodiscard]] VkSampler CreateSampler(const TextureSampler& samplerInfo) const;
+    // Create a sampler based on TextureSampler settings
+    [[nodiscard]] std::unique_ptr<gpu::Sampler> CreateSampler(const TextureSampler& samplerInfo) const;
 
-    // Convert TextureSampler::Filter to VkFilter
-    static VkFilter ToVkFilter(TextureSampler::Filter filter);
+    // Convert TextureSampler::Filter to gpu::Filter
+    static gpu::Filter ToFilter(TextureSampler::Filter filter);
 
-    // Convert TextureSampler::WrapMode to VkSamplerAddressMode
-    static VkSamplerAddressMode ToVkAddressMode(TextureSampler::WrapMode wrapMode);
+    // Convert TextureSampler::WrapMode to gpu::AddressMode
+    static gpu::AddressMode ToAddressMode(TextureSampler::WrapMode wrapMode);
 
     // Create a 1x1 white dummy texture (fallback for empty texture list)
     static Texture CreateDummyTexture();
@@ -211,18 +209,23 @@ private:
     // Member Variables
     // ========================================================================
 
-    VulkanContext& m_context;
-    VkDeviceSize m_uploadBatchBytes = kDefaultUploadBatchBytes;
+    // The caller's device; it outlives this manager
+    gpu::Device& m_device;
+    u64 m_uploadBatchBytes = kDefaultUploadBatchBytes;
     u32 m_lastUploadBatchCount = 0;
 
-    // GPU image resources (VkImage + VkImageView managed by GpuImage)
-    std::vector<std::unique_ptr<GpuImage>> m_images;
+    // GPU image resources (image + view owned by each gpu::Texture)
+    std::vector<std::unique_ptr<gpu::Texture>> m_images;
 
-    // VkSampler objects (created manually, must be destroyed in destructor)
-    std::vector<VkSampler> m_samplers;
+    // One sampler per image. Declared after m_images, so the samplers are destroyed first,
+    // as the hand-written destructor did
+    std::vector<std::unique_ptr<gpu::Sampler>> m_samplerObjects;
+
+    // Their refs, for descriptor binding
+    std::vector<gpu::SamplerRef> m_samplerRefs;
 
     // Cached arrays for descriptor binding (updated after upload)
-    std::vector<VkImageView> m_imageViews;  // Extracted from m_images
+    std::vector<gpu::TextureRef> m_textureRefs;  // Extracted from m_images
 };
 
 } // namespace quantiloom

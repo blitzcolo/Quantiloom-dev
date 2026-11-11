@@ -38,9 +38,9 @@ WORK = ROOT / "build" / "camera_dynamic_check"
 
 # The gtest cases that render the synthetic scene and exercise the report.
 FILTER = (
-    "CameraGpuTest.StratifiedCompositorMatchesAnchorsAndCountsDisocclusion:"
-    "CameraSchedulerGpuTest.StratifiedAcquisitionReportsDynamicExposure:"
-    "CameraSchedulerGpuTest.StaticSceneDegeneratesToSingleStratum"
+    "*CameraGpuTest.StratifiedCompositorMatchesAnchorsAndCountsDisocclusion/*:"
+    "*CameraSchedulerGpuTest.StratifiedAcquisitionReportsDynamicExposure/*:"
+    "*CameraSchedulerGpuTest.StaticSceneDegeneratesToSingleStratum/*"
 )
 
 NO_GPU = re.compile(

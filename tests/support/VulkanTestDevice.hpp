@@ -1,20 +1,12 @@
 /**
  * @file VulkanTestDevice.hpp
- * @brief One headless Vulkan device, shared by every test that needs a GPU
+ * @brief The Vulkan view of the shared test device, for the Vulkan-only tests
  *
- * The suite was entirely CPU-side until now: not one test created a VkDevice. That
- * is why the render path had no cover, and why a bug like the FPN maps coming out
- * 0x0 could reach a running build -- the only thing that exercised it was a person
- * launching the GUI.
- *
- * Two rules keep the cost of changing that low:
- *
- *   - **Created once, on first use.** Device creation costs a few hundred
- *     milliseconds against a suite that runs in two seconds, and a filtered run that
- *     touches no GPU test never pays it.
- *   - **Absence skips, it never fails.** A machine without a ray-tracing GPU is not
- *     a broken build. Tests derive from VulkanDeviceTest and get that for free; the
- *     skip message says which stage of device creation was unavailable.
+ * Every GPU test that can run on any backend derives from GpuDeviceTest
+ * (GpuTestDevice.hpp). What remains here is for the few that are about Vulkan itself
+ * -- VMA round trips, shader binding table alignment -- and for the Vulkan side of the
+ * host-interop builders. There is still one device per process: SharedVulkanDevice()
+ * is the context of SharedGpuDevice(gpu::Backend::Vulkan), not a second device.
  *
  * Not thread-safe: GoogleTest runs cases serially here.
  */
@@ -23,6 +15,8 @@
 
 #include <gtest/gtest.h>
 
+#include "renderer/GpuInterop.hpp"
+
 #include <string>
 
 namespace quantiloom {
@@ -30,32 +24,34 @@ class VulkanContext;
 }
 
 namespace quantiloom::gpu {
+class CommandList;
 class Device;
-}
+class Texture;
+}  // namespace quantiloom::gpu
 
 namespace quantiloom::testing {
 
-/// The shared headless context, or nullptr when this machine cannot provide one.
-/// Creates it on the first call; a failed attempt is not retried.
+/// The context of the shared Vulkan device, or nullptr when this machine cannot provide one.
 VulkanContext* SharedVulkanDevice();
 
 /// Why SharedVulkanDevice() returned nullptr. Empty before the first attempt.
 const std::string& VulkanDeviceUnavailableReason();
 
-/// The shared gpu::Device adopted over SharedVulkanDevice(), or nullptr without a context.
-gpu::Device* SharedGpuDevice();
+/// GpuHandles and GpuRecording (GpuInteropTestUtils.hpp) for a Vulkan device or list.
+GpuDeviceHandles VulkanHostHandles(gpu::Device& device);
+GpuCommandRecording VulkanHostRecording(gpu::CommandList& list);
 
-/// Destroy the shared context. Called from the test main's environment teardown,
-/// which runs before logging shuts down -- the destructor logs.
-void ReleaseSharedVulkanDevice();
+/// TextureMipLevels and PackedInstanceTranslationX (GpuTestHelpers.hpp) on Vulkan.
+u32 VulkanTextureMipLevels(const gpu::Texture& texture);
+f32 VulkanPackedInstanceTranslationX(const void* packed, u32 index);
 
 /**
- * @brief Base for tests that need a GPU
+ * @brief Base for the Vulkan-only tests
  *
  * Skips the case when no device is available instead of failing it.
  *
  * @code
- * TEST_F(VulkanDeviceTest, BuildsABottomLevelStructure) {
+ * TEST_F(VulkanDeviceTest, RoundTripsHostVisibleMemory) {
  *     GpuBuffer buffer(Device().GetAllocator(), ...);
  * }
  * @endcode
@@ -66,9 +62,6 @@ protected:
 
     /// Valid for the body of any case that reached it -- SetUp skipped otherwise.
     [[nodiscard]] VulkanContext& Device() const;
-
-    /// The compute RHI view of the same context.
-    [[nodiscard]] gpu::Device& GpuDevice() const;
 };
 
 } // namespace quantiloom::testing

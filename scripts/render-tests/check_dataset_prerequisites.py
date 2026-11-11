@@ -5,6 +5,7 @@ Run after building the CLI and tests, with numpy and OpenEXR installed. These
 are prerequisite checks, not acceptance of visibility annotations. Exit 0 pass,
 1 failure, 2 missing binaries, 3 no GPU. Console output is ASCII.
 """
+import pathlib
 import json
 import os
 from pathlib import Path
@@ -17,8 +18,8 @@ import OpenEXR
 
 ROOT = Path(__file__).resolve().parents[2]
 WORK = ROOT / 'build' / 'dataset_prerequisites'
-CLI = ROOT / 'build/src/app/Release/Quantiloom.exe'
-TESTS = ROOT / 'build/tests/Release/libquantiloom_tests.exe'
+CLI = pathlib.Path(os.environ.get('CLI', str(ROOT / 'build/src/app/Release/Quantiloom.exe')))
+TESTS = pathlib.Path(os.environ.get('TESTS', str(ROOT / 'build/tests/Release/libquantiloom_tests.exe')))
 
 
 def child_path(path):

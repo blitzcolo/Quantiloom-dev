@@ -1,11 +1,10 @@
 /**
  * @file RayTracingPipeline.hpp
- * @brief Vulkan ray tracing pipeline management and shader binding
+ * @brief Ray tracing pipeline management and shader binding
  *
  * Provides RayTracingPipeline class for managing:
  * - Ray tracing shader loading and compilation (SPIR-V)
- * - VkRayTracingPipelineKHR creation with shader groups
- * - Shader Binding Table (SBT) construction with proper alignment
+ * - gpu::TraceKernel variants, one per specialization (each owns its shader binding table)
  * - Descriptor set management for resource binding
  * - TraceRays() execution interface
  *
@@ -36,22 +35,21 @@
  *
  * Usage example:
  * @code
- * VulkanContext context;
- * RayTracingPipeline pipeline(context, "raygen.spv", "closesthit.spv", "miss.spv");
+ * RayTracingPipeline pipeline(device, "raygen.spv", "closesthit.spv", "miss.spv", "anyhit.spv");
  *
  * // Bind resources
- * pipeline.BindOutputImage(outputImage);
- * pipeline.BindAccelerationStructure(tlas.GetHandle());
- * pipeline.BindGeometryBuffers(vertexBuffer, indexBuffer, &uvBuffer);
- * pipeline.BindMaterialBuffer(materialBuffer);
- * pipeline.BindTextures(imageViews, samplers);
+ * pipeline.BindOutputImage(outputImage->Ref());
+ * pipeline.BindAccelerationStructure(tlas.Ref());
+ * pipeline.BindGeometryBuffers(vertices->Ref(), indices->Ref(), uvs->Ref());
+ * pipeline.BindMaterialBuffer(materials->Ref());
+ * pipeline.BindTextures(textureManager.TextureRefs(), textureManager.SamplerRefs());
  *
  * // Set camera and render
  * pipeline.SetCameraData(cameraData);
  * pipeline.SetSamplingParams(frameIndex, sampleIndex, spp, randomSeed);
  *
- * CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
- *     pipeline.TraceRays(cmd, width, height);
+ * device.ExecuteImmediate([&](gpu::CommandList& list) {
+ *     pipeline.TraceRays(list, width, height);
  * });
  * @endcode
  *
@@ -66,16 +64,17 @@
 #include "scene/CameraProjection.hpp"
 #include "renderer/FusionRecordLayout.hpp"
 #include "renderer/FusionTransport.hpp"
+// GeometryHit and FusionProbeRay, defined once for the fusion kernels and the
+// host. By a path relative to this file, as RtBindings.hpp includes its manifest.
+#include "../../shaders/ql_shared_fusion.hlsli"
 #include <array>
 
 #include "core/Types.hpp"
-#include "VulkanContext.hpp"
-#include "GpuBuffer.hpp"
-#include "GpuImage.hpp"
 #include "scene/Camera.hpp"
-#include <vulkan/vulkan.h>
+#include "gpu/Device.hpp"
 #include <vector>
 #include <cstddef>
+#include <span>
 #include <string>
 #include <memory>
 #include <unordered_map>
@@ -90,19 +89,19 @@ class DeferredBufferUploads;
 
 /**
  * @class RayTracingPipeline
- * @brief Manages Vulkan ray tracing pipeline, shader binding table, and resource bindings
+ * @brief Manages the ray tracing pipeline variants and resource bindings
  *
- * Central class for ray tracing rendering in Quantiloom. Handles all aspects of
- * Vulkan ray tracing pipeline creation, resource binding, and ray dispatch.
+ * Central class for ray tracing rendering in Quantiloom. Handles pipeline
+ * creation through gpu::Device, resource binding, and ray dispatch.
  *
  * Key responsibilities:
  * - Shader module loading from SPIR-V files
  * - Pipeline creation with ray generation, closest hit, and miss shaders
- * - Shader Binding Table (SBT) construction with correct memory alignment
+ * - Shader binding tables, owned by each gpu::TraceKernel
  * - Descriptor set layout creation and management
- * - Resource binding interface (buffers, images, acceleration structures)
+ * - Resource binding interface (buffer, texture, sampler and scene refs)
  * - Push constants for camera and sampling parameters
- * - vkCmdTraceRaysKHR dispatch
+ * - Trace dispatch on the caller's gpu::CommandList
  *
  * Resource Binding Architecture:
  * All resources are bound through descriptor sets using fixed binding indices.
@@ -122,14 +121,12 @@ class DeferredBufferUploads;
  * | 1 shader | 1 shader  | 1 shader |
  * @endcode
  *
- * @note Non-copyable, non-movable (owns Vulkan resources)
- * @note Must be created AFTER VulkanContext
- * @note Must be destroyed BEFORE VulkanContext
+ * @note Non-copyable, non-movable (owns GPU resources)
+ * @note Must be created AFTER the gpu::Device it is given
+ * @note Must be destroyed BEFORE that device
  *
- * @see VulkanContext for Vulkan initialization
- * @see GpuBuffer for buffer resource management
- * @see GpuImage for image resource management
- * @see CommandHelper for command buffer utilities
+ * @see gpu::Device for the objects it creates
+ * @see gpu::Buffer and gpu::Texture for the resources it binds
  */
 class RayTracingPipeline {
 public:
@@ -143,60 +140,52 @@ public:
     };
 
     // ========================================================================
-    // Shader stage descriptors
-    // ========================================================================
-
-    struct ShaderStage {
-        std::string spirvPath;  // Path to compiled SPIR-V file
-        VkShaderStageFlagBits stage;  // RAYGEN, CLOSEST_HIT, MISS, etc.
-    };
-
-    // ========================================================================
     // Pipeline Cache (for faster startup)
     // ========================================================================
 
     /**
      * @brief Load pipeline cache from disk
-     * @param context VulkanContext to create cache for
+     * @param device Device to create the cache on
      * @param cachePath Path to cache file (e.g., "pipeline_cache.bin")
-     * @return VkPipelineCache handle (VK_NULL_HANDLE if failed or file doesn't exist)
+     * @return The cache, empty when the file is missing or rejected; null only if
+     *         not even an empty cache could be created
      *
      * Call once at application startup before creating any pipelines.
      * The cache accelerates shader compilation on subsequent runs.
      */
-    static VkPipelineCache LoadPipelineCache(VulkanContext& context, const std::string& cachePath);
+    static std::unique_ptr<gpu::PipelineCache> LoadPipelineCache(gpu::Device& device,
+                                                                 const std::string& cachePath);
 
     /**
      * @brief Save pipeline cache to disk
-     * @param context VulkanContext that owns the cache
-     * @param cache Pipeline cache to save
+     * @param cache Pipeline cache to save (null: nothing to save)
      * @param cachePath Path to save cache file
      * @return true if saved successfully
      *
      * Call at application shutdown after all pipelines are destroyed.
      */
-    static bool SavePipelineCache(VulkanContext& context, VkPipelineCache cache, const std::string& cachePath);
+    static bool SavePipelineCache(const gpu::PipelineCache* cache, const std::string& cachePath);
 
     /**
      * @brief Destroy pipeline cache
-     * @param context VulkanContext that owns the cache
-     * @param cache Pipeline cache to destroy
+     * @param cache Pipeline cache to destroy; null afterwards
      */
-    static void DestroyPipelineCache(VulkanContext& context, VkPipelineCache cache);
+    static void DestroyPipelineCache(std::unique_ptr<gpu::PipelineCache>& cache);
 
     // ========================================================================
     // Lifecycle
     // ========================================================================
 
     // Create pipeline with minimal shader set (Raygen + ClosestHit + Miss)
-    // Optional pipelineCache accelerates creation (use LoadPipelineCache() to obtain)
+    // Optional pipelineCache accelerates creation (use LoadPipelineCache() to obtain).
+    // `device` must outlive the pipeline.
     RayTracingPipeline(
-        VulkanContext& context,
+        gpu::Device& device,
         const std::string& raygenPath,
         const std::string& closestHitPath,
         const std::string& missPath,
         const std::string& anyHitPath,
-        VkPipelineCache pipelineCache = VK_NULL_HANDLE
+        const gpu::PipelineCache* pipelineCache = nullptr
     );
 
     ~RayTracingPipeline();
@@ -210,36 +199,40 @@ public:
     // ========================================================================
     // Descriptor binding (resources)
     // ========================================================================
+    // Storage images are written GENERAL. A sampled texture is written in the
+    // layout its ref's policy names (shader-read-only for an Optimal texture).
 
     // Bind output image (binding 0)
-    void BindOutputImage(const GpuImage& image) const;
+    void BindOutputImage(gpu::TextureRef image) const;
 
     // Bind primary-hit depth AOV image (binding 22)
-    void BindDepthImage(const GpuImage& image) const;
+    void BindDepthImage(gpu::TextureRef image) const;
 
     // Bind TLAS (binding 1)
-    void BindAccelerationStructure(VkAccelerationStructureKHR tlas) const;
+    void BindAccelerationStructure(gpu::RtSceneRef tlas) const;
 
     // Bind LUT buffer (binding 2)
-    void BindLUTBuffer(const GpuBuffer& buffer) const;
+    void BindLUTBuffer(gpu::BufferRef buffer) const;
 
-    // Bind geometry buffers (binding 3: vertex, binding 4: index, binding 8: UVs [optional])
-    void BindGeometryBuffers(const GpuBuffer& vertexBuffer, const GpuBuffer& indexBuffer, const GpuBuffer* uvBuffer = nullptr) const;
+    // Bind geometry buffers (binding 3: vertex, binding 4: index, binding 8: UVs [optional,
+    // an empty ref skips it])
+    void BindGeometryBuffers(gpu::BufferRef vertexBuffer, gpu::BufferRef indexBuffer,
+                             gpu::BufferRef uvBuffer = {}) const;
 
     // Bind material buffer (binding 5)
-    void BindMaterialBuffer(const GpuBuffer& buffer) const;
+    void BindMaterialBuffer(gpu::BufferRef buffer) const;
 
     // Bind tangent buffer (binding 9) - Optional
-    void BindTangentBuffer(const GpuBuffer& buffer) const;
+    void BindTangentBuffer(gpu::BufferRef buffer) const;
 
     // Bind normal buffer (binding 16) - Required for smooth shading
-    void BindNormalBuffer(const GpuBuffer& buffer) const;
+    void BindNormalBuffer(gpu::BufferRef buffer) const;
 
     // Bind texture arrays (binding 6: textures, binding 7: samplers)
-    // Uses bindless descriptor indexing (VK_EXT_descriptor_indexing)
-    // If imageViews is empty, binds a single dummy white texture
-    void BindTextures(const std::vector<VkImageView>& imageViews,
-                      const std::vector<VkSampler>& samplers) const;
+    // Bindless: up to DeviceInfo::maxBindlessTextures entries
+    // If textures is empty, nothing is written and the texture count is 0
+    void BindTextures(std::span<const gpu::TextureRef> textures,
+                      std::span<const gpu::SamplerRef> samplers) const;
 
     // ========================================================================
     // IBL (Image-Based Lighting) Bindings
@@ -251,10 +244,10 @@ public:
     // ========================================================================
 
     // Bind prefiltered environment cubemap (binding 10)
-    void BindPrefilteredEnvMap(VkImageView imageView, VkSampler sampler) const;
+    void BindPrefilteredEnvMap(gpu::TextureRef texture, gpu::SamplerRef sampler) const;
 
     // Bind BRDF integration LUT for IBL (binding 11: texture, binding 12: sampler)
-    void BindBRDFLut(VkImageView imageView, VkSampler sampler) const;
+    void BindBRDFLut(gpu::TextureRef texture, gpu::SamplerRef sampler) const;
 
     // ========================================================================
     // Spectral Curves Buffer (Binding 13)
@@ -264,8 +257,8 @@ public:
     // ========================================================================
 
     // Bind spectral curves buffer (binding 13)
-    // Pass nullptr or empty buffer to disable spectral curve lookup (uses RGB fallback)
-    void BindSpectralCurvesBuffer(const GpuBuffer* buffer) const;
+    // Pass an empty ref to disable spectral curve lookup (binds the one-entry fallback)
+    void BindSpectralCurvesBuffer(gpu::BufferRef buffer) const;
 
     // ========================================================================
     // Complex Refractive Index Buffer (Binding 14)
@@ -276,8 +269,8 @@ public:
     // ========================================================================
 
     // Bind complex refractive index buffer (binding 14)
-    // Pass nullptr to disable physical Fresnel (uses PBR F0 approximation)
-    void BindComplexRefractiveIndexBuffer(const GpuBuffer* buffer) const;
+    // Pass an empty ref to disable physical Fresnel (uses PBR F0 approximation)
+    void BindComplexRefractiveIndexBuffer(gpu::BufferRef buffer) const;
 
     // ========================================================================
     // Solar Spectral LUT Buffer (Binding 15)
@@ -289,8 +282,8 @@ public:
     // ========================================================================
 
     // Bind solar spectral LUT buffer (binding 15)
-    // Pass nullptr to use LightingParams RGB fallback
-    void BindSolarSpectralLUT(const GpuBuffer* buffer) const;
+    // Pass an empty ref to use LightingParams RGB fallback
+    void BindSolarSpectralLUT(gpu::BufferRef buffer) const;
 
     // ========================================================================
     // NN Atmosphere (Bindings 17 + 20)
@@ -298,10 +291,11 @@ public:
     // Bind the baked NN atmosphere LUT: header (AtmosNNHeaderGPU, binding 17)
     // and the flat float data blob (binding 20). When the atmosphere is
     // disabled, bind a header with enabled = 0 and a small dummy data buffer;
-    // shaders must not sample the LUT when header.enabled == 0.
+    // shaders must not sample the LUT when header.enabled == 0. An empty ref
+    // binds the pipeline's own disabled fallback.
     // ========================================================================
 
-    void BindAtmosphereNN(const GpuBuffer* header, const GpuBuffer* data) const;
+    void BindAtmosphereNN(gpu::BufferRef header, gpu::BufferRef data) const;
 
     // ========================================================================
     // Instance Geometry Info Buffer (Binding 18)
@@ -312,7 +306,7 @@ public:
     // ========================================================================
 
     // Bind instance geometry info buffer (binding 18)
-    void BindInstanceGeometryBuffer(const GpuBuffer& buffer) const;
+    void BindInstanceGeometryBuffer(gpu::BufferRef buffer) const;
 
     // ========================================================================
     // CIE 1931 Color Matching Functions LUT (Binding 19)
@@ -324,14 +318,14 @@ public:
     // ========================================================================
 
     // Bind CIE CMF LUT buffer (binding 19)
-    void BindCIE_CMF_LUT(const GpuBuffer& buffer) const;
+    void BindCIE_CMF_LUT(gpu::BufferRef buffer) const;
 
     // ========================================================================
     // Jakob-Hanika RGB -> spectrum coefficient table (Binding 25)
     // ========================================================================
     // StructuredBuffer<float4>, xyz = the three polynomial coefficients. Read
     // by closest hit and miss; see core/RgbToSpectrum.hpp.
-    void BindRgbToSpectrumTable(const GpuBuffer& buffer) const;
+    void BindRgbToSpectrumTable(gpu::BufferRef buffer) const;
 
     // ========================================================================
     // Emissive triangles (Binding 23)
@@ -344,37 +338,37 @@ public:
     // ========================================================================
 
     // Bind emissive triangle buffer (binding 23)
-    void BindEmissiveTriangleBuffer(const GpuBuffer& buffer) const;
+    void BindEmissiveTriangleBuffer(gpu::BufferRef buffer) const;
     /// Per-element surface temperatures from the thermal solver (binding 24).
     /// Always bound; a scene with no solve gets a single zero entry, and the
     /// shader reads it only where InstanceGeometryInfo says there is one.
-    void BindThermalTemperatureBuffer(const GpuBuffer& buffer) const;
+    void BindThermalTemperatureBuffer(gpu::BufferRef buffer) const;
     /// Per-element sun response from the thermal solver (binding 26): a header
     /// record carrying the solve's sun direction, then (dT/dv, v_element) per
     /// element. What lets the shader resolve a shadow finer than the triangle
     /// the solver ran on. Always bound; one zeroed record when there is none.
-    void BindThermalSunResponseBuffer(const GpuBuffer& buffer) const;
-    void BindThermalTangentBuffer(const GpuBuffer& buffer) const;
+    void BindThermalSunResponseBuffer(gpu::BufferRef buffer) const;
+    void BindThermalTangentBuffer(gpu::BufferRef buffer) const;
     // CameraMeasurement resources. A one-pixel zero image and zero response
     // header are bound by the pipeline itself until a host supplies these.
-    void BindCameraMeasurementImage(const GpuImage& image) const;  // binding 28
-    void BindCameraResponseBuffer(const GpuBuffer& buffer) const;   // binding 29
-    void BindCameraLightingBuffer(const GpuBuffer& buffer) const;
+    void BindCameraMeasurementImage(gpu::TextureRef image) const;  // binding 28
+    void BindCameraResponseBuffer(gpu::BufferRef buffer) const;    // binding 29
+    void BindCameraLightingBuffer(gpu::BufferRef buffer) const;
     /// 4 x u32 atomic counters (transparent/specular primary hits) accumulated
     /// by raygen in camera-measurement mode; the host zeroes it per
     /// acquisition. Binding 30, camera set only -- PARTIALLY_BOUND so the
     /// visibility and observer sets need not write it.
-    void BindCameraDynamicCounterBuffer(const GpuBuffer& buffer) const;  // binding 30
+    void BindCameraDynamicCounterBuffer(gpu::BufferRef buffer) const;  // binding 30
     /// Per-stratum primary-hit depth, same 2D-array layering as the
     /// measurement image. Binding 31, camera set only, PARTIALLY_BOUND.
-    void BindCameraMeasurementDepthImage(const GpuImage& image) const;   // binding 31
-    void BindCameraDepthImage(const GpuImage& image) const;         // camera binding 22
-    void BindCameraObserverOutputImage(const GpuImage& image) const; // observer binding 0
-    void BindCameraObserverDepthImage(const GpuImage& image) const; // observer binding 22
-    void BindCameraAtmosphereNN(const GpuBuffer* header,
-                                const GpuBuffer* data) const;      // bindings 17,20 camera set
-    void BindCameraObserverAtmosphereNN(const GpuBuffer* header,
-                                        const GpuBuffer* data) const; // observer 17,20
+    void BindCameraMeasurementDepthImage(gpu::TextureRef image) const;   // binding 31
+    void BindCameraDepthImage(gpu::TextureRef image) const;         // camera binding 22
+    void BindCameraObserverOutputImage(gpu::TextureRef image) const; // observer binding 0
+    void BindCameraObserverDepthImage(gpu::TextureRef image) const; // observer binding 22
+    void BindCameraAtmosphereNN(gpu::BufferRef header,
+                                gpu::BufferRef data) const;        // bindings 17,20 camera set
+    void BindCameraObserverAtmosphereNN(gpu::BufferRef header,
+                                        gpu::BufferRef data) const;   // observer 17,20
     void SetUseCameraObserverSet(bool enabled) { m_useObserverDescriptorSet = enabled; }
 
     /// Temporal stratum routing for the next TraceRays. Stratum count
@@ -420,23 +414,11 @@ public:
                               bool aggregate = false, bool quantitative = false);
     Vector<u8> ReadFusionRecording();
     void SetFusionInitialMedia(const Vector<u32>& media);
-    struct ProbeRay {
-        glm::vec3 origin;
-        f32 wavelength;
-        glm::vec3 direction;
-        u32 branchMask;
-    };
+    /// raygen.rgen's FusionProbeRay.
+    using ProbeRay = shader::FusionProbeRay;
     void SetFusionProbes(const Vector<ProbeRay>& probes);
-    struct GeometryHit {
-        u32 hit = 0, instanceIndex = 0, primitiveIndex = 0;
-        f32 distance = -1;
-        glm::vec3 position{};
-        f32 depth = -1;
-        glm::vec3 normal{};
-        u32 validity = 0;
-        glm::vec2 bary{}, padding{};
-    };
-    static_assert(sizeof(GeometryHit) == 64);
+    /// fusion_geometry.rayq.hlsl's GeometryHit; a default one is a miss.
+    using GeometryHit = shader::GeometryHit;
     Vector<GeometryHit> CapturePrimaryGeometry(u32 width, u32 height,
                                                const Vector<glm::vec2>* queryPixels = nullptr);
     [[nodiscard]] const CameraData& GetCameraData() const { return m_pushConstants.cameraAndSampling.camera; }
@@ -449,21 +431,14 @@ public:
     void SetSamplingParams(u32 frameIndex, u32 sampleIndex, u32 totalSamples, u32 randomSeed,
                            u32 sequenceSeed);
 
-    // Record trace rays command into provided command buffer.
+    // Record the trace into the caller's command list.
     // finalDispatch=true inserts a RT->TRANSFER barrier (for readback).
     // finalDispatch=false inserts a RT->RT barrier (for next sample accumulation).
-    void TraceRays(VkCommandBuffer cmd, u32 width, u32 height, bool finalDispatch = true) const;
+    void TraceRays(gpu::CommandList& list, u32 width, u32 height, bool finalDispatch = true) const;
 
     // Select pipeline variant for the given specialization constants.
     // Lazily creates and caches the pipeline + SBT on first use per combination.
     void SetSpecConstants(u32 spectralMode, bool debugEnabled);
-
-    // ========================================================================
-    // Accessors
-    // ========================================================================
-
-    [[nodiscard]] VkPipeline GetPipeline() const { return m_pipeline; }
-    [[nodiscard]] VkPipelineLayout GetPipelineLayout() const { return m_pipelineLayout; }
 
 private:
     // ========================================================================
@@ -471,10 +446,8 @@ private:
     // ========================================================================
 
     void CreateDescriptorSetLayout();
-    void UpdateSharedDescriptorSets(VkDevice device, u32 writeCount,
-                                  const VkWriteDescriptorSet* writes,
-                                  u32 copyCount,
-                                  const VkCopyDescriptorSet* copies) const;
+    /// The same writes to the primary, camera and observer sets, in that order.
+    void UpdateSharedDescriptorSets(std::span<const gpu::BindingWrite> writes) const;
     void CreatePipelineLayout();
     void LoadShaders();
 
@@ -482,25 +455,21 @@ private:
     // Helpers
     // ========================================================================
 
-    // Load SPIR-V shader from file
-    static std::vector<u32> LoadSPIRV(const std::string& path);
-
-    // Create shader module from SPIR-V
-    [[nodiscard]] VkShaderModule CreateShaderModule(const std::vector<u32>& spirv) const;
-
-    // Get SBT aligned size
-    static u32 AlignedSize(u32 size, u32 alignment);
+    /// The named stages through the device's shader library, in order. Throws
+    /// std::runtime_error naming what could not be read.
+    static Vector<gpu::ShaderCode> LoadShaderSet(gpu::Device& device, std::initializer_list<std::string> paths);
 
     /// Record the armed record-buffer init -- header update plus zero fill --
-    /// into `cmd` ahead of a trace. Invoked from TraceRays so the barriers
+    /// into `list` ahead of a trace. Invoked from TraceRays so the barriers
     /// order the writes against whatever read the buffer last.
-    void RecordFusionInit(VkCommandBuffer cmd) const;
+    void RecordFusionInit(gpu::CommandList& list) const;
 
     // ========================================================================
-    // Vulkan handles
+    // GPU objects
     // ========================================================================
 
-    VulkanContext& m_context;
+    // The caller's device; every object below is created through it.
+    gpu::Device& m_device;
 
     // Shader paths
     std::string m_raygenPath;
@@ -510,69 +479,50 @@ private:
     std::string m_anyHitPath;      // Named explicitly, unlike the shadow miss above
 
     // Pipeline objects
-    VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
-    VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
-    VkPipeline m_pipeline = VK_NULL_HANDLE;
-    VkPipelineCache m_pipelineCache = VK_NULL_HANDLE;  // External, not owned
+    std::unique_ptr<gpu::BindingLayout> m_bindingLayout;  // the set of RtBindings.hpp, space 0
+    std::unique_ptr<gpu::KernelLayout> m_kernelLayout;    // that set plus TracePushConstants
+    const gpu::PipelineCache* m_pipelineCache = nullptr;  // External, not owned
 
     // Descriptor pool and sets
-    VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;
-    VkDescriptorSet m_cameraDescriptorSet = VK_NULL_HANDLE;
-    VkDescriptorSet m_observerDescriptorSet = VK_NULL_HANDLE;
-    std::unique_ptr<GpuImage> m_cameraFallbackImage;
-    std::unique_ptr<GpuImage> m_cameraFallbackDepth;
-    std::unique_ptr<GpuBuffer> m_cameraFallbackResponse;
-    std::array<std::unique_ptr<GpuBuffer>, kProjectionSetCount> m_projectionBuffers;
+    std::unique_ptr<gpu::BindGroupPool> m_bindGroupPool;
+    gpu::BindGroup m_descriptorSet{};
+    gpu::BindGroup m_cameraDescriptorSet{};
+    gpu::BindGroup m_observerDescriptorSet{};
+    std::unique_ptr<gpu::Texture> m_cameraFallbackImage;
+    std::unique_ptr<gpu::Texture> m_cameraFallbackDepth;
+    std::unique_ptr<gpu::Buffer> m_cameraFallbackResponse;
+    std::array<std::unique_ptr<gpu::Buffer>, kProjectionSetCount> m_projectionBuffers;
     // Deferred-upload queue attached by the render context; null means
     // uploads write through the mapping directly.
     DeferredBufferUploads* m_uploadQueue = nullptr;
-    VkPipeline m_geometryPipeline=VK_NULL_HANDLE;
-    std::unique_ptr<GpuBuffer> m_fusionTransportBuffer;
-    std::unique_ptr<GpuBuffer> m_fusionRecordBuffer;
+    std::unique_ptr<gpu::ComputeKernel> m_geometryKernel;  // fusion_geometry on m_kernelLayout
+    std::unique_ptr<gpu::Buffer> m_fusionTransportBuffer;
+    std::unique_ptr<gpu::Buffer> m_fusionRecordBuffer;
     /// Bytes the last BeginFusionRecording armed; ReadFusionRecording returns
     /// exactly this even when the grow-only allocation is larger.
-    VkDeviceSize m_fusionRecordSize = 0;
+    u64 m_fusionRecordSize = 0;
     /// The 32-word record header the shader should see. Begin builds it and
     /// the SetFusion* calls patch single fields; it lands on the device with
     /// the next trace.
     std::array<u32, rendercore::kFusionHeaderWords> m_fusionHeader{};
-    mutable VkDeviceSize m_pendingFusionZero = 0;
+    mutable u64 m_pendingFusionZero = 0;
     mutable bool m_fusionInitPending = false;
     Vector<u32> m_initialFusionMedia;
-    std::unique_ptr<GpuBuffer> m_fusionProbeBuffer;
-    std::unique_ptr<GpuBuffer> m_cameraFallbackAtmosHeader;
-    std::unique_ptr<GpuBuffer> m_cameraFallbackAtmosData;
-
-    // Shader Binding Table (SBT)
-    std::unique_ptr<GpuBuffer> m_sbtBuffer;
-    VkStridedDeviceAddressRegionKHR m_raygenRegion{};
-    VkStridedDeviceAddressRegionKHR m_missRegion{};
-    VkStridedDeviceAddressRegionKHR m_hitRegion{};
-    VkStridedDeviceAddressRegionKHR m_callableRegion{};
+    std::unique_ptr<gpu::Buffer> m_fusionProbeBuffer;
+    std::unique_ptr<gpu::Buffer> m_cameraFallbackAtmosHeader;
+    std::unique_ptr<gpu::Buffer> m_cameraFallbackAtmosData;
 
     // SPIR-V bytecode (kept for lazy pipeline variant creation)
-    std::vector<std::vector<u32>> m_spirvData;  // [raygen, chit, miss, shadow_miss, anyhit]
+    std::vector<gpu::ShaderCode> m_spirvData;  // [raygen, chit, miss, shadow_miss, anyhit]
 
-    // Ray Tracing properties (cached from context)
-    VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{};
-
-    // Pipeline variant cache (keyed by packed spec constants)
-    struct PipelineVariant {
-        VkPipeline pipeline = VK_NULL_HANDLE;
-        std::unique_ptr<GpuBuffer> sbtBuffer;
-        VkStridedDeviceAddressRegionKHR raygenRegion{};
-        VkStridedDeviceAddressRegionKHR missRegion{};
-        VkStridedDeviceAddressRegionKHR hitRegion{};
-        VkStridedDeviceAddressRegionKHR callableRegion{};
-    };
-
-    std::unordered_map<u64, PipelineVariant> m_variantCache;
-    PipelineVariant* m_activeVariant = nullptr;
+    // Pipeline variant cache (keyed by packed spec constants). Each kernel owns
+    // its pipeline and shader binding table.
+    std::unordered_map<u64, std::unique_ptr<gpu::TraceKernel>> m_variantCache;
+    const gpu::TraceKernel* m_activeVariant = nullptr;
     u32 m_activeSpectralMode = 7;
     bool m_useObserverDescriptorSet = false;
 
-    PipelineVariant CreatePipelineVariant(const SpecConstants& spec);
+    std::unique_ptr<gpu::TraceKernel> CreatePipelineVariant(const SpecConstants& spec);
     static u64 PackSpecKey(u32 spectralMode, u32 debugEnabled) {
         return (static_cast<u64>(debugEnabled) << 32) | spectralMode;
     }
@@ -581,16 +531,21 @@ private:
     // 1024 if descriptor indexing available, 32 otherwise
     u32 m_maxTextures = 1024;
 
-    // Push constants (camera + sampling parameters)
+    // Push constants (camera + sampling parameters): the shader's
+    // PushConstantsRayGen (ql_shared_public.hlsli), whose first 108 bytes are the
+    // public PushConstantsRayGen, locked there, and whose last word is
+    // textureCount. These hold the host to the same 112 bytes.
     struct TracePushConstants {
         PushConstantsRayGen cameraAndSampling;
         u32 textureCount = 0;
     };
-    static_assert(offsetof(TracePushConstants, textureCount) == 108);
+    QL_SHARED_LAYOUT(TracePushConstants, 112)
+    QL_SHARED_OFFSET(TracePushConstants, cameraAndSampling, 0)
+    QL_SHARED_OFFSET(TracePushConstants, textureCount, 108)
     static_assert(sizeof(TracePushConstants) <= 128);
     mutable TracePushConstants m_pushConstants{};
-    std::unique_ptr<GpuBuffer> m_spectralFallback;
-    std::unique_ptr<GpuBuffer> m_criFallback;
+    std::unique_ptr<gpu::Buffer> m_spectralFallback;
+    std::unique_ptr<gpu::Buffer> m_criFallback;
 };
 
 } // namespace quantiloom

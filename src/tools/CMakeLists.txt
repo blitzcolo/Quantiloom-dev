@@ -54,7 +54,13 @@ message(STATUS "Fusion tool configured successfully")
 # Both link quantiloom_core rather than the DLL, for the same reason
 # fusion_tool does: what they drive is internal and is not going to be
 # exported to give a measurement script a way in.
-foreach(tool thermal_column_tool sensor_lab colour_lab camera_gpu_bench)
+# camera_gpu_bench times Vulkan queries on a VulkanContext of its own, so it is
+# built only with that backend.
+set(_ql_measurement_tools thermal_column_tool sensor_lab colour_lab)
+if(QUANTILOOM_BACKEND_VULKAN)
+    list(APPEND _ql_measurement_tools camera_gpu_bench)
+endif()
+foreach(tool IN LISTS _ql_measurement_tools)
     add_executable(${tool} ${tool}.cpp)
     target_link_libraries(${tool} PRIVATE quantiloom_core)
     set_target_properties(${tool} PROPERTIES
@@ -70,7 +76,9 @@ endforeach()
 
 # No shaders beside the benchmark: the resource locator resolves them from
 # the SDK's share/quantiloom or from the working-directory development fallback.
-add_dependencies(camera_gpu_bench CompileShaders)
+if(TARGET camera_gpu_bench)
+    add_dependencies(camera_gpu_bench CompileShaders)
+endif()
 
 # quantiloom_core carries the USD loader, so anything linking it needs the USD
 # runtime beside the binary or it will not start -- the same POST_BUILD copy the
@@ -87,7 +95,9 @@ if(QUANTILOOM_USE_OPENUSD AND COMMAND copy_usd_dlls)
     copy_usd_dlls(fusion_tool)
     add_dependencies(thermal_column_tool fusion_tool)
     add_dependencies(sensor_lab fusion_tool)
-    add_dependencies(camera_gpu_bench fusion_tool)
+    if(TARGET camera_gpu_bench)
+        add_dependencies(camera_gpu_bench fusion_tool)
+    endif()
 endif()
 
 message(STATUS "Measurement tools configured successfully")

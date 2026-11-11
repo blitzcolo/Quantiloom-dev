@@ -9,7 +9,7 @@
  * BC7 format advantages:
  * - High quality (visually lossless for most content)
  * - Hardware decompression on all modern GPUs
- * - Supported by Vulkan via VK_FORMAT_BC7_*_BLOCK
+ * - Uploaded as gpu::Format::BC7Srgb or BC7Unorm
  *
  * Compression time trade-off:
  * - ~100-200ms per 2048x2048 texture (single-threaded)
@@ -24,7 +24,7 @@
  * @code
  * if (TextureCompressor::IsAvailable()) {
  *     auto compressed = TextureCompressor::CompressBC7(texture);
- *     // Upload compressed data with VK_FORMAT_BC7_SRGB_BLOCK
+ *     // Upload compressed data as gpu::Format::BC7Srgb
  * }
  * @endcode
  *
@@ -54,7 +54,7 @@ struct BC7CompressedData {
     u32 height;                 ///< Original height
     u32 blockCountX;            ///< Number of 4x4 blocks in X
     u32 blockCountY;            ///< Number of 4x4 blocks in Y
-    bool isSRGB;                ///< Use VK_FORMAT_BC7_SRGB_BLOCK vs UNORM
+    bool isSRGB;                ///< Use gpu::Format::BC7Srgb vs BC7Unorm
 
     /// Calculate compressed data size in bytes
     [[nodiscard]] size_t GetCompressedSize() const {
@@ -94,10 +94,10 @@ struct BC7CompressedData {
  * auto result = TextureCompressor::CompressBC7(texture);
  * if (result.has_value()) {
  *     // Use compressed data for GPU upload
- *     VkFormat format = result->isSRGB
- *         ? VK_FORMAT_BC7_SRGB_BLOCK
- *         : VK_FORMAT_BC7_UNORM_BLOCK;
- *     // ... create VkImage with compressed format ...
+ *     gpu::Format format = result->isSRGB
+ *         ? gpu::Format::BC7Srgb
+ *         : gpu::Format::BC7Unorm;
+ *     // ... create a gpu::Texture with the compressed format ...
  * }
  * @endcode
  */
