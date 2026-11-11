@@ -1,0 +1,56 @@
+# Furnace cavity, measured n,k walls seen at 75 degrees. LWIR, T=300K
+#
+# The walls are Rakic (1995) aluminium at roughness 0.05, and nothing else: no curve,
+# no scalar emissivity, so they take the directional Fresnel microfacet lobe
+# (InterfaceLobe in shade_vertex.hlsli). An orthographic camera inside the
+# cube puts every pixel on the -Z wall at 75 degrees from its normal, where
+# water reflects ~18% in LWIR rather than the 1% it reflects head-on and
+# aluminium loses a few percent to the lobe's single scattering.
+#
+# Kirchhoff still fixes the answer at B(T). It holds per sample only if the
+# emission (1 - w - tau) B, the analytic base w L and the traced residual
+# w (L_child - L) carry the SAME weight w: a cavity viewed head-on cannot tell,
+# because there the weights the old and the wrong estimators use coincide.
+# This is the one check that can, at a large angle.
+#
+# Geometry: python scripts/utils/generate_furnace_cavity.py
+# Check:    python scripts/render-tests/check_furnace.py furnace_lwir_nkal_r005_75_output.exr LWIR
+
+[renderer]
+resolution = [64, 64]
+spp = 256
+output = "furnace_lwir_nkal_r005_75_output.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+
+[scene]
+gltf = "assets/models/furnace/furnace_nk_r005.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position = [-1.800000, 0.000000, -1.400000]
+look_at  = [-0.834074, 0.000000, -1.658819]
+up       = [0.0, 1.0, 0.0]
+projection = "orthographic"
+ortho_height = 0.2
+
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[refractive_index]
+furnace_nk_r005 = "assets/refractiveindex/database/data/main/Al/nk/Rakic.yml"
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false

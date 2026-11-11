@@ -46,6 +46,13 @@
 #               rise as the illuminant's power in the band it emits in falls,
 #               which no transport that is diagonal in wavelength can produce,
 #               and a total absorber must give back exactly what it took.
+#   nk          A smooth n,k interface (water, aluminium) in the thermal bands,
+#               which must NOT be view-independent: the same water plane at 0,
+#               60, 75 and 85 degrees against Fresnel's closed form, a
+#               non-emitting plane that may not return more than its sky, and
+#               a sun that glints along the mirror direction and nowhere else.
+#               Catches a normal-incidence reflectance used at every angle,
+#               which renders a sea at grazing view as a blackbody.
 #   mis         The same box rendered with light sampling on and off, which
 #               estimate the same integral and so must agree. Catches emitted
 #               radiance counted by both strategies at full weight -- which the
@@ -337,8 +344,27 @@ for pair in "reflective:skyequiv_swir_output.exr:viewangle_swir_oblique_output.e
     drop_sidecars "$a" "$b"
 done
 
+# The other side of view independence: a surface described by optical
+# constants is an interface, and an interface is directional. Water at 10 um
+# reflects 1% of the sky looking down and 55% at 85 degrees; the infrared
+# branches used the 1% at every angle, which nothing above could see -- the
+# view arm checks Lambertian materials, and the furnace cavities close for any
+# reflectance used consistently. Renders for itself.
+printf '%-8s ' "nk"
+if report=$("$PY" scripts/render-tests/check_directional_fresnel.py); then
+    echo "$report" | grep -E '^summary' | tr -d '\n'; echo '  PASS'
+else
+    nk_status=$?
+    if [ "$nk_status" = 3 ]; then
+        echo "illumination suite: no usable GPU, nothing measured" >&2
+        exit 3
+    fi
+    echo "$report" | grep -E '^summary|FAIL' | tr '\n' ' '; echo
+    fail=1
+fi
+
 if [ "$fail" = 0 ]; then
-    echo "illumination suite: occlusion, open sky in two bands, indirect, MIS, hero convergence, fluorescence and view independence all within tolerance"
+    echo "illumination suite: occlusion, open sky in two bands, indirect, MIS, hero convergence, fluorescence, view independence and directional Fresnel all within tolerance"
 else
     echo "illumination suite: FAILURES above" >&2
 fi

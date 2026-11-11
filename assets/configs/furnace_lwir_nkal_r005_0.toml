@@ -1,0 +1,47 @@
+# Furnace cavity, measured n,k walls seen head-on. LWIR, T=300K
+#
+# The normal-incidence control for the 75-degree cavities beside it: the same
+# Rakic (1995) aluminium walls at roughness 0.05, an orthographic camera looking
+# down the -Z wall's normal. Must return B(T) like every cavity.
+#
+# Geometry: python scripts/utils/generate_furnace_cavity.py
+# Check:    python scripts/render-tests/check_furnace.py furnace_lwir_nkal_r005_0_output.exr LWIR
+
+[renderer]
+resolution = [64, 64]
+spp = 256
+output = "furnace_lwir_nkal_r005_0_output.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+
+[scene]
+gltf = "assets/models/furnace/furnace_nk_r005.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position = [0.000000, 0.000000, 0.000000]
+look_at  = [0.000000, 0.000000, -1.000000]
+up       = [0.0, 1.0, 0.0]
+projection = "orthographic"
+ortho_height = 0.2
+
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[refractive_index]
+furnace_nk_r005 = "assets/refractiveindex/database/data/main/Al/nk/Rakic.yml"
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false

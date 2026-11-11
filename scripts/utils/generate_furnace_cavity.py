@@ -173,6 +173,13 @@ def main():
     # must return B(T) as well -- which makes it the only check on the bounce's
     # specular weighting, since every other cavity here is roughness 1.
     make_gltf("furnace_spectral_smooth", None, OUT_DIR, roughness=0.2)
+    # Walls with no curve and no scalar emissivity: the companion TOML binds
+    # measured n,k (water, aluminium) by material name, which is what routes
+    # them through the directional Fresnel microfacet lobe. Two roughnesses,
+    # because the weight that must be shared by emission, base and residual
+    # is F(V.h) * G2/G1, and only a rough enough lobe makes G2/G1 matter.
+    make_gltf("furnace_nk_r005", None, OUT_DIR, roughness=0.05)
+    make_gltf("furnace_nk_r02", None, OUT_DIR, roughness=0.2)
 
     print(f"Generated furnace cavities in {OUT_DIR}")
 

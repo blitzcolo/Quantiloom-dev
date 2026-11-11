@@ -28,6 +28,18 @@
 #             the GGX lobe. Every other cavity is roughness 1, so nothing else
 #             here weights a specular sample; getting that weight wrong reads
 #             8.8% low.
+#
+# Eight more cover the directional Fresnel lobe a measured n,k interface takes
+# in the thermal bands -- water and aluminium walls at roughness 0.05 and 0.2,
+# seen at 75 degrees by an orthographic camera, with head-on controls:
+#
+#   nk<mat>_<r>_75   emission, base and residual must share one weight w per
+#                    sample for the cavity to close; at 75 degrees water's w is
+#                    0.18 rather than its head-on 0.01, so a term that took a
+#                    different Fresnel (R0, or F(N.V) against a half-vector F)
+#                    moves the answer by percents. Every other cavity is seen
+#                    head-on, where all those choices coincide.
+#   nk<mat>_<r>_0    the same walls at normal incidence.
 
 lwir e1
 lwir e05
@@ -37,3 +49,11 @@ lwir specular
 mwir e1
 mwir e05
 mwir rho1
+lwir nkwater_r005_75
+lwir nkwater_r02_75
+lwir nkal_r005_75
+lwir nkal_r02_75
+lwir nkwater_r005_0
+lwir nkal_r005_0
+mwir nkwater_r02_75
+mwir nkal_r02_75

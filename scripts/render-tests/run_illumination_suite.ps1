@@ -261,8 +261,17 @@ if ($thermalOk) {
                                   "--mode", "thermal") 'Rel error' 'Rel error|FAIL'
 }
 
+# The other side of view independence: a surface described by optical
+# constants is an interface, and an interface is directional. Water at 10 um
+# reflects 1% of the sky looking down and 55% at 85 degrees; the infrared
+# branches used the 1% at every angle, which nothing above could see -- the
+# view arm checks Lambertian materials, and the furnace cavities close for any
+# reflectance used consistently. It renders for itself, so there is no
+# Invoke-Render above it.
+Invoke-Checker "nk" @("scripts/render-tests/check_directional_fresnel.py") '^summary' '^summary|FAIL'
+
 if ($script:fail -eq 0) {
-    Write-Host "illumination suite: occlusion, open sky in two bands, indirect, MIS, hero convergence, fluorescence and view independence all within tolerance"
+    Write-Host "illumination suite: occlusion, open sky in two bands, indirect, MIS, hero convergence, fluorescence, view independence and directional Fresnel all within tolerance"
 } else {
     Write-Host "illumination suite: FAILURES above" -ForegroundColor Red
 }

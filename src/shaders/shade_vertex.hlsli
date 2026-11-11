@@ -472,6 +472,24 @@ float IRDownwellingRadiance(AtmosNNHeader atmos, uint atmosIdx, float lambda_nm,
     return IRPlanckRadiance(T_atmosphere, lambda_nm);
 }
 
+// What the sky sends along ONE direction at one wavelength: exactly what the
+// miss shader returns to a bounce ray, which is never composed with the view
+// path (that is a depth-0 affair). The directional Fresnel lobe uses it as its
+// base, so that an escaping specular ray brings back the base to the bit and
+// the residual is zero, as it is for the hemispherical base of a diffuse
+// surface. Same fallback temperature as the miss shader.
+float IRSkyRadianceToward(AtmosNNHeader atmos, uint atmosIdx, float lambda_nm,
+                          float cosZenith, float T_atmosphere, float skyEmissivityClear) {
+    const float T = T_atmosphere > 0.0 ? T_atmosphere : 250.0;
+    if (atmos.enabled != 0 && atmos.hasLdown != 0) {
+        return AtmosSkyRadianceIR(atmos, atmosNNData, atmosIdx, lambda_nm, cosZenith, T);
+    }
+    if (skyEmissivityClear > 0.0) {
+        return IRClearSkyRadiance(skyEmissivityClear, cosZenith, T, lambda_nm);
+    }
+    return IRPlanckRadiance(T, lambda_nm);
+}
+
 // Mixed reflectance at one wavelength. The weights are NOT normalised -- a
 // texel darker than every endmember is a legitimately dimmer patch of the same
 // material, which is the whole point -- so the sum is clamped instead.
@@ -505,9 +523,17 @@ float EvaluateEndmemberReflectance(StructuredBuffer<SpectralCurveGPU> curves,
 
 // One priority order for a measured infrared surface in every estimator.
 // A reflectance curve is a hemispherical measurement; an explicit emissivity
-// curve supplies epsilon where reflectance is absent. Measured n,k supplies
-// normal-incidence R0 next, then the generic emissivity heuristic. Tau has its
-// own measured curve. x=rho, y=epsilon, z=tau.
+// curve supplies epsilon where reflectance is absent. Measured n,k comes next,
+// then the generic emissivity heuristic. Tau has its own measured curve.
+// x=rho, y=epsilon, z=tau.
+//
+// The n,k entry here is the ISOTROPIC stand-in, normal-incidence R0, and it is
+// what a branch uses only when it cannot take the directional lobe -- see
+// InfraredInterfaceLobe below, which every infrared branch asks first. A
+// smooth interface is not isotropic: water at 10 um reflects 1% looking down
+// and 55% at 85 degrees, and R0 at every angle renders a sea at grazing view as
+// a blackbody at the water's temperature. A window the source does not reach
+// falls through to the scalar emissivity rather than reading air.
 float3 InfraredSurfaceFractions(MaterialData material, float4 endmemberW,
                                 float metallic, float roughness, float lambda) {
     const float tau = material.irTransmittanceCurveIndex >= 0
@@ -1305,6 +1331,167 @@ bool SampleBounce(float3 hitPos, float3 normal, float3 V, float NdotV,
 }
 
 // ============================================================================
+// The directional Fresnel lobe of a measured n,k interface (infrared bands)
+// ============================================================================
+// A surface whose infrared behaviour comes from its optical constants -- water,
+// glass, a polished metal -- is an interface, and an interface reflects by
+// Fresnel: water at 10 um sends back 1% of the sky looking straight down and
+// 55% at 85 degrees. Kirchhoff per direction then makes its emissivity
+// 1 - rho_dh(theta_o) - tau. The infrared branches give such a material a GGX
+// microfacet lobe with the unpolarised conductor Fresnel F(V.h; n(lambda),
+// k(lambda)) as its reflectance, and NOT a Lambertian lobe scaled by a
+// view-dependent albedo -- the eps0*cos^a law that common.hlsli and
+// check_view_independence.py bury was exactly that, and it is not reciprocal.
+// F at the half vector is: F(V.h) = F(L.h), D and G2 are symmetric.
+//
+// One sample, one weight, four terms. The vertex draws a half vector from the
+// visible normals ONCE, and the weight that sample carries,
+//
+//     w(lambda) = F(V.h; lambda) * G2/G1        (the VNDF estimator of f cos/pdf)
+//
+// multiplies the base (w * L_sky toward the sampled direction), sets the
+// emission ((1 - w - tau) * B(T)), and weights the residual the traced ray
+// brings back (w * (L_child - L_base)). Its expectation over the half vector
+// is rho_dh(theta_o, lambda), so the three together estimate
+// (1 - rho_dh - tau) B + integral of f L cos -- and, because they share the
+// sample, an isothermal cavity closes on every sample rather than on average.
+// The sun is evaluated with the same F, D and G2 (InterfaceSunGeometry).
+//
+// The draw is made whether or not the ray will be traced. A path the roulette
+// ends, or that has reached the depth cap, keeps the same per-sample w for its
+// emission and base; using a different weight there (F(N.V), say) would leave
+// the roulette biased by (1 - q)(rho_dh - F(N.V))(L_base - B).
+//
+// The base is the sky radiance toward the sampled direction rather than the
+// hemispherical downwelling. It is what an escaping ray returns, so an open
+// scene's residual is still exactly zero, and on the paths that are not traced
+// it is the sky the mirror actually sees -- warmer toward the horizon than the
+// hemispherical mean, which is what a grazing view of water reflects.
+//
+// Isotropic in roughness: an anisotropic n,k material samples with the mean
+// roughness here. Single scattering: what GGX loses at grazing angles is
+// counted as absorbed, so the surface emits it -- consistent with Kirchhoff for
+// this BRDF, and a few percent at most (check_directional_fresnel.py measures it).
+struct InterfaceLobe {
+    float3 wi;     // the sampled direction
+    float  VdotH;  // at the sampled half vector
+    float  g;      // G2/G1; zero when the draw left the hemisphere (lost energy)
+    float  pdf;    // solid-angle density of wi
+};
+
+// Whether a material takes the lobe at this wavelength: measured n,k here, and
+// no measured curve that outranks it. A material that also layers sheen, a
+// coat or diffuse transmission keeps the isotropic R0 stand-in, because those
+// layers carve their share out of one total reflectance and the lobe has no
+// such total to carve from.
+bool InfraredInterfaceLobe(MaterialData material, float lambda, bool layered) {
+    return !layered &&
+           material.spectralReflectanceCurveIndex < 0 &&
+           material.irEmissivityCurveIndex < 0 &&
+           material.sheenReflectanceCurveIndex < 0 &&
+           material.clearcoatReflectanceCurveIndex < 0 &&
+           material.diffuseTransmissionColorCurveIndex < 0 &&
+           ComplexRefractiveIndexCovers(complexRefractiveIndices,
+                                        material.complexRefractiveIndexIndex, lambda);
+}
+
+// Draws from the slot SampleBounce uses for its direction: it is the same
+// decision, made by a different lobe.
+InterfaceLobe SampleInterfaceLobe(float3 N, float3 V, float roughness,
+                                  inout PathVertex payload) {
+    InterfaceLobe s;
+    s.wi = N;
+    s.VdotH = 1.0;
+    s.g = 0.0;
+    s.pdf = 0.0;
+    const float r = max(roughness, MIN_BOUNCE_ROUGHNESS);
+    const float alpha = r * r;
+    float pdf;
+    const float3 wi = SampleGGXVNDF(N, V, alpha,
+                                    PathSample2D(payload, SAMPLE_SLOT_DIRECTION), pdf);
+    const float NdotWi = dot(N, wi);
+    if (!(NdotWi > 0.0) || !(pdf > 1e-6)) {
+        return s;
+    }
+    const float NdotV = max(dot(N, V), 1e-4);
+    s.wi = wi;
+    s.pdf = pdf;
+    s.VdotH = saturate(dot(V, normalize(V + wi)));
+    s.g = SmithG2_GGXCorrelated(NdotV, NdotWi, alpha) / max(SmithG1_GGX(NdotV, alpha), 1e-4);
+    return s;
+}
+
+float InterfaceFresnel(MaterialData material, float cosTheta, float lambda) {
+    const float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices,
+                                                   material.complexRefractiveIndexIndex, lambda);
+    return FresnelConductor(cosTheta, nk.x, nk.y);
+}
+
+// w(lambda) of one sample. The cap at 1 - tau is the same finite-energy guard
+// InfraredSurfaceFractions applies; F * G2/G1 is at most one by itself.
+float InterfaceWeight(MaterialData material, InterfaceLobe s, float tau, float lambda) {
+    if (!(s.g > 0.0)) {
+        return 0.0;
+    }
+    return min(InterfaceFresnel(material, s.VdotH, lambda) * s.g, max(1.0 - tau, 0.0));
+}
+
+// The sun through the same lobe: f * cos(theta_L) = F(V.h) D G2 / (4 NdotV),
+// returned without its F so a wavelength loop pays for the geometry once.
+float InterfaceSunGeometry(float3 N, float3 V, float3 L, float roughness, out float VdotH) {
+    VdotH = 1.0;
+    const float NdotL = dot(N, L);
+    const float NdotV = dot(N, V);
+    if (!(NdotL > 0.0) || !(NdotV > 0.0)) {
+        return 0.0;
+    }
+    const float r = max(roughness, MIN_BOUNCE_ROUGHNESS);
+    const float alpha = r * r;
+    const float3 H = normalize(V + L);
+    VdotH = saturate(dot(V, H));
+    return DistributionGGX(saturate(dot(N, H)), alpha) *
+           SmithG2_GGXCorrelated(NdotV, NdotL, alpha) / (4.0 * NdotV);
+}
+
+// The traced half of the lobe, from a sample already drawn. Mirrors the tail of
+// SampleBounce; the roulette survives with probability w(lambda_b), so the
+// weight that comes back is exactly one wherever it applies.
+bool RequestInterfaceBounce(float3 hitPos, float3 normal, InterfaceLobe s, float w_b,
+                            float lambda_b, inout PathVertex payload,
+                            out float4 weightOut, out ChildRequest req) {
+    weightOut = float4(0.0, 0.0, 0.0, 0.0);
+    req = (ChildRequest)0;
+    if (!(s.g > 0.0) || !(w_b > 0.0)) {
+        return false;
+    }
+    if (payload.depth >= MAX_PATH_DEPTH) {
+        FusionMarkUnknownTail();
+        return false;
+    }
+    float weight = w_b;
+    if (payload.depth >= BOUNCE_DEPTH_DETERMINISTIC) {
+        const float q = min(w_b, 1.0);
+        if (pcg_float(payload.rngState) >= q) {
+            return false;
+        }
+        weight = w_b / q;
+    }
+    RayDesc bounceRay;
+    bounceRay.Origin    = hitPos + normal * 1e-3;
+    bounceRay.Direction = s.wi;
+    bounceRay.TMin      = 0.0;
+    bounceRay.TMax      = 1e9;
+    req.ray        = bounceRay;
+    req.rayFlags   = RAY_FLAG_NONE;
+    req.depth      = payload.depth + 1;
+    req.rng        = payload.rngState;
+    req.heroLambda = (payload.heroLambda < 0.0) ? -lambda_b : lambda_b;
+    req.bsdfPdf    = s.pdf;
+    weightOut      = weight;
+    return true;
+}
+
+// ============================================================================
 // Closest Hit Entry Point
 // ============================================================================
 
@@ -1477,6 +1664,8 @@ bool NextTransmissionChild(inout VertexFrame f, uint depth, inout ChildRequest r
     const float cosI = abs(dot(N, -rayDir));
     const float3 reflectDir = reflect(rayDir, N);
 
+    // Dispersion is a visible-band question (the hero split and the RGB
+    // fan below are both gated on it), so it asks for n,k in the visible.
     const bool materialDisperses = (material.dispersion > 0.001) ||
                                    ComplexRefractiveIndexCovers(complexRefractiveIndices,
                                        material.complexRefractiveIndexIndex, 550.0);
@@ -1665,8 +1854,6 @@ void CompleteTransmission(inout VertexFrame f, uint kind, PathVertex child) {
 
         // Extract the channel-specific contribution
         float channelValue = (ch == 0u) ? child.radiance.r :
-    // Dispersion is a visible-band question (the hero split and the RGB
-    // fan below are both gated on it), so it asks for n,k in the visible.
                              (ch == 1u) ? child.radiance.g :
                                           child.radiance.b;
 
@@ -4298,8 +4485,21 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
             : (uint)clamp(round((lambda_b - SWIR_LAMBDA_MIN) / lambda_step),
                           0.0, float(NUM_SWIR_SAMPLES - 1));
 
-        const float rho_b = InfraredSurfaceFractions(
-            material, endmemberW, metallic, roughness, lambda_b).x;
+        // A measured n,k interface takes the directional Fresnel lobe, as in
+        // the thermal branch (see InterfaceLobe); layered materials keep R0.
+        const bool lobeIr = InfraredInterfaceLobe(material, lambda_b, hasClearcoat || hasDT);
+        InterfaceLobe lobeS = (InterfaceLobe)0;
+        if (lobeIr) {
+            lobeS = SampleInterfaceLobe(normal, V, roughness, payload);
+        }
+        float sunVdotH = 1.0;
+        const float sunGeometry = lobeIr
+            ? InterfaceSunGeometry(normal, V, L, roughness, sunVdotH)
+            : 0.0;
+        const float3 fractions_b = InfraredSurfaceFractions(
+            material, endmemberW, metallic, roughness, lambda_b);
+        const float rho_b = lobeIr ? InterfaceWeight(material, lobeS, fractions_b.z, lambda_b)
+                                   : fractions_b.x;
 
         // The base is the loop's own sky radiance, at lambda_b. Continuous in
         // wavelength, so unlike the thermal bands there is no grid to snap to.
@@ -4347,7 +4547,12 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
         f.roughness = roughness;
         f.base = L_base_b;
         f.lambdaB = lambda_b;
-        if (SampleBounce(
+        if (lobeIr) {
+            if (RequestInterfaceBounce(swirHitPos, normal, lobeS, wTotal_b, lambda_b,
+                                       payload, f.wChild, req)) {
+                f.ctl |= QL_CTL_BOUNCE_TAKEN;
+            }
+        } else if (SampleBounce(
                 swirHitPos, normal, V, NdotV_swir, roughness,
                 0.0, wTotal_b, wTotal_b, wTotal_b, wTotal_b,
                 lambda_b, aniso, payload, f.wChild, req)) {
@@ -4393,7 +4598,11 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
             // 2. Get spectral reflectance at this wavelength
             const float3 fractions = InfraredSurfaceFractions(
                 material, endmemberW, metallic, roughness, lambda);
-            const float rho_lambda = fractions.x;
+            const float rho_lambda = lobeIr
+                ? InterfaceWeight(material, lobeS, fractions.z, lambda)
+                : fractions.x;
+            const float eps_lambda = lobeIr ? saturate(1.0 - rho_lambda - fractions.z)
+                                            : fractions.y;
 
             // 3. Reflected solar radiance: ρ(λ) × (L_sun(λ) × NdotL × V + L_sky(λ))
             //
@@ -4405,6 +4614,13 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
             // will occlude it.
             float L_reflected = rho_lambda * dtBase * (sun_radiance_lambda * NdotL * shadowFactor
                                               + sky_radiance_lambda);
+            // An interface: its sampled weight against the sky, and a glint
+            // through the same lobe for the sun (x PI undoes the folded 1/PI).
+            if (lobeIr) {
+                L_reflected = rho_lambda * sky_radiance_lambda +
+                              InterfaceFresnel(material, sunVdotH, lambda) * sunGeometry *
+                                  (sun_radiance_lambda * PI) * shadowFactor;
+            }
 
             // 3b. Sheen, layered on and paid for by scaling the Lambertian term
             // down. This band has no diffuse/specular split to layer onto -- one
@@ -4467,7 +4683,7 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
                 // non-absorbing dielectric does not emit, so attenuating what
                 // passes through it is the whole of the coat's thermal effect
                 // in this band.
-                L_emission = fractions.y * L_blackbody * ccBase;
+                L_emission = eps_lambda * L_blackbody * ccBase;
             }
 
             // 4b. Self-emission from a bound spectrum. Separate from the Planck
@@ -4614,8 +4830,21 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
         const uint atmosIdx_b = (uint)clamp(round((lambda_b - NIR_LAMBDA_MIN) / lambda_step),
                                             0.0, float(NUM_NIR_SAMPLES - 1));
 
-        const float rho_b = InfraredSurfaceFractions(
-            material, endmemberW, metallic, roughness, lambda_b).x;
+        // A measured n,k interface takes the directional Fresnel lobe, as in
+        // the thermal branch (see InterfaceLobe); layered materials keep R0.
+        const bool lobeIr = InfraredInterfaceLobe(material, lambda_b, hasClearcoat || hasDT);
+        InterfaceLobe lobeS = (InterfaceLobe)0;
+        if (lobeIr) {
+            lobeS = SampleInterfaceLobe(normal, V, roughness, payload);
+        }
+        float sunVdotH = 1.0;
+        const float sunGeometry = lobeIr
+            ? InterfaceSunGeometry(normal, V, L, roughness, sunVdotH)
+            : 0.0;
+        const float3 fractions_b = InfraredSurfaceFractions(
+            material, endmemberW, metallic, roughness, lambda_b);
+        const float rho_b = lobeIr ? InterfaceWeight(material, lobeS, fractions_b.z, lambda_b)
+                                   : fractions_b.x;
 
         const float L_base_b = hasSpectralSolarLUT
             ? SampleSkyIrradiance(solarSpectralLUT, lambda_b) / PI
@@ -4647,7 +4876,12 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
         f.roughness = roughness;
         f.base = L_base_b;
         f.lambdaB = lambda_b;
-        if (SampleBounce(
+        if (lobeIr) {
+            if (RequestInterfaceBounce(nirHitPos, normal, lobeS, wTotal_b, lambda_b,
+                                       payload, f.wChild, req)) {
+                f.ctl |= QL_CTL_BOUNCE_TAKEN;
+            }
+        } else if (SampleBounce(
                 nirHitPos, normal, V, NdotV_nir, roughness,
                 0.0, wTotal_b, wTotal_b, wTotal_b, wTotal_b,
                 lambda_b, aniso, payload, f.wChild, req)) {
@@ -4693,7 +4927,11 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
             // 2. Get spectral reflectance at this wavelength
             const float3 fractions = InfraredSurfaceFractions(
                 material, endmemberW, metallic, roughness, lambda);
-            const float rho_lambda = fractions.x;
+            const float rho_lambda = lobeIr
+                ? InterfaceWeight(material, lobeS, fractions.z, lambda)
+                : fractions.x;
+            const float eps_lambda = lobeIr ? saturate(1.0 - rho_lambda - fractions.z)
+                                            : fractions.y;
 
             // 3. Reflected solar radiance: ρ(λ) × (L_sun(λ) × NdotL × V + L_sky(λ))
             //
@@ -4702,6 +4940,13 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
             // defensible -- reflected solar is the entire signal here.
             float L_reflected = rho_lambda * dtBase * (sun_radiance_lambda * NdotL * shadowFactor
                                               + sky_radiance_lambda);
+            // An interface: its sampled weight against the sky, and a glint
+            // through the same lobe for the sun (x PI undoes the folded 1/PI).
+            if (lobeIr) {
+                L_reflected = rho_lambda * sky_radiance_lambda +
+                              InterfaceFresnel(material, sunVdotH, lambda) * sunGeometry *
+                                  (sun_radiance_lambda * PI) * shadowFactor;
+            }
 
             // 3b. Sheen, exactly as in SWIR: layered on, the Lambertian term
             // scaled down to pay for it, and the sun term needing its irradiance
@@ -4747,7 +4992,7 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
             // Planck is tiny near room temperature, but a hot surface can emit
             // strongly here. The measured rho sets epsilon by Kirchhoff.
             if (!thermalNegligible) {
-                L_reflected += fractions.y * IRPlanckRadiance(T_surface_nir, lambda) * ccBase;
+                L_reflected += eps_lambda * IRPlanckRadiance(T_surface_nir, lambda) * ccBase;
             }
             // Bound emission is an independent authored source.
             L_reflected += BoundEmissionRadiance(spectralCurves, material, emissive,
@@ -4914,11 +5159,34 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
             : (uint)clamp(round((lambda_b - lambda_min) / lambda_step),
                           0.0, float(NUM_IR_SAMPLES - 1));
 
-        const float rho_b = InfraredSurfaceFractions(
-            material, endmemberW, metallic, roughness, lambda_b).x;
+        // A measured n,k interface takes the directional Fresnel lobe: one half
+        // vector drawn here weights the loop's emission and base and the traced
+        // residual alike (see InterfaceLobe). Everything else keeps the
+        // Lambertian path below, untouched.
+        const bool lobeIr = InfraredInterfaceLobe(material, lambda_b, hasClearcoat || hasDT);
+        InterfaceLobe lobeS = (InterfaceLobe)0;
+        if (lobeIr) {
+            lobeS = SampleInterfaceLobe(normal, V, roughness, payload);
+        }
+        const bool baseTowardWi = lobeIr && lobeS.g > 0.0;
+        float sunVdotH = 1.0;
+        const float sunGeometry = (lobeIr && includeSolarReflection)
+            ? InterfaceSunGeometry(normal, V, L, roughness, sunVdotH)
+            : 0.0;
 
-        const float L_base_b = IRDownwellingRadiance(atmos, atmosIdx_b, lambda_b,
-                                                    T_atmosphere, lut.skyEmissivityClear);
+        float rho_b = InfraredSurfaceFractions(
+            material, endmemberW, metallic, roughness, lambda_b).x;
+        float L_base_b = IRDownwellingRadiance(atmos, atmosIdx_b, lambda_b,
+                                               T_atmosphere, lut.skyEmissivityClear);
+        [branch] if (lobeIr) {
+            const float tau_b = InfraredSurfaceFractions(
+                material, endmemberW, metallic, roughness, lambda_b).z;
+            rho_b = InterfaceWeight(material, lobeS, tau_b, lambda_b);
+            if (baseTowardWi) {
+                L_base_b = IRSkyRadianceToward(atmos, atmosIdx_b, lambda_b, lobeS.wi.y,
+                                               T_atmosphere, lut.skyEmissivityClear);
+            }
+        }
 
         const float3 irHitPos = ray.Origin + ray.Direction * rec.t;
         // qSpec 0, as in the SWIR branch: the loop's reflected term is
@@ -4930,7 +5198,12 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
         f.roughness = roughness;
         f.base = L_base_b;
         f.lambdaB = lambda_b;
-        if (SampleBounce(
+        if (lobeIr) {
+            if (RequestInterfaceBounce(irHitPos, normal, lobeS, rho_b, lambda_b,
+                                       payload, f.wChild, req)) {
+                f.ctl |= QL_CTL_BOUNCE_TAKEN;
+            }
+        } else if (SampleBounce(
                 irHitPos, normal, V, NdotV, roughness,
                 0.0, rho_b, rho_b, rho_b, rho_b,
                 lambda_b, aniso, payload, f.wChild, req)) {
@@ -4960,8 +5233,15 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
             // before.
             const float3 fractions = InfraredSurfaceFractions(
                 material, endmemberW, metallic, roughness, lambda);
-            const float reflectance_l = fractions.x;
-            const float emissivity_l = fractions.y;
+            // The lobe's sample weight at this wavelength, and Kirchhoff along
+            // this view direction from it -- the same w the base below and the
+            // residual in FoldInfrared use.
+            float reflectance_l = fractions.x;
+            float emissivity_l = fractions.y;
+            [branch] if (lobeIr) {
+                reflectance_l = InterfaceWeight(material, lobeS, fractions.z, lambda);
+                emissivity_l = saturate(1.0 - reflectance_l - fractions.z);
+            }
 
             // 1. Self-emission: ε(λ) × L_blackbody(T_surface, λ). ccBase as
             // the SWIR and NIR branches apply it: the coat dims the base's
@@ -4991,8 +5271,15 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
             // stands for the whole hemisphere rather than one direction; or
             // the isotropic blackbody, which is what a scene that asked for
             // neither gets and renders exactly as it always did.
+            //
+            // The lobe's base is the sky toward its own sampled direction
+            // instead: what that ray returns if it escapes.
             float L_down = IRDownwellingRadiance(atmos, atmosIdx, lambda, T_atmosphere,
                                                 lut.skyEmissivityClear);
+            [branch] if (baseTowardWi) {
+                L_down = IRSkyRadianceToward(atmos, atmosIdx, lambda, lobeS.wi.y, T_atmosphere,
+                                             lut.skyEmissivityClear);
+            }
             float L_reflected_atm = reflectance_l * L_down;
 
             // 3. Reflected solar radiance (P2 fix: MWIR daytime solar contribution)
@@ -5021,6 +5308,13 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
                 // sun-path attenuation is folded into the illumination source.
                 float sun_radiance_lambda = sun_irr_lambda / PI;
                 L_reflected_sun = reflectance_l * sun_radiance_lambda * NdotL * shadowFactor;
+                // An interface reflects the sun through its lobe, not
+                // Lambertianly: a glint along the mirror direction and nothing
+                // off it. Same F, D and G2 as the sampled weight.
+                if (lobeIr) {
+                    L_reflected_sun = InterfaceFresnel(material, sunVdotH, lambda) *
+                                      sunGeometry * sun_irr_lambda * shadowFactor;
+                }
 
                 // Sheen, CARVED OUT of the total reflectance rather than added
                 // to it.

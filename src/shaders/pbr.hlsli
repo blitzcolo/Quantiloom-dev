@@ -1027,6 +1027,23 @@ float SmithG1_GGX(float NdotV, float alpha) {
     return 2.0 * c / (c + sqrt(a2 + (1.0 - a2) * c * c));
 }
 
+// Smith's Lambda for GGX, which SmithG1_GGX above is 1 / (1 + Lambda) of.
+float SmithLambda_GGX(float NdotX, float alpha) {
+    const float c = max(NdotX, 1e-4);
+    return 0.5 * (sqrt(1.0 + alpha * alpha * (1.0 / (c * c) - 1.0)) - 1.0);
+}
+
+// The exact height-correlated masking-shadowing term (Heitz 2014, eq. 99),
+// built from the same Lambda as the sampling density's G1. Paired with that G1
+// the VNDF estimator's weight G2/G1 = (1 + L_v) / (1 + L_v + L_l) can never
+// exceed one, which the remapped Schlick fits the shading terms use do not
+// guarantee -- and a weight above one is a surface returning more than it
+// receives. The directional Fresnel lobe (InterfaceLobe in shade_vertex.hlsli)
+// uses this one for every term it forms.
+float SmithG2_GGXCorrelated(float NdotV, float NdotL, float alpha) {
+    return 1.0 / (1.0 + SmithLambda_GGX(NdotV, alpha) + SmithLambda_GGX(NdotL, alpha));
+}
+
 // Sample a half vector from the distribution of VISIBLE normals (Heitz 2018,
 // "Sampling the GGX Distribution of Visible Normals", JCGT 7(4)).
 //

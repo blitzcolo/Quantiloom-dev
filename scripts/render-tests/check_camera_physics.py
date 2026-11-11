@@ -259,9 +259,15 @@ def check_nk(work):
         ("nk_mwir", 4000.0, "MWIR", 600.0, 300.0),
         ("nk_lwir", 10000.0, "LWIR", 400.0, 250.0),
     ):
+        # Smooth, because measured n,k now drives a directional Fresnel
+        # microfacet lobe in the thermal bands: at roughness 0.05 the
+        # top-down view reflects R0 to well inside the tolerance, while the
+        # plate's own roughness 1 would put a rough lobe's directional
+        # albedo, not R0, into the closed form.
         extra = [
             ("lighting", "atmosphere_temperature_k", str(sky)),
             ("refractive_index", '"shadow_scene_open"', json.dumps(relative(nk))),
+            (MATERIAL, "roughness", "0.05"),
         ]
         cfg = case_config(name, work, wavelength=wavelength, band=band,
                           temperature=temperature, emissivity=0.95, spp=64,

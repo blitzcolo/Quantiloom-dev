@@ -3236,10 +3236,30 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     // [spectral_curves] entry is a deliberate override of what the asset
     // carries, and it is also how a scene author corrects an asset they cannot
     // edit.
+    // One exception. A material bound to measured n,k whose config states its
+    // infrared as scalars (ir_emissivity / ir_transmittance) carries a flat
+    // rho = 1 - eps - tau here that the override synthesised from those
+    // scalars, not a measurement. Bound, it would outrank the n,k in every
+    // infrared branch (a reflectance curve is the first source they ask), so
+    // the directional Fresnel lobe would never run; the scalars stay on the
+    // material for the bands its n,k does not reach and for the thermal solve.
+    const auto scalarIrOverNk = [&](const String& name) {
+        if (!config.HasSection("refractive_index"))
+            return false;
+        bool namedNk = false;
+        for (const auto& entry : config.GetSection("refractive_index"))
+            namedNk = namedNk || entry.first == name;
+        return namedNk &&
+               std::any_of(materialTables.begin(), materialTables.end(), [&](const auto& entry) {
+                   return entry.first == name && (entry.second.Has("ir_emissivity") ||
+                                                  entry.second.Has("ir_transmittance"));
+               });
+    };
     u32 boundFromScene = 0;
     for (const auto& mat : scene.materials) {
         if (mat.irReflectanceCurve.empty()) continue;
         if (out.materialNameToCurve.count(mat.name) > 0) continue;
+        if (scalarIrOverNk(mat.name)) continue;
 
         SpectralCurve curve;
         curve.samples = mat.irReflectanceCurve;
@@ -4133,6 +4153,26 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                         "from CRI index {}{}{}",
                         lambda_min, lambda_max, F0_550, kSlots, criIndex,
                         gaps.empty() ? "" : ", no data in ", gapList);
+        }
+
+        // A scalar ir_emissivity is a statement about the whole infrared, and
+        // the CPU surface energy balance reads it as the HEMISPHERICAL
+        // emissivity it is. In the renderer, measured n,k is the better
+        // source wherever it reaches: it is directional (the Fresnel lobe in
+        // shade_vertex.hlsli), where the scalar can only be a Lambertian. So for
+        // a material bound to both, the scalar's GPU curve is dropped and the
+        // scalar itself stays on the material record (RenderCore writes it to
+        // MaterialData::irEmissivity), where the shader reads it only in a band
+        // the n,k does not reach. A measured emissivity CURVE still outranks
+        // n,k: only the config's scalar steps aside.
+        for (const auto& entry : out.materialNameToRefractiveIndex) {
+            const String& name = entry.first;
+            if (declaresIrEmissivity(name) && out.materialNameToIrEmissivityCurve.erase(name) > 0) {
+                QL_LOG_INFO("    '{}': n,k drives the infrared render where it reaches; "
+                            "ir_emissivity stays the thermal solve's hemispherical value and "
+                            "the render's value elsewhere",
+                            name);
+            }
         }
     }
 
