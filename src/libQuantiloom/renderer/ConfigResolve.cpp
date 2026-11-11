@@ -653,7 +653,7 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     // Without the NN atmosphere the thermal sky was one isotropic blackbody:
     // as warm at the zenith as at the horizon, which no sky is. sky_model =
     // "clear_sky" replaces it with the flat-slab law driven by a
-    // Berdahl-Fromberg emissivity, so a surface facing up cools against a
+    // Berdahl-Martin emissivity, so a surface facing up cools against a
     // colder sky than one facing sideways -- the effect that puts frost on a
     // car roof and not on its doors.
     //

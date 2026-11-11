@@ -124,8 +124,9 @@ struct ThermographyParams {
 // renderer derives its clear-sky model from, exposed so a host can show the
 // derived numbers rather than reimplement the correlation to display them.
 //
-// Berdahl & Fromberg, "The thermal radiance of clear skies", Solar Energy
-// 29(4), 1982.
+// Berdahl & Martin, "Emissivity of clear skies", Solar Energy 32(5): 663-664,
+// 1984. The fit's diurnal term +0.013 cos(2 pi t/24) and its pressure term
+// are not used: the emissivity is the daily-mean sea-level value.
 
 /// Dew point in Celsius, Magnus with the WMO coefficients. Exact at RH = 100,
 /// where it returns the air temperature.

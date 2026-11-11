@@ -243,7 +243,7 @@ float IRGraybodyPower(float temperature_K, float emissivity) {
 // Same flat-slab law as AtmosSkyRadianceIR, so the analytic path and the NN
 // path have one shape between them; only where eps0 comes from differs. The
 // host derives it from air temperature and humidity through the
-// Berdahl-Fromberg correlation and ships one number.
+// Berdahl-Martin (1984) correlation and ships one number.
 //
 //   eps(theta) = 1 - (1 - eps0)^sec(theta)
 //   L(lambda, theta) = eps(theta) * B(lambda, T_air)

@@ -104,7 +104,7 @@ struct LightingParams {
     // a thermal camera sees and what drives radiative cooling.
     //
     // Held here rather than the air temperature and humidity it comes from:
-    // the Berdahl-Fromberg correlation and the dew point behind it are CPU
+    // the Berdahl-Martin correlation and the dew point behind it are CPU
     // arithmetic done once per config, and shipping one number instead of two
     // keeps this struct at 80 bytes. Whoever sets it also sets
     // atmosphereTemperature_K to the air temperature.

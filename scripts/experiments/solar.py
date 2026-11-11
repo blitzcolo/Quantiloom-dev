@@ -158,7 +158,7 @@ def dew_point_c(air_temperature_c, relative_humidity_percent):
 
 
 def clear_sky_temperature_k(air_temperature_k, relative_humidity_percent):
-    """Berdahl & Fromberg (1982) effective sky temperature.
+    """Berdahl & Martin (1984) effective sky temperature.
 
     Mirrors skythermal::EffectiveSkyTemperatureK. A forcing CSV can therefore
     carry either this, or a sky temperature inverted from a measured downwelling

@@ -109,7 +109,7 @@ def main():
                 f"{args.longitude:.3f} E on {args.date}, UTC{args.utc_offset:+.0f}.\n")
         f.write(f"# Irradiance: Laue clear-sky, transmittance {args.transmittance}, "
                 f"diffuse 10% of extraterrestrial horizontal.\n")
-        f.write(f"# Sky temperature: Berdahl-Fromberg at RH {args.relative_humidity}%.\n")
+        f.write(f"# Sky temperature: Berdahl-Martin at RH {args.relative_humidity}%.\n")
         f.write(f"# {args.days} identical days: {args.spinup_step_h} h rows through the "
                 f"spin-up, {args.step_h} h on the last. Evaluate at "
                 f"{24 * (args.days - 1)} + hour.\n")

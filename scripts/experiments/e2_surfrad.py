@@ -20,7 +20,7 @@ does not have and then report the difference as physics.
                  The solver absorbs eps*sigma*s*T_sky^4 with s = 1, which is
                  eps*LW_down exactly -- so this injects the measurement with no
                  model in between, and any error is the solver's.
-  (b) modelled   the sky temperature comes from the Berdahl-Fromberg clear-sky
+  (b) modelled   the sky temperature comes from the Berdahl-Martin clear-sky
                  correlation driven by the station's air temperature and
                  humidity. Everything else is identical.
 
@@ -281,7 +281,7 @@ def write_forcing(rows, path, mode, sample_minutes=10, convection="material"):
                     "#   T_sky = (LW_down / sigma)^(1/4). The solver absorbs\n"
                     "#   eps*sigma*s*T_sky^4 with s = 1, i.e. eps*LW_down exactly.\n")
         else:
-            f.write("# sky_k from Berdahl-Fromberg driven by the station's own\n"
+            f.write("# sky_k from Berdahl-Martin driven by the station's own\n"
                     "#   air temperature and relative humidity. Everything else\n"
                     "#   is identical to the measured mode.\n")
         if convection == "wind_h":

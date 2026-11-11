@@ -731,11 +731,13 @@ def dew_point_c(air_temperature_c: float, relative_humidity_percent: float) -> f
 
 
 def clear_sky_emissivity(dew_point_c_value: float) -> float:
-    """Berdahl-Fromberg clear-sky emissivity from the dew point.
+    """Berdahl-Martin clear-sky emissivity from the dew point.
 
-    eps = 0.711 + 0.56 (Tdp/100) + 0.73 (Tdp/100)^2
+    eps = 0.711 + 0.56 (Tdp/100) + 0.73 (Tdp/100)^2     (Tdp in C)
 
-    Solar Energy 29(4), 1982. A hemispherical emissivity: it describes the flux
+    Berdahl & Martin, Solar Energy 32(5): 663-664, 1984, without the fit's
+    diurnal term +0.013 cos(2 pi t/24) and its pressure term. A hemispherical
+    emissivity: it describes the flux
     onto a horizontal surface. The renderer feeds it to the flat-slab law as a
     zenith value instead, which overstates the hemispherical flux by a few
     percent -- the trade is documented in SkyThermal.hpp.
@@ -755,7 +757,7 @@ def clear_sky_radiance(eps0: float, cos_zenith: float, t_air: float,
                        lambda_nm: float) -> float:
     """Flat-slab clear sky, the analytic twin of flat_atmosphere_sky_radiance.
 
-    Same law; eps0 comes from the Berdahl-Fromberg correlation rather than from
+    Same law; eps0 comes from the Berdahl-Martin correlation rather than from
     the network's baked zenith downwelling.
     """
     return flat_atmosphere_sky_radiance(eps0, cos_zenith, t_air, lambda_nm)

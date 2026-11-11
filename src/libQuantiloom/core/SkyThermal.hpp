@@ -9,14 +9,19 @@
  * cloudy one, and why the zenith of an outdoor thermogram is the coldest thing
  * in it.
  *
- * The correlation here is Berdahl and Fromberg's, which relates the sky's
+ * The correlation here is Berdahl and Martin's, which relates the sky's
  * effective emissivity to the dew point alone. Dew point rather than relative
  * humidity because it is the absolute water content that matters, and a dew
  * point of 10 C means the same amount of vapour whatever the air temperature
  * is above it.
  *
- * Berdahl & Fromberg, "The thermal radiance of clear skies", Solar Energy
- * 29(4), 1982. The Magnus coefficients are the WMO's.
+ * Berdahl & Martin, "Emissivity of clear skies", Solar Energy 32(5): 663-664,
+ * 1984 -- not Berdahl & Fromberg (1982), which this used to cite and whose fit
+ * is a different, linear one. The Magnus coefficients are the WMO's.
+ *
+ * The published fit also carries a diurnal term, +0.013 cos(2 pi t / 24)
+ * with t the hour from midnight, and a pressure term, 0.00012 (P - 1000) hPa;
+ * neither is used here, so the value is the daily-mean sea-level sky.
  */
 
 #pragma once
@@ -34,9 +39,11 @@ namespace quantiloom::skythermal {
 /// Exact at RH = 100, where it returns the air temperature.
 [[nodiscard]] f64 DewPointC(f64 airTemperatureC, f64 relativeHumidityPercent);
 
-/// Clear-sky emissivity from the dew point, Berdahl-Fromberg:
+/// Clear-sky emissivity from the dew point, Berdahl & Martin (1984):
 ///
-///   eps = 0.711 + 0.56 (Tdp/100) + 0.73 (Tdp/100)^2
+///   eps = 0.711 + 0.56 (Tdp/100) + 0.73 (Tdp/100)^2      (Tdp in C)
+///
+/// without the fit's diurnal (+0.013 cos(2 pi t/24)) and pressure terms.
 ///
 /// Fitted over dew points from -20 C to 30 C; clamped to [0, 1] outside that,
 /// which the quadratic would otherwise leave. This is a HEMISPHERICAL

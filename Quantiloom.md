@@ -1619,12 +1619,16 @@ add a place to forget to set it.
 
 ### 8.7 Clear-Sky Model
 
-Berdahl & Fromberg (*Solar Energy* 29(4), 1982): dew point from
+Berdahl & Martin (*Solar Energy* 32(5): 663–664, 1984): dew point from
 Magnus–Tetens (WMO coefficients), clear-sky emissivity
 
 ```
-ε = 0.711 + 0.56 (T_dp / 100) + 0.73 (T_dp / 100)²
+ε = 0.711 + 0.56 (T_dp / 100) + 0.73 (T_dp / 100)²      (T_dp in °C)
 ```
+
+The published fit adds a diurnal term `+ 0.013 cos(2πt/24)` (t the hour
+from midnight) and a pressure term `0.00012 (P − 1000)` (hPa); neither is
+used, so the value is the daily-mean sea-level sky.
 
 and effective sky temperature `T_air · ε^(1/4)`.
 
@@ -2807,8 +2811,8 @@ and the missing MIS weight on the bound-emission path (§5.4).
   Efficient Spectral Upsampling. *Computer Graphics Forum*, 38(2).
 - Aguerre, J. P. et al. (2020). Physically Based Simulation and Rendering
   of Urban Thermography. *Computer Graphics Forum*, 39(6).
-- Berdahl, P. & Fromberg, R. (1982). The thermal radiance of clear skies.
-  *Solar Energy*, 29(4).
+- Berdahl, P. & Martin, M. (1984). Emissivity of clear skies.
+  *Solar Energy*, 32(5), 663–664.
 - Veach, E. & Guibas, L. J. (1995). Optimally Combining Sampling
   Techniques for Monte Carlo Rendering. *SIGGRAPH '95*.
 - Wilkie, A. et al. (2014). Hero Wavelength Spectral Sampling.
