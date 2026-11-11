@@ -952,8 +952,12 @@ got before.
 ## Conventions
 
 - Commits: Conventional Commits — `feat:`, `fix(shaders):`, `chore:`.
-- **No Codex session link in a commit message.** No `Codex-Session:` trailer,
-  no `https://Codex.ai/code/...` URL, in the subject, the body or a trailer. Same for
-  PR descriptions.
+- **No AI session link in a commit message**, from any assistant -- Claude Code,
+  Codex, Cursor or another. No `*-Session:` trailer, no session URL
+  (`https://claude.ai/code/...`, `https://chatgpt.com/codex/...` and the like), in the
+  subject, the body or a trailer. Same for PR descriptions.
+- **No AI as an author or co-author.** No `Co-Authored-By:` trailer naming an
+  assistant or a bot address, and no "Generated with ..." footer. The author and
+  committer are the person committing, under their own git identity.
 - clang-tidy runs through clangd via `.clang-tidy` — warnings surface as you edit,
   there is no separate lint command. No formatter is configured; match nearby style.
