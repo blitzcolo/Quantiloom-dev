@@ -78,6 +78,7 @@
 #include <functional>
 #include <memory>
 #include <atomic>
+#include <optional>
 
 namespace quantiloom {
 
@@ -850,6 +851,17 @@ public:
      */
     [[nodiscard]] const AtmosphereNNConfig& GetAtmosphere() const;
 
+    /**
+     * @brief Why this atmosphere cannot be paired with the scene's sun, or empty
+     *
+     * A config whose lighting.solar_lut is a ground-level reference spectrum
+     * (ASTM G-173) is limited to clear sky while the sun is up, and applying
+     * one that is not is refused at load. A host offering an atmosphere
+     * control asks here before SetAtmosphere, so the same rule holds for an
+     * interactive change.
+     */
+    [[nodiscard]] String ReferenceSunConflict(const AtmosphereNNConfig& config) const;
+
     // ========================================================================
     // Environment Map (IBL)
     // ========================================================================
@@ -1140,6 +1152,16 @@ public:
 
     /// Remove all thermal material associations.
     void ClearThermalMaterials();
+
+    /**
+     * @brief The short-wave absorptivity a material's measured reflectance gives
+     *
+     * What the last applied config derived for a solved material from its
+     * bound reflectance curves under the scene's solar LUT -- the value it
+     * solves with when its [[materials]] entry writes no
+     * shortwave_absorptivity. Empty when there was nothing to derive from.
+     */
+    std::optional<f32> GetDerivedShortwaveAbsorptivity(const String& materialName) const;
 
     /**
      * @brief Write the current thermal solve out, one row per element

@@ -902,6 +902,9 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         auto result = ResolveSolarLut(request, options.baseDir, out.mode);
         if (result.has_value()) {
             auto& lut = result.value();
+            out.referenceSun = request.pathOrEqualEnergy != "equal_energy" &&
+                IsGroundReferenceSpectrum(
+                    ResolveConfigPath(request.pathOrEqualEnergy, options.baseDir));
             for (const auto& warning : lut.warnings) {
                 // diag.Warn, not a bare QL_LOG_WARN: these go into
                 // report.messages like every other resolve diagnostic, so a
@@ -1068,6 +1071,19 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     }
     if (out.atmosphere.preset == "disabled") out.atmosphere.enabled = false;
     report.atmosphereEnabled = out.atmosphere.enabled;
+
+    // A ground-level reference sun is one atmosphere's sun. Under any other
+    // air the beam it describes is the wrong beam, so a daytime scene that
+    // pairs it with haze, cloud or rain is refused rather than rendered.
+    if (out.referenceSun &&
+        (config.Has("atmosphere.model_pack") || config.Has("atmosphere.preset")) &&
+        out.atmosphere.preset != "disabled") {
+        if (const String conflict =
+                ReferenceSunAtmosphereConflict(out.atmosphere, out.lighting.sunDirection);
+            !conflict.empty()) {
+            diag.Fatal("atmosphere", "  " + conflict);
+        }
+    }
 
     // An active atmosphere owns the thermal-sky temperature: AtmosSkyRadianceIR
     // divides the network's zenith downwelling by B(T_air) to recover an
@@ -2099,6 +2115,89 @@ Result<ResolvedSolarLut, String> ResolveSolarLut(const SolarLutRequest& request,
     return LutResult(std::move(out));
 }
 
+bool IsGroundReferenceSpectrum(const std::filesystem::path& path) {
+    // ASTM G-173 and its relatives publish the extraterrestrial spectrum
+    // beside the ground-level columns it was attenuated into.
+    for (String label : SpectrumColumnLabels(path)) {
+        std::transform(label.begin(), label.end(), label.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (label.rfind("etr", 0) == 0 || label.find("extraterrestrial") != String::npos)
+            return true;
+    }
+    return false;
+}
+
+String ReferenceSunAtmosphereConflict(const AtmosphereNNConfig& atmosphere,
+                                      const glm::vec3& sunDirection) {
+    if (sunDirection.y <= 0.0f) return {};  // night: no beam to disagree about
+    String why;
+    const auto add = [&](const String& reason) { why += (why.empty() ? "" : ", ") + reason; };
+    char text[96];
+    if (atmosphere.visKm < kClearSkyMinVisibilityKm) {
+        std::snprintf(text, sizeof(text), "visibility %.1f km (clear sky is >= %.0f km)",
+                      atmosphere.visKm, kClearSkyMinVisibilityKm);
+        add(text);
+    }
+    if (atmosphere.ihaze != 1.0) {
+        std::snprintf(text, sizeof(text), "aerosol IHAZE %.0f (the reference is rural, 1)",
+                      atmosphere.ihaze);
+        add(text);
+    }
+    if (atmosphere.icld != 0.0) add("cloud");
+    if (atmosphere.rainrtMmH > 0.0) add("rain");
+    if (why.empty()) return {};
+    return "The sun is above the horizon and lighting.solar_lut is a ground-level "
+           "reference spectrum (ASTM G-173: clear sky, rural aerosol), but the "
+           "[atmosphere] '" + atmosphere.preset + "' has " + why +
+           ". The beam the reference describes is not the beam that air lets through, "
+           "so daytime is limited to clear sky: use preset 'clear' or 'turbulent_clear' "
+           "(vis_km >= 20, ihaze = 1, no cloud or rain), or give a solar_lut computed "
+           "for this atmosphere.";
+}
+
+Result<DerivedShortwaveAbsorptivity, String> DeriveShortwaveAbsorptivity(
+    const SpectralCurve& reflectance, const SpectralCurve& sun, const SpectralCurve& sky) {
+    using DeriveResult = Result<DerivedShortwaveAbsorptivity, String>;
+    if (reflectance.samples.size() < 2 || sun.samples.size() < 2)
+        return DeriveResult::Err("needs a reflectance curve and an illuminant");
+    const f64 lo = reflectance.samples.front().first;
+    const f64 hi = reflectance.samples.back().first;
+    // Trapezoids on the illuminant's own abscissae: a measured solar spectrum
+    // is far denser than any reflectance, and its absorption bands are where
+    // the weighting matters.
+    f64 total = 0.0, covered = 0.0, reflected = 0.0;
+    for (size_t i = 1; i < sun.samples.size(); ++i) {
+        const f64 l0 = sun.samples[i - 1].first;
+        const f64 l1 = sun.samples[i].first;
+        if (l1 <= l0) continue;
+        const f64 e0 =
+            std::max(0.0f, sun.samples[i - 1].second + sky.Evaluate(static_cast<f32>(l0)));
+        const f64 e1 =
+            std::max(0.0f, sun.samples[i].second + sky.Evaluate(static_cast<f32>(l1)));
+        const f64 band = 0.5 * (l1 - l0) * (e0 + e1);
+        total += band;
+        if (l0 < lo || l1 > hi) continue;
+        const f64 r0 = std::clamp<f64>(reflectance.Evaluate(static_cast<f32>(l0)), 0.0, 1.0);
+        const f64 r1 = std::clamp<f64>(reflectance.Evaluate(static_cast<f32>(l1)), 0.0, 1.0);
+        covered += band;
+        reflected += 0.5 * (l1 - l0) * (r0 * e0 + r1 * e1);
+    }
+    if (!(total > 0.0) || !(covered > 0.0))
+        return DeriveResult::Err("the reflectance and the illuminant do not overlap");
+    const f64 fraction = covered / total;
+    if (fraction < 0.5) {
+        char text[160];
+        std::snprintf(text, sizeof(text),
+                      "the reflectance spans %.0f-%.0f nm, %.0f%% of the illuminant's "
+                      "irradiance", lo, hi, fraction * 100.0);
+        return DeriveResult::Err(text);
+    }
+    DerivedShortwaveAbsorptivity out;
+    out.absorptivity = static_cast<f32>(std::clamp(1.0 - reflected / covered, 0.0, 1.0));
+    out.coveredFraction = fraction;
+    return DeriveResult(out);
+}
+
 // ============================================================================
 // Scene-dependent keys
 // ============================================================================
@@ -2274,6 +2373,69 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             }
         }
     }
+
+    // Short-wave absorptivity from a material's measured reflectance. The
+    // illuminant is the scene's own solar LUT (sun + sky), read once whatever
+    // mode renders -- the solve runs in RGB too -- and the reflectance is the
+    // VIS, NIR and SWIR reconstructions of every endmember, averaged.
+    std::optional<std::pair<SpectralCurve, SpectralCurve>> absorptivityIlluminant;
+    bool absorptivityIlluminantTried = false;
+    const auto deriveAbsorptivity =
+        [&](const Material& material) -> Result<DerivedShortwaveAbsorptivity, String> {
+        using DeriveResult = Result<DerivedShortwaveAbsorptivity, String>;
+        if (!material.HasQuantiloomRef())
+            return DeriveResult::Err("it carries no measured reflectance");
+        const auto basisFile = config.Get<String>("spectral.basis_file", "");
+        const auto materialsJson = config.Get<String>("spectral.materials_json", "");
+        if (basisFile.empty() || materialsJson.empty())
+            return DeriveResult::Err("[spectral] names no basis_file/materials_json");
+        if (!absorptivityIlluminantTried) {
+            absorptivityIlluminantTried = true;
+            if (config.Has("lighting.solar_lut")) {
+                SolarLutRequest request;
+                request.pathOrEqualEnergy = config.Get<String>("lighting.solar_lut");
+                const auto cols = config.GetArray<i32>("lighting.solar_lut_columns");
+                if (cols.size() >= 1) request.directColumn = static_cast<u32>(cols[0]);
+                if (cols.size() >= 2) request.diffuseColumn = static_cast<u32>(cols[1]);
+                request.diffuseIsGlobal =
+                    config.Get<bool>("lighting.solar_lut_diffuse_is_global", false);
+                if (auto lut = ResolveSolarLut(request, options.baseDir, SpectralMode::RGB))
+                    absorptivityIlluminant.emplace(std::move(lut.value().sun),
+                                                   std::move(lut.value().sky));
+            }
+        }
+        if (!absorptivityIlluminant)
+            return DeriveResult::Err("the scene names no loadable lighting.solar_lut");
+        Vector<String> refs{material.quantiloomMaterialRef};
+        refs.insert(refs.end(), material.quantiloomExtraRefs.begin(),
+                    material.quantiloomExtraRefs.end());
+        // Each endmember stitched across the three short-wave bands, then the
+        // endmembers averaged on the first one's abscissae.
+        Vector<SpectralCurve> stitched;
+        for (const auto& ref : refs) {
+            SpectralCurve curve;
+            for (const char* band : {"VIS", "NIR", "SWIR"}) {
+                auto part = SpectralIO::ReconstructBasisCurve(
+                    ResolveConfigPath(basisFile, options.baseDir),
+                    ResolveConfigPath(materialsJson, options.baseDir), ref, band);
+                if (!part) continue;
+                for (const auto& sample : part.value().samples)
+                    if (curve.samples.empty() || sample.first > curve.samples.back().first)
+                        curve.samples.push_back(sample);
+            }
+            if (curve.samples.size() < 2)
+                return DeriveResult::Err("'" + ref + "' has no short-wave reconstruction");
+            stitched.push_back(std::move(curve));
+        }
+        SpectralCurve mean = stitched.front();
+        for (auto& [lambda, value] : mean.samples) {
+            f64 sum = 0.0;
+            for (const auto& curve : stitched) sum += curve.Evaluate(lambda);
+            value = static_cast<f32>(sum / static_cast<f64>(stitched.size()));
+        }
+        return DeriveShortwaveAbsorptivity(mean, absorptivityIlluminant->first,
+                                           absorptivityIlluminant->second);
+    };
 
     for (const auto& [name, matTable] : materialTables) {
         auto it = std::find_if(scene.materials.begin(), scene.materials.end(),
@@ -2732,8 +2894,38 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             props.specificHeat_J_kgK = matTable.GetFloat("specific_heat_j_kgk", 900.0f);
             props.thickness_m = matTable.GetFloat("thickness_m", 0.2f);
             props.convection_W_m2K = matTable.GetFloat("convection_h_w_m2k", 5.0f);
-            props.shortwaveAbsorptivity =
-                matTable.GetFloat("shortwave_absorptivity", 0.7f);
+            // Derived from the measured reflectance when the config does not
+            // say; a number written by hand still wins, but is checked against
+            // what the reflectance gives. 0.7 only when there is nothing to
+            // derive from, and said.
+            const auto derived = deriveAbsorptivity(*it);
+            if (derived) out.derivedShortwaveAbsorptivity[name] = derived.value().absorptivity;
+            if (matTable.Has("shortwave_absorptivity")) {
+                props.shortwaveAbsorptivity = matTable.GetFloat("shortwave_absorptivity", 0.7f);
+                if (derived &&
+                    std::abs(props.shortwaveAbsorptivity - derived.value().absorptivity) > 0.05f) {
+                    char text[256];
+                    std::snprintf(text, sizeof(text),
+                                  "  Material '%s': shortwave_absorptivity = %.2f is written by "
+                                  "hand, but its measured reflectance gives %.2f under this "
+                                  "illuminant. Remove the key to use the derived value.",
+                                  name.c_str(), props.shortwaveAbsorptivity,
+                                  derived.value().absorptivity);
+                    diag.Warn("materials.shortwave_absorptivity", text);
+                }
+            } else if (derived) {
+                props.shortwaveAbsorptivity = derived.value().absorptivity;
+                QL_LOG_INFO("  Material '{}': shortwave absorptivity {:.3f} derived from its "
+                            "measured reflectance ({:.0f}% of the illuminant's irradiance "
+                            "covered)",
+                            name, props.shortwaveAbsorptivity,
+                            derived.value().coveredFraction * 100.0);
+            } else {
+                props.shortwaveAbsorptivity = 0.7f;
+                diag.Warn("materials.shortwave_absorptivity",
+                          "  Material '" + name + "': no shortwave_absorptivity and none "
+                          "derivable (" + derived.error() + "); assuming 0.7");
+            }
             props.wetnessFactor = matTable.GetFloat("wetness_factor", 0.0f);
             props.internalHeat_W_m2 = matTable.GetFloat("internal_heat_w_m2", 0.0f);
             props.interiorTemperature_K =

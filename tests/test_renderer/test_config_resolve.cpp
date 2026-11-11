@@ -2762,3 +2762,100 @@ TEST_F(ConfigResolveTest, EpochsCanBeAskedForByName) {
     EXPECT_DOUBLE_EQ(timeline.thermalTimeScale, 8640.0);
     EXPECT_DOUBLE_EQ(timeline.thermalEpochMinMove_m, 0.5);
 }
+
+
+// ============================================================================
+// A ground-level reference sun limits daytime to clear sky
+// ============================================================================
+// ASTM G-173's direct beam is the sun after one clear rural atmosphere. Paired
+// with a hazier [atmosphere] it is a beam that air would not have let through,
+// so the pairing is refused while the sun is up, and only then.
+
+namespace {
+
+void WriteReferenceSpectrum(const std::filesystem::path& path) {
+    std::ofstream file(path);
+    file << "ASTM G173-03 Reference Spectra Derived from SMARTS v. 2.9.2\n"
+            "Wvlgth nm,Etr W*m-2*nm-1,Global tilt  W*m-2*nm-1,Direct+circumsolar W*m-2*nm-1\n"
+            "300,0.45,0.001,0.0005\n"
+            "500,1.9,1.5,1.3\n"
+            "1000,0.75,0.6,0.55\n"
+            "2500,0.06,0.03,0.025\n";
+}
+
+}  // namespace
+
+TEST_F(ConfigResolveTest, AReferenceSunUnderHazeIsRefusedInDaylight) {
+    WriteReferenceSpectrum(testDir / "g173.csv");
+    const std::string lighting = "solar_lut = \"" + (testDir / "g173.csv").string() +
+                                 "\"\nsolar_lut_columns = [4, 3]\n"
+                                 "solar_lut_diffuse_is_global = true\n";
+    const std::string pack = "model_pack = \"" + testDir.string() + "\"\n";
+
+    auto hazy = Parse({.lightingKeys = lighting,
+                       .atmosphereKeys = pack + "preset = \"urban_haze\"\n"});
+    EXPECT_FALSE(ResolveStrict(hazy).has_value());
+    EXPECT_TRUE(HasMessage(report, "atmosphere", ConfigApplyMessage::Severity::Error));
+
+    report = {};
+    auto clear = Parse({.lightingKeys = lighting,
+                        .atmosphereKeys = pack + "preset = \"clear\"\n"});
+    auto resolved = ResolveStrict(clear);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_TRUE(resolved.value().referenceSun);
+
+    // A clear preset with its visibility turned down is no longer clear.
+    report = {};
+    auto murky = Parse({.lightingKeys = lighting,
+                        .atmosphereKeys = pack + "preset = \"clear\"\nvis_km = 8.0\n"});
+    EXPECT_FALSE(ResolveStrict(murky).has_value());
+
+    // At night there is no beam to disagree about. The fixture fixes the sun
+    // overhead, so the night document flips it by hand.
+    report = {};
+    {
+        std::ofstream file(testDir / "night.toml");
+        std::string text = SceneToml{.lightingKeys = lighting,
+                                     .atmosphereKeys = pack + "preset = \"urban_haze\"\n"}
+                               .Render();
+        const auto at = text.find("sun_direction = [0.0, 1.0, 0.0]");
+        ASSERT_NE(at, std::string::npos);
+        text.replace(at, 31, "sun_direction = [0.0, -1.0, 0.0]");
+        file << text;
+    }
+    auto nightConfig = Config::Load((testDir / "night.toml").string());
+    ASSERT_TRUE(nightConfig.has_value());
+    EXPECT_TRUE(ResolveStrict(nightConfig.value()).has_value());
+
+    // A spectrum computed for this air is the user's claim to make.
+    report = {};
+    auto ownSun = Parse({.lightingKeys = "solar_lut = \"equal_energy\"\n",
+                         .atmosphereKeys = pack + "preset = \"urban_haze\"\n"});
+    EXPECT_TRUE(ResolveStrict(ownSun).has_value());
+}
+
+TEST(ShortwaveAbsorptivityTest, IsOneMinusTheIlluminantWeightedReflectance) {
+    // Flat light over 300-1100 nm, a surface white below 700 nm and black above:
+    // it reflects exactly half the light.
+    const SpectralCurve sky({300.0f, 1100.0f}, {0.0f, 0.0f});
+    const SpectralCurve step({300.0f, 699.999f, 700.0f, 1100.0f}, {1.0f, 1.0f, 0.0f, 0.0f});
+    SpectralCurve denseSun;
+    for (int nm = 300; nm <= 1100; ++nm)
+        denseSun.samples.emplace_back(static_cast<f32>(nm), 1.0f);
+    const auto half = DeriveShortwaveAbsorptivity(step, denseSun, sky);
+    ASSERT_TRUE(half.has_value()) << half.error();
+    EXPECT_NEAR(half.value().absorptivity, 0.5f, 2e-3f);
+    EXPECT_NEAR(half.value().coveredFraction, 1.0, 1e-9);
+
+    // The sky counts as light too, and where it is, it weights the answer.
+    SpectralCurve blueSky;
+    for (int nm = 300; nm <= 1100; ++nm)
+        blueSky.samples.emplace_back(static_cast<f32>(nm), nm < 700 ? 1.0f : 0.0f);
+    const auto withSky = DeriveShortwaveAbsorptivity(step, denseSun, blueSky);
+    ASSERT_TRUE(withSky.has_value());
+    EXPECT_NEAR(withSky.value().absorptivity, 1.0f - 2.0f / 3.0f, 2e-3f);
+
+    // A curve spanning less than half the light describes its span, not the surface.
+    const SpectralCurve narrow({300.0f, 500.0f}, {0.2f, 0.2f});
+    EXPECT_FALSE(DeriveShortwaveAbsorptivity(narrow, denseSun, sky).has_value());
+}

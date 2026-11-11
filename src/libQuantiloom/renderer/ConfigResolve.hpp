@@ -68,6 +68,7 @@
 
 #include <glm/glm.hpp>
 
+#include <filesystem>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -216,6 +217,8 @@ struct ResolvedRenderConfig {
     /// when the scene names no solar_lut, which in a spectral mode means it
     /// renders unlit -- the shaders have no RGB fallback.
     std::optional<std::pair<SpectralCurve, SpectralCurve>> solarSunSky;
+    /// The solar_lut is a ground-level reference spectrum (IsGroundReferenceSpectrum).
+    bool referenceSun = false;
 
     /// Assembled from preset plus per-feature overrides. `enabled` is false
     /// unless the scene named [atmosphere] model_pack or preset.
@@ -353,6 +356,12 @@ struct ResolvedMaterialSpectra {
     /// Material: that header is a layout contract, and these are solver inputs
     /// nothing in the shader reads.
     std::unordered_map<String, thermal::ThermalMaterial> thermalMaterials;
+
+    /// The short-wave absorptivity each solved material's measured
+    /// reflectance gives under the scene's illuminant (DeriveShortwaveAbsorptivity),
+    /// whether or not the config also wrote one by hand. A host showing the
+    /// value a material actually solves with reads it here.
+    std::unordered_map<String, f32> derivedShortwaveAbsorptivity;
 
     /// Band-averaged LWIR emissivity per material, Planck-weighted at 300 K.
     /// Computed during ref resolution from the reconstructed LWIR reflectance
@@ -581,5 +590,38 @@ struct ResolvedSolarLut {
 Result<ResolvedSolarLut, String> ResolveSolarLut(const SolarLutRequest& request,
                                                  const String& baseDir,
                                                  SpectralMode mode);
+
+/// The lowest visibility the SDK's own presets still call clear
+/// ('turbulent_clear', 20 km).
+inline constexpr double kClearSkyMinVisibilityKm = 20.0;
+
+/// True when a spectrum file's header carries an extraterrestrial column
+/// beside its ground-level ones -- the shape of ASTM G-173, a sun already
+/// attenuated by one particular clear atmosphere.
+bool IsGroundReferenceSpectrum(const std::filesystem::path& path);
+
+/// Why a ground-level reference sun cannot light this atmosphere in daylight,
+/// or empty when it can: the sun is down, or the air is clear sky (visibility
+/// >= kClearSkyMinVisibilityKm, rural aerosol, no cloud, no rain).
+String ReferenceSunAtmosphereConflict(const AtmosphereNNConfig& atmosphere,
+                                      const glm::vec3& sunDirection);
+
+struct DerivedShortwaveAbsorptivity {
+    f32 absorptivity = 0.0f;
+    /// Share of the illuminant's irradiance inside the reflectance's span.
+    f64 coveredFraction = 0.0;
+};
+
+/**
+ * @brief Short-wave absorptivity of an opaque surface from its reflectance
+ *
+ * alpha_s = 1 - integral(rho E) / integral(E), E = sun + sky, taken over the
+ * wavelengths the reflectance spans (the illuminant's own sample points), so
+ * the weighting is the light the surface is actually under. Fails when the
+ * reflectance covers less than half of the illuminant's irradiance: past that
+ * the number would describe the curve's span, not the surface.
+ */
+Result<DerivedShortwaveAbsorptivity, String> DeriveShortwaveAbsorptivity(
+    const SpectralCurve& reflectance, const SpectralCurve& sun, const SpectralCurve& sky);
 
 }  // namespace quantiloom::rendercore

@@ -110,6 +110,7 @@ quantiloom::ExternalRenderContext::GetCamera() const
 quantiloom::ExternalRenderContext::GetCameraConfig() const
 quantiloom::ExternalRenderContext::GetCameraHistoryStatus() const
 quantiloom::ExternalRenderContext::GetDebugMode() const
+quantiloom::ExternalRenderContext::GetDerivedShortwaveAbsorptivity(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&) const
 quantiloom::ExternalRenderContext::GetDisplayEnhancementParams() const
 quantiloom::ExternalRenderContext::GetElementTrajectory(unsigned int, double, double, unsigned int)
 quantiloom::ExternalRenderContext::GetGPUSensorParams() const
@@ -196,6 +197,7 @@ quantiloom::ExternalRenderContext::ReadPixelValue(unsigned int, unsigned int)
 quantiloom::ExternalRenderContext::RebuildAccelerationStructure()
 quantiloom::ExternalRenderContext::RecordCameraBaseline(quantiloom::GpuCommandRecording const&)
 quantiloom::ExternalRenderContext::RecordQueuedCameraAcquisition(quantiloom::GpuCommandRecording const&)
+quantiloom::ExternalRenderContext::ReferenceSunConflict(quantiloom::AtmosphereNNConfig const&) const
 quantiloom::ExternalRenderContext::RefitAccelerationStructure()
 quantiloom::ExternalRenderContext::RemoveNode(unsigned int)
 quantiloom::ExternalRenderContext::RenderFrame(quantiloom::GpuCommandRecording const&, quantiloom::GpuImageTarget const&)

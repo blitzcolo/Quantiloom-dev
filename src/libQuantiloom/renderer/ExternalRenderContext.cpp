@@ -231,6 +231,12 @@ struct ExternalRenderContext::Impl {
     std::unique_ptr<gpu::Buffer> cameraLightingParamsBuffer;
     std::unique_ptr<gpu::Buffer> criBuffer;
     std::unique_ptr<gpu::Buffer> solarLutBuffer;
+    /// Short-wave absorptivity per material as the last applied config
+    /// derived it from measured reflectance (GetDerivedShortwaveAbsorptivity).
+    std::unordered_map<String, f32> derivedShortwaveAbsorptivity;
+    /// The applied config's solar_lut is a ground-level reference spectrum,
+    /// which limits a daytime atmosphere to clear sky (ReferenceSunConflict).
+    bool referenceSun = false;
     /// The curves behind solarLutBuffer, kept for the camera chain. Present
     /// exactly when an illuminant is bound, which is what HasSolarSpectralLUT
     /// reports.
@@ -1473,6 +1479,7 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     m_impl->RebuildEmissiveGeometry();   // also uploads the lighting params
 
     // 7. Atmosphere. The bake itself is lazy, on the first frame that needs it.
+    m_impl->referenceSun = resolved.referenceSun;
     SetAtmosphere(resolved.atmosphere);
 
     // 8. Camera. AdoptScene took the scene file's camera; the config is the
@@ -1595,6 +1602,7 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             SetThermalSolveParams(tp);
 
             ClearThermalMaterials();
+            m_impl->derivedShortwaveAbsorptivity = spectra.derivedShortwaveAbsorptivity;
             for (const auto& [name, mat] : spectra.thermalMaterials) {
                 ThermalMaterialParams tmp;
                 tmp.isShell = mat.isShell;
@@ -3327,6 +3335,13 @@ void ExternalRenderContext::SetThermalMaterial(const String& materialName,
 
 void ExternalRenderContext::ClearThermalMaterials() {
     if (m_impl->thermalPreview) m_impl->thermalPreview->ClearMaterials();
+}
+
+std::optional<f32> ExternalRenderContext::GetDerivedShortwaveAbsorptivity(
+    const String& materialName) const {
+    const auto found = m_impl->derivedShortwaveAbsorptivity.find(materialName);
+    if (found == m_impl->derivedShortwaveAbsorptivity.end()) return std::nullopt;
+    return found->second;
 }
 
 Result<u32, String> ExternalRenderContext::ThermalElementAt(const PickResult& pick) const {
@@ -6417,6 +6432,12 @@ void ExternalRenderContext::SetAtmosphere(const AtmosphereNNConfig& config) {
 
 const AtmosphereNNConfig& ExternalRenderContext::GetAtmosphere() const {
     return m_impl->atmosphereConfig;
+}
+
+String ExternalRenderContext::ReferenceSunConflict(const AtmosphereNNConfig& config) const {
+    if (!m_impl->referenceSun || !config.enabled || config.preset == "disabled") return {};
+    return rendercore::ReferenceSunAtmosphereConflict(config,
+                                                      m_impl->lightingParams.sunDirection);
 }
 
 // ============================================================================
